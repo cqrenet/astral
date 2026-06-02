@@ -1,0 +1,59 @@
+# Tenant-specific variables for ASTRAL
+#
+# Copy these variables into an Azure DevOps Variable Group (e.g. vg-astral-tenant)
+# and reference that group in your pipeline YAMLs. Do not commit secrets to Git.
+#
+# Example pipeline reference:
+#   variables:
+#     - group: vg-astral-tenant
+#     - template: templates/variables-common.yml
+
+variables:
+  # Required: Microsoft 365 tenant domain
+  - name: TENANT_NAME
+    value: contoso.onmicrosoft.com
+
+  # Required: Azure DevOps service connection name (workload federated credential)
+  - name: SERVICE_CONNECTION_NAME
+    value: sc-astral-backup
+
+  # Required: Git commit identity used by the pipeline
+  - name: USER_NAME
+    value: ASTRAL Backup Service
+
+  # Required: Git commit email used by the pipeline
+  - name: USER_EMAIL
+    value: astral-backup@contoso.com
+
+  # Optional: Agent pool name. Default uses Azure-hosted agents.
+  - name: AGENT_POOL_NAME
+    value: Azure Pipelines
+
+  # Optional: Timezone for light/full run decisions. Must be a valid tz database name.
+  - name: BACKUP_TIMEZONE
+    value: Europe/Prague
+
+  # Optional: Full-run hour in BACKUP_TIMEZONE (24h format, zero-padded).
+  # The main pipeline runs hourly; only this hour triggers a full export.
+  - name: FULL_RUN_HOUR
+    value: "00"
+
+  # Optional: Cron schedule for the main backup pipeline.
+  - name: SCHEDULE_CRON
+    value: "0 * * * *"
+
+  # Optional but recommended: pipeline definition ID of azure-pipelines-restore.yml.
+  # Set this after you have imported the restore pipeline into Azure DevOps.
+  - name: AUTO_REMEDIATE_RESTORE_PIPELINE_ID
+    value: ""
+
+  # Optional: Azure OpenAI settings for AI-assisted PR summaries.
+  # Store AZURE_OPENAI_API_KEY as a secret variable.
+  - name: ENABLE_PR_AI_SUMMARY
+    value: false
+  - name: AZURE_OPENAI_ENDPOINT
+    value: ""
+  - name: AZURE_OPENAI_DEPLOYMENT
+    value: ""
+  - name: AZURE_OPENAI_API_KEY
+    value: ""

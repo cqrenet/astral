@@ -1,0 +1,631 @@
+trigger: none
+pr: none
+
+parameters:
+  - name: dryRun
+    displayName: Dry run only (report, no changes pushed)
+    type: boolean
+    default: true
+  - name: updateAssignments
+    displayName: Update assignments
+    type: boolean
+    default: true
+  - name: removeObjectsNotInBaseline
+    displayName: Remove objects not present in baseline
+    type: boolean
+    default: false
+  - name: includeEntraUpdate
+    displayName: Include Entra updates
+    type: boolean
+    default: false
+  - name: baselineBranch
+    displayName: Baseline branch to restore from
+    type: string
+    default: main
+  - name: baselineRef
+    displayName: Optional historical git ref (branch/tag/commit) to restore from
+    type: string
+    default: ""
+  - name: restoreMode
+    displayName: Restore mode (`full` or `selective`)
+    type: string
+    default: full
+  - name: restorePathsCsv
+    displayName: Selective restore file paths (CSV; repo-relative or intune-relative)
+    type: string
+    default: ""
+  - name: maxWorkers
+    displayName: IntuneCD max workers
+    type: number
+    default: 10
+  - name: excludeCsv
+    displayName: Exclude object categories (comma-separated IntuneCD keys)
+    type: string
+    default: ""
+
+variables:
+  # Tenant-specific values are expected in a variable group (see templates/variables-tenant.yml).
+  # Uncomment the line below after creating the group in your Azure DevOps project.
+  - group: vg-astral-cqre
+  - template: templates/variables-common.yml
+  - name: BACKUP_FOLDER
+    value: tenant-state
+  - name: INTUNE_BACKUP_SUBDIR
+    value: intune
+  - name: INTUNECD_VERSION
+    value: 2.5.0
+
+jobs:
+  - job: restore_from_baseline
+    displayName: Restore tenant from approved baseline
+    pool:
+      name: $(AGENT_POOL_NAME)
+    steps:
+      - checkout: self
+        persistCredentials: true
+
+      # Uncomment the block below for agent-side debugging.
+      # - task: Bash@3
+      #   displayName: DEBUG — dump agent state (restore)
+      #   inputs:
+      #     targetType: inline
+      #     script: |
+      #       set -euo pipefail
+      #       echo "=== Variables ==="
+      #       echo "BACKUP_FOLDER=$(BACKUP_FOLDER)"
+      #       echo "INTUNE_BACKUP_SUBDIR=$(INTUNE_BACKUP_SUBDIR)"
+      #       echo "BASELINE_BRANCH=$(BASELINE_BRANCH)"
+      #       echo "=== Git state ==="
+      #       git branch -a
+      #       git log --oneline -5
+      #       git status --short
+      #       echo "=== File system ==="
+      #       ls -la "$(Build.SourcesDirectory)"
+      #       find "$(BACKUP_FOLDER)" -maxdepth 2 -type d 2>/dev/null || true
+      #   workingDirectory: "$(Build.SourcesDirectory)"
+
+      - task: Bash@3
+        displayName: Checkout approved baseline snapshot
+        inputs:
+          targetType: inline
+          script: |
+            set -euo pipefail
+
+            TARGET_REF_RAW="${{ parameters.baselineRef }}"
+            TARGET_REF="$(echo "$TARGET_REF_RAW" | xargs)"
+            TARGET_REF_LOWER="$(echo "$TARGET_REF" | tr '[:upper:]' '[:lower:]')"
+            if echo "$TARGET_REF" | grep -Eq '^\$\([^)]+\)$'; then
+              TARGET_REF=""
+            elif [ "$TARGET_REF_LOWER" = "none" ] || [ "$TARGET_REF_LOWER" = "null" ] || [ "$TARGET_REF_LOWER" = "n/a" ] || [ "$TARGET_REF_LOWER" = "-" ] || [ "$TARGET_REF_LOWER" = "_none_" ]; then
+              TARGET_REF=""
+            fi
+            if [ -z "$TARGET_REF" ]; then
+              TARGET_REF="${{ parameters.baselineBranch }}"
+            fi
+
+            git fetch --quiet --tags origin
+            git fetch --quiet origin "${{ parameters.baselineBranch }}"
+
+            RESOLVED_REF=""
+            if git rev-parse --verify --quiet "origin/$TARGET_REF^{commit}" >/dev/null; then
+              RESOLVED_REF="origin/$TARGET_REF"
+            elif git rev-parse --verify --quiet "$TARGET_REF^{commit}" >/dev/null; then
+              RESOLVED_REF="$TARGET_REF"
+            elif git fetch --quiet origin "$TARGET_REF" >/dev/null 2>&1; then
+              RESOLVED_REF="FETCH_HEAD"
+            fi
+
+            if [ -z "$RESOLVED_REF" ]; then
+              echo "##vso[task.logissue type=error]Unable to resolve baseline ref '$TARGET_REF'."
+              echo "Checked local ref, origin/<ref>, and direct fetch origin <ref>."
+              exit 1
+            fi
+
+            git checkout --force --detach "$RESOLVED_REF"
+            RESOLVED_COMMIT="$(git rev-parse HEAD)"
+            echo "Restore baseline snapshot selected: requested=$TARGET_REF resolved=$RESOLVED_REF commit=$RESOLVED_COMMIT"
+            echo "##vso[task.setvariable variable=RESTORE_BASELINE_REF]$TARGET_REF"
+            echo "##vso[task.setvariable variable=RESTORE_BASELINE_COMMIT]$RESOLVED_COMMIT"
+            test -d "$(Build.SourcesDirectory)/$(BACKUP_FOLDER)/$(INTUNE_BACKUP_SUBDIR)"
+
+      - task: Bash@3
+        displayName: Install IntuneCD
+        inputs:
+          targetType: inline
+          script: |
+            set -euo pipefail
+            pip3 install "IntuneCD==$(INTUNECD_VERSION)"
+
+      - task: Bash@3
+        displayName: Prepare restore payload scope
+        inputs:
+          targetType: inline
+          script: |
+            set -euo pipefail
+            python3 - <<'PY'
+            import os
+            import pathlib
+            import shutil
+            import sys
+
+            repo_root = pathlib.Path(os.environ["BUILD_SOURCESDIRECTORY"]).resolve()
+            backup_folder = os.environ["BACKUP_FOLDER"]
+            intune_subdir = os.environ["INTUNE_BACKUP_SUBDIR"]
+            restore_mode = os.environ.get("RESTORE_MODE", "").strip().lower() or "full"
+            restore_paths_csv = os.environ.get("RESTORE_PATHS_CSV", "").strip()
+            temp_root = pathlib.Path(os.environ["AGENT_TEMPDIRECTORY"]).resolve() / "restore-scope-intune"
+            intune_root = repo_root / backup_folder / intune_subdir
+
+            if not intune_root.is_dir():
+              print(f"##vso[task.logissue type=error]Intune restore source root not found: {intune_root}")
+              raise SystemExit(1)
+
+            if restore_mode == "full":
+              print(f"Restore mode: full (source={intune_root})")
+              print(f"##vso[task.setvariable variable=RESTORE_SOURCE_PATH]{intune_root}")
+              raise SystemExit(0)
+
+            if restore_mode not in {"selective", "paths"}:
+              print(f"##vso[task.logissue type=error]Unsupported restoreMode '{restore_mode}'. Use 'full' or 'selective'.")
+              raise SystemExit(1)
+
+            raw_items = [item.strip() for item in restore_paths_csv.replace("\n", ",").split(",")]
+            raw_items = [item for item in raw_items if item]
+            if not raw_items:
+              print("##vso[task.logissue type=error]restoreMode=selective requires restorePathsCsv with at least one path.")
+              raise SystemExit(1)
+
+            backup_prefix = f"{backup_folder}/{intune_subdir}/"
+            copied = []
+            errors = []
+
+            if temp_root.exists():
+              shutil.rmtree(temp_root)
+            temp_root.mkdir(parents=True, exist_ok=True)
+
+            def normalize_to_intune_relative(path_text):
+              p = path_text.replace("\\", "/").lstrip("./")
+              if p.startswith("/"):
+                return None
+              if p.startswith(backup_prefix):
+                p = p[len(backup_prefix):]
+              elif p.startswith(f"{intune_subdir}/"):
+                p = p[len(intune_subdir) + 1 :]
+              return p.strip("/")
+
+            for item in raw_items:
+              rel = normalize_to_intune_relative(item)
+              if not rel:
+                errors.append(f"Invalid path '{item}'")
+                continue
+
+              parts = pathlib.PurePosixPath(rel).parts
+              if any(part in {"..", ""} for part in parts):
+                errors.append(f"Path traversal is not allowed: '{item}'")
+                continue
+
+              src = intune_root.joinpath(*parts)
+              if not src.is_file():
+                errors.append(f"Path not found in selected baseline snapshot: '{item}' -> '{src}'")
+                continue
+
+              dst = temp_root.joinpath(*parts)
+              dst.parent.mkdir(parents=True, exist_ok=True)
+              shutil.copy2(src, dst)
+              copied.append(rel)
+
+            if errors:
+              for message in errors:
+                print(f"##vso[task.logissue type=error]{message}")
+              raise SystemExit(1)
+
+            if not copied:
+              print("##vso[task.logissue type=error]No files were prepared for selective restore.")
+              raise SystemExit(1)
+
+            print(f"Restore mode: selective (files={len(copied)})")
+            for rel in copied:
+              print(f" - {backup_folder}/{intune_subdir}/{rel}")
+            print(f"##vso[task.setvariable variable=RESTORE_SOURCE_PATH]{temp_root}")
+            PY
+        env:
+          RESTORE_MODE: ${{ parameters.restoreMode }}
+          RESTORE_PATHS_CSV: ${{ parameters.restorePathsCsv }}
+
+      - task: AzurePowerShell@5
+        displayName: Get Graph token for restore
+        inputs:
+          azureSubscription: $(SERVICE_CONNECTION_NAME)
+          azurePowerShellVersion: LatestVersion
+          ScriptType: inlineScript
+          Inline: |
+            $getTokenParams = @{
+              ResourceTypeName = 'MSGraph'
+              AsSecureString   = $true
+              ErrorAction      = 'Stop'
+            }
+            $tokenCommand = Get-Command Get-AzAccessToken -ErrorAction Stop
+            if ($tokenCommand.Parameters.ContainsKey('ForceRefresh')) {
+              $getTokenParams['ForceRefresh'] = $true
+            }
+            $accessToken = ([PSCredential]::New('dummy', (Get-AzAccessToken @getTokenParams).Token).GetNetworkCredential().Password)
+
+            $tokenParts = $accessToken.Split('.')
+            if ($tokenParts.Length -lt 2) { throw "Invalid Graph access token format." }
+            $payload = $tokenParts[1].Replace('-', '+').Replace('_', '/')
+            switch ($payload.Length % 4) {
+              2 { $payload += '==' }
+              3 { $payload += '=' }
+            }
+            $payloadJson = [System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String($payload))
+            $claims = $payloadJson | ConvertFrom-Json
+            $roles = @($claims.roles)
+            $sortedRoles = $roles | Sort-Object
+            Write-Host "Graph token roles for restore: $($sortedRoles -join ', ')"
+
+            $missingRoles = @()
+            $requiredIntuneWriteRoles = @(
+              'DeviceManagementApps.ReadWrite.All',
+              'DeviceManagementConfiguration.ReadWrite.All',
+              'DeviceManagementManagedDevices.ReadWrite.All',
+              'DeviceManagementRBAC.ReadWrite.All',
+              'DeviceManagementScripts.ReadWrite.All',
+              'DeviceManagementServiceConfig.ReadWrite.All',
+              'Group.Read.All'
+            )
+            foreach ($role in $requiredIntuneWriteRoles) {
+              if (-not ($roles -contains $role)) { $missingRoles += $role }
+            }
+
+            if ("${{ parameters.includeEntraUpdate }}" -eq "true") {
+              $requiredEntraWriteRoles = @(
+                'Policy.Read.All',
+                'Policy.ReadWrite.ConditionalAccess'
+              )
+              foreach ($role in $requiredEntraWriteRoles) {
+                if (-not ($roles -contains $role)) { $missingRoles += $role }
+              }
+            }
+
+            if ($missingRoles.Count -gt 0) {
+              $missingRoles = $missingRoles | Select-Object -Unique | Sort-Object
+              Write-Host "##vso[task.logissue type=error]Graph token is missing restore permissions: $($missingRoles -join ', ')"
+              throw "Service connection token is missing required Graph application permissions for restore."
+            }
+
+            Write-Host "##vso[task.setvariable variable=accessToken;issecret=true]$accessToken"
+
+      - task: Bash@3
+        displayName: Run IntuneCD restore/update
+        inputs:
+          targetType: inline
+          script: |
+            set -euo pipefail
+            echo "RESTORE_SCRIPT_VERSION=2026-03-12.8"
+
+            to_lower() {
+              echo "$1" | tr '[:upper:]' '[:lower:]'
+            }
+
+            DRY_RUN="$(to_lower "$DRY_RUN")"
+            UPDATE_ASSIGNMENTS="$(to_lower "$UPDATE_ASSIGNMENTS")"
+            REMOVE_UNMANAGED="$(to_lower "$REMOVE_UNMANAGED")"
+            ENTRA_UPDATE="$(to_lower "$ENTRA_UPDATE")"
+
+            if [ -z "$(RESTORE_SOURCE_PATH)" ]; then
+              RESTORE_PATH="$(Build.SourcesDirectory)/$(BACKUP_FOLDER)/$(INTUNE_BACKUP_SUBDIR)"
+            else
+              RESTORE_PATH="$(RESTORE_SOURCE_PATH)"
+            fi
+            export RESTORE_PATH_ENV="$RESTORE_PATH"
+
+            python3 - <<'PY'
+            import base64
+            import json
+            import os
+            import pathlib
+            import re
+            import urllib.parse
+            import urllib.request
+
+            root = pathlib.Path(os.environ["RESTORE_PATH_ENV"]).resolve()
+            if not root.exists():
+                print(f"Restore source folder not found; payload normalization skipped: {root}")
+                raise SystemExit(0)
+
+            graph_token = os.environ.get("GRAPH_TOKEN", "").strip()
+            guid_re = re.compile(
+                r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-5][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$"
+            )
+            group_id_cache = {}
+
+            def is_guid(value):
+                return bool(guid_re.match(str(value or "").strip()))
+
+            def resolve_group_id(group_name):
+                name = str(group_name or "").strip()
+                if not name or not graph_token:
+                    return None
+
+                cache_key = name.lower()
+                if cache_key in group_id_cache:
+                    return group_id_cache[cache_key]
+
+                filter_value = name.replace("'", "''")
+                query = urllib.parse.urlencode(
+                    {
+                        "$select": "id,displayName",
+                        "$filter": f"displayName eq '{filter_value}'",
+                    }
+                )
+                url = f"https://graph.microsoft.com/v1.0/groups?{query}"
+                request = urllib.request.Request(
+                    url,
+                    headers={
+                        "Authorization": f"Bearer {graph_token}",
+                        "Accept": "application/json",
+                    },
+                    method="GET",
+                )
+                try:
+                    with urllib.request.urlopen(request, timeout=30) as response:
+                        payload = json.loads(response.read().decode("utf-8"))
+                except Exception:
+                    group_id_cache[cache_key] = None
+                    return None
+
+                values = payload.get("value", []) if isinstance(payload, dict) else []
+                exact = [
+                    item for item in values
+                    if str(item.get("displayName", "")) == name and is_guid(item.get("id"))
+                ]
+                if len(exact) == 1:
+                    resolved = exact[0]["id"]
+                    group_id_cache[cache_key] = resolved
+                    return resolved
+
+                ids = [item.get("id") for item in values if is_guid(item.get("id"))]
+                resolved = ids[0] if len(ids) == 1 else None
+                group_id_cache[cache_key] = resolved
+                return resolved
+
+            def strip_assignment_display_labels(node):
+                removed = 0
+                allowed_assignment_target_keys = {
+                    "@odata.type",
+                    "groupId",
+                    "collectionId",
+                    "deviceAndAppManagementAssignmentFilterId",
+                    "deviceAndAppManagementAssignmentFilterType",
+                }
+                if isinstance(node, dict):
+                    odata_type = str(node.get("@odata.type", "") or "").lower()
+                    is_assignment_target = "assignmenttarget" in odata_type
+
+                    if is_assignment_target:
+                        group_name = (
+                            node.get("groupName")
+                            or node.get("groupDisplayName")
+                            or node.get("displayName")
+                        )
+                        group_id = str(node.get("groupId", "") or "").strip()
+                        is_group_target = "groupassignmenttarget" in odata_type
+                        if is_group_target and not is_guid(group_id):
+                            resolved_group_id = resolve_group_id(group_name)
+                            if resolved_group_id:
+                                node["groupId"] = resolved_group_id
+                                group_id = resolved_group_id
+
+                        for key in list(node.keys()):
+                            if key.startswith("@odata."):
+                                continue
+                            if key not in allowed_assignment_target_keys:
+                                if key in node:
+                                    node.pop(key, None)
+                                    removed += 1
+
+                        # Keep only valid group assignment targets for update payload.
+                        if is_group_target and not is_guid(node.get("groupId")):
+                            node["__drop_assignment_target__"] = True
+                    elif "groupId" in node:
+                        for key in ("groupDisplayName", "groupName", "displayName", "groupType"):
+                            if key in node:
+                                node.pop(key, None)
+                                removed += 1
+
+                    if "targetDisplayName" in node and isinstance(node.get("target"), dict):
+                        node.pop("targetDisplayName", None)
+                        removed += 1
+
+                    for value in node.values():
+                        removed += strip_assignment_display_labels(value)
+                elif isinstance(node, list):
+                    for item in node:
+                        removed += strip_assignment_display_labels(item)
+                return removed
+
+            def prune_invalid_assignment_targets(node):
+                removed = 0
+                if isinstance(node, dict):
+                    assignments = node.get("assignments")
+                    if isinstance(assignments, list):
+                        filtered = []
+                        for assignment in assignments:
+                            target = assignment.get("target") if isinstance(assignment, dict) else None
+                            if isinstance(target, dict) and target.get("__drop_assignment_target__") is True:
+                                removed += 1
+                                continue
+                            filtered.append(assignment)
+                        if len(filtered) != len(assignments):
+                            node["assignments"] = filtered
+                    for value in node.values():
+                        removed += prune_invalid_assignment_targets(value)
+                elif isinstance(node, list):
+                    for item in node:
+                        removed += prune_invalid_assignment_targets(item)
+                return removed
+
+            def remove_internal_markers(node):
+                removed = 0
+                if isinstance(node, dict):
+                    if "__drop_assignment_target__" in node:
+                        node.pop("__drop_assignment_target__", None)
+                        removed += 1
+                    for value in node.values():
+                        removed += remove_internal_markers(value)
+                elif isinstance(node, list):
+                    for item in node:
+                        removed += remove_internal_markers(item)
+                return removed
+
+            normalized_payload_json = 0
+            sanitized_assignment_labels = 0
+            invalid_assignment_targets_removed = 0
+            files_changed = 0
+
+            for path in sorted(root.rglob("*.json")):
+                try:
+                    data = json.loads(path.read_text(encoding="utf-8"))
+                except Exception:
+                    continue
+
+                file_changed = False
+
+                # IntuneCD expects payloadJson as base64 string; backup may store dict/list.
+                # Some exports can be list-root JSON, so only access payloadJson on dict roots.
+                if isinstance(data, dict):
+                    payload = data.get("payloadJson")
+                    if isinstance(payload, (dict, list)):
+                        payload_json = json.dumps(payload, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+                        data["payloadJson"] = base64.b64encode(payload_json).decode("ascii")
+                        normalized_payload_json += 1
+                        file_changed = True
+
+                removed = strip_assignment_display_labels(data)
+                if removed > 0:
+                    sanitized_assignment_labels += removed
+                    file_changed = True
+
+                dropped = prune_invalid_assignment_targets(data)
+                if dropped > 0:
+                    invalid_assignment_targets_removed += dropped
+                    file_changed = True
+
+                # Clean up internal markers used by prune flow.
+                if remove_internal_markers(data) > 0:
+                    file_changed = True
+
+                if file_changed:
+                    path.write_text(json.dumps(data, indent=4, ensure_ascii=False) + "\n", encoding="utf-8")
+                    files_changed += 1
+
+            print(
+                "Restore payload normalization complete: "
+                f"filesChanged={files_changed}, "
+                f"appConfigPayloadJsonNormalized={normalized_payload_json}, "
+                f"assignmentDisplayLabelsRemoved={sanitized_assignment_labels}, "
+                f"invalidAssignmentTargetsRemoved={invalid_assignment_targets_removed}"
+            )
+            PY
+
+            cmd=(
+              IntuneCD-startupdate
+              --token "$(accessToken)"
+              --mode=1
+              --path "$RESTORE_PATH"
+              --exit-on-error
+            )
+
+            if [ "$DRY_RUN" = "true" ]; then
+              cmd+=(--report)
+            fi
+            if [ "$UPDATE_ASSIGNMENTS" = "true" ]; then
+              cmd+=(--update-assignments)
+            fi
+            if [ "$REMOVE_UNMANAGED" = "true" ]; then
+              cmd+=(--remove)
+            fi
+            if [ "$ENTRA_UPDATE" = "true" ]; then
+              cmd+=(--entraupdate)
+            fi
+
+            EXCLUDE_CSV_TRIMMED="$(echo "$EXCLUDE_CSV" | xargs)"
+            EXCLUDE_CSV_NORMALIZED="$(echo "$EXCLUDE_CSV_TRIMMED" | tr '[:upper:]' '[:lower:]')"
+            if [ "$EXCLUDE_CSV_NORMALIZED" = "none" ] || [ "$EXCLUDE_CSV_NORMALIZED" = "null" ] || [ "$EXCLUDE_CSV_NORMALIZED" = "n/a" ] || [ "$EXCLUDE_CSV_NORMALIZED" = "-" ] || [ "$EXCLUDE_CSV_NORMALIZED" = "_none_" ]; then
+              EXCLUDE_CSV_TRIMMED=""
+            fi
+
+            exclude_items=()
+            if [ -n "$EXCLUDE_CSV_TRIMMED" ]; then
+              IFS=',' read -r -a raw_items <<< "$EXCLUDE_CSV_TRIMMED"
+              for item in "${raw_items[@]}"; do
+                trimmed="$(echo "$item" | xargs)"
+                if [ -n "$trimmed" ]; then
+                  exclude_items+=("$trimmed")
+                fi
+              done
+            fi
+
+            has_dms_exclude=0
+            for item in "${exclude_items[@]}"; do
+              if [ "$(echo "$item" | tr '[:upper:]' '[:lower:]')" = "devicemanagementsettings" ]; then
+                has_dms_exclude=1
+                break
+              fi
+            done
+            if [ "$has_dms_exclude" -eq 0 ]; then
+              exclude_items+=("DeviceManagementSettings")
+              echo "Auto-excluding DeviceManagementSettings (IntuneCD update requires interactive auth for this category)."
+            fi
+
+            if [ "${#exclude_items[@]}" -gt 0 ]; then
+              cmd+=(--exclude)
+              cmd+=("${exclude_items[@]}")
+            fi
+
+            echo "Restore command mode: dryRun=$DRY_RUN updateAssignments=$UPDATE_ASSIGNMENTS remove=$REMOVE_UNMANAGED entraupdate=$ENTRA_UPDATE maxWorkers=$MAX_WORKERS sourcePath=$RESTORE_PATH"
+            if [ "${#exclude_items[@]}" -gt 0 ]; then
+              joined_excludes="$(IFS=,; echo "${exclude_items[*]}")"
+              echo "Excluding categories: $joined_excludes"
+            fi
+
+            intunecd_log="${AGENT_TEMPDIRECTORY:-/tmp}/intunecd-restore.log"
+            rm -f "$intunecd_log"
+            set +e
+            "${cmd[@]}" >"$intunecd_log" 2>&1
+            intunecd_rc=$?
+            set -e
+            echo "IntuneCD exit code captured: $intunecd_rc"
+
+            if [ "$intunecd_rc" -ne 0 ]; then
+              echo "IntuneCD restore/update failed with exit code: $intunecd_rc"
+              marker_pattern="error|\\[ERROR\\]|\\[CRITICAL\\]|request failed|failed with status|modelvalidationfailure|traceback|exception|error updating|failed after|unable to|forbidden|unauthorized"
+              marker_count="$(grep -Eic "$marker_pattern" "$intunecd_log" || true)"
+              echo "Detected error-marker lines: $marker_count"
+              echo "Relevant markers from full output (line:number:text):"
+              grep -Ein "$marker_pattern" "$intunecd_log" | tail -n 200 || true
+              echo "First 80 lines of IntuneCD output:"
+              head -n 80 "$intunecd_log" || true
+              echo "Last 120 lines of IntuneCD output:"
+              tail -n 120 "$intunecd_log" || true
+              if [ "${marker_count:-0}" -eq 0 ]; then
+                echo "##vso[task.logissue type=warning]IntuneCD returned non-zero without explicit error markers; treating as successful no-op."
+                intunecd_rc=0
+              fi
+            else
+              echo "Last 60 lines of IntuneCD output:"
+              tail -n 60 "$intunecd_log" || true
+            fi
+
+            if [ "$intunecd_rc" -ne 0 ]; then
+              exit "$intunecd_rc"
+            fi
+          failOnStderr: false
+        env:
+          DRY_RUN: ${{ parameters.dryRun }}
+          UPDATE_ASSIGNMENTS: ${{ parameters.updateAssignments }}
+          REMOVE_UNMANAGED: ${{ parameters.removeObjectsNotInBaseline }}
+          ENTRA_UPDATE: ${{ parameters.includeEntraUpdate }}
+          MAX_WORKERS: ${{ parameters.maxWorkers }}
+          EXCLUDE_CSV: ${{ parameters.excludeCsv }}
+          GRAPH_TOKEN: $(accessToken)

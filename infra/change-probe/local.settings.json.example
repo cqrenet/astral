@@ -1,0 +1,19 @@
+{
+  "IsEncrypted": false,
+  "Values": {
+    "AzureWebJobsStorage": "UseDevelopmentStorage=true",
+    "FUNCTIONS_WORKER_RUNTIME": "python",
+    "PROBE_APP_ID": "",
+    "PROBE_APP_SECRET": "",
+    "TENANT_ID": "",
+    "GRAPH_TOKEN": "",
+    "ADO_ORGANIZATION": "",
+    "ADO_PROJECT": "",
+    "ADO_PIPELINE_ID": "",
+    "ADO_TOKEN": "",
+    "ADO_BRANCH": "main",
+    "PROBE_QUIET_WINDOW_MINUTES": "15",
+    "PROBE_COOLDOWN_MINUTES": "30",
+    "REPO_ROOT": "../../"
+  }
+}

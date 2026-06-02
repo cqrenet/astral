@@ -1,0 +1,120 @@
+trigger: none
+pr: none
+
+# One-time validation pipeline for ASTRAL onboarding.
+# Import this pipeline, run it manually, and verify all checks pass.
+
+variables:
+  # Uncomment after creating your tenant variable group.
+  # - group: vg-astral-tenant
+  - template: ../templates/variables-common.yml
+
+jobs:
+  - job: validate_environment
+    displayName: Validate ASTRAL deployment
+    pool:
+      name: $(AGENT_POOL_NAME)
+    steps:
+      - checkout: self
+        persistCredentials: true
+
+      - task: AzurePowerShell@5
+        displayName: Validate Graph token acquisition
+        inputs:
+          azureSubscription: $(SERVICE_CONNECTION_NAME)
+          azurePowerShellVersion: LatestVersion
+          ScriptType: inlineScript
+          Inline: |
+            $getTokenParams = @{
+              ResourceTypeName = 'MSGraph'
+              AsSecureString   = $true
+              ErrorAction      = 'Stop'
+            }
+            $tokenCommand = Get-Command Get-AzAccessToken -ErrorAction Stop
+            if ($tokenCommand.Parameters.ContainsKey('ForceRefresh')) {
+              $getTokenParams['ForceRefresh'] = $true
+            }
+            $accessToken = ([PSCredential]::New('dummy', (Get-AzAccessToken @getTokenParams).Token).GetNetworkCredential().Password)
+
+            $tokenParts = $accessToken.Split('.')
+            if ($tokenParts.Length -lt 2) { throw "Invalid Graph access token format." }
+            $payload = $tokenParts[1].Replace('-', '+').Replace('_', '/')
+            switch ($payload.Length % 4) {
+              2 { $payload += '==' }
+              3 { $payload += '=' }
+            }
+            $payloadJson = [System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String($payload))
+            $claims = $payloadJson | ConvertFrom-Json
+            $roles = @($claims.roles)
+            $sortedRoles = $roles | Sort-Object
+            Write-Host "Graph token roles: $($sortedRoles -join ', ')"
+
+            $requiredReadRoles = @(
+              "Device.Read.All",
+              "DeviceManagementApps.Read.All",
+              "DeviceManagementConfiguration.Read.All",
+              "DeviceManagementManagedDevices.Read.All",
+              "DeviceManagementRBAC.Read.All",
+              "DeviceManagementScripts.Read.All",
+              "DeviceManagementServiceConfig.Read.All",
+              "Group.Read.All",
+              "Policy.Read.All",
+              "Policy.Read.ConditionalAccess",
+              "Policy.Read.DeviceConfiguration",
+              "User.Read.All",
+              "Application.Read.All"
+            )
+
+            $missing = $requiredReadRoles | Where-Object { $_ -notin $sortedRoles }
+            if ($missing) {
+              throw "Missing required Graph roles: $($missing -join ', ')"
+            }
+            Write-Host "All required read roles are present." -ForegroundColor Green
+
+            # Export token for subsequent steps
+            Write-Host "##vso[task.setvariable variable=GRAPH_TOKEN;issecret=true]$accessToken"
+
+      - task: Bash@3
+        displayName: Validate Graph read access
+        inputs:
+          targetType: inline
+          script: |
+            set -euo pipefail
+            TOKEN="$(GRAPH_TOKEN)"
+            URL="https://graph.microsoft.com/v1.0/organization?$select=id,displayName"
+            RESPONSE=$(curl -sf -H "Authorization: Bearer $TOKEN" "$URL")
+            echo "Graph read test response: $RESPONSE"
+            echo "Graph connectivity confirmed."
+
+      - task: Bash@3
+        displayName: Validate PR creation permission
+        inputs:
+          targetType: inline
+          script: |
+            set -euo pipefail
+            TOKEN="$(System.AccessToken)"
+            COLLECTION_URI="$(System.CollectionUri)"
+            PROJECT="$(System.TeamProject)"
+            REPO_ID="$(Build.Repository.ID)"
+            API="${COLLECTION_URI%/}/${PROJECT}/_apis/git/repositories/${REPO_ID}/pullrequests?api-version=7.1"
+
+            BODY=$(cat <<EOF
+            {
+              "sourceRefName": "refs/heads/main",
+              "targetRefName": "refs/heads/main",
+              "title": "ASTRAL validation test PR",
+              "description": "This is a temporary PR created by the validate-deployment pipeline. It will be abandoned immediately.",
+              "isDraft": true
+            }
+            EOF
+            )
+
+            echo "Creating test PR..."
+            PR_RESPONSE=$(curl -sf -u ":$TOKEN" -H "Content-Type: application/json" -d "$BODY" "$API")
+            PR_ID=$(echo "$PR_RESPONSE" | python3 -c "import sys,json; print(json.load(sys.stdin)['pullRequestId'])")
+            echo "Created test PR #$PR_ID"
+
+            ABANDON_API="${COLLECTION_URI%/}/${PROJECT}/_apis/git/repositories/${REPO_ID}/pullrequests/${PR_ID}?api-version=7.1"
+            echo "Abandoning test PR #$PR_ID..."
+            curl -sf -u ":$TOKEN" -H "Content-Type: application/json" -X PATCH -d '{"status":"abandoned"}' "$ABANDON_API"
+            echo "PR creation and abandonment successful."

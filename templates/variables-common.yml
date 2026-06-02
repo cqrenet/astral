@@ -1,0 +1,48 @@
+# Common variables shared across backup and review-sync pipelines.
+# Include with: variables: [ template: templates/variables-common.yml ]
+
+variables:
+  - name: BASELINE_BRANCH
+    value: main
+  - name: DRIFT_BRANCH_INTUNE
+    value: drift/intune
+  - name: DRIFT_BRANCH_ENTRA
+    value: drift/entra
+  - name: BACKUP_FOLDER
+    value: tenant-state
+  - name: REPORTS_SUBDIR
+    value: reports
+  - name: ENABLE_WORKLOAD_INTUNE
+    value: true
+  - name: ENABLE_WORKLOAD_ENTRA
+    value: true
+  - name: ENABLE_PR_REVIEW_SUMMARY
+    value: true
+  - name: ENABLE_PR_REVIEWER_DECISIONS
+    value: true
+  - name: ENABLE_PR_AI_SUMMARY
+    value: true
+  - name: ROLLING_PR_DELAY_REVIEWER_NOTIFICATIONS
+    value: true
+  - name: REQUIRE_CHANGE_TICKETS
+    value: false
+  - name: CHANGE_TICKET_REGEX
+    value: "[A-Z][A-Z0-9]+-[0-9]+"
+  - name: DEBUG_CHANGE_TICKET_THREADS
+    value: false
+  - name: AZURE_OPENAI_API_VERSION
+    value: "2024-12-01-preview"
+  - name: AUTO_REMEDIATE_AFTER_MERGE
+    value: true
+  - name: AUTO_REMEDIATE_AFTER_MERGE_LOOKBACK_HOURS
+    value: 168
+  - name: AUTO_REMEDIATE_DRY_RUN
+    value: false
+  - name: AUTO_REMEDIATE_UPDATE_ASSIGNMENTS
+    value: true
+  - name: AUTO_REMEDIATE_REMOVE_OBJECTS
+    value: false
+  - name: AUTO_REMEDIATE_MAX_WORKERS
+    value: 10
+  - name: AUTO_REMEDIATE_EXCLUDE_CSV
+    value: ""

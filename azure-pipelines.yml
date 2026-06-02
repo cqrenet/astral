@@ -1,0 +1,2213 @@
+trigger: none
+
+parameters:
+  - name: forceFullRun
+    type: boolean
+    default: false
+
+schedules:
+  - cron: "0 2 * * *"
+    displayName: "Daily full backup and report generation"
+    branches:
+      include:
+        - main
+    always: true
+    batch: true
+
+variables:
+  # Tenant-specific values are expected in a variable group (see templates/variables-tenant.yml).
+  # Uncomment the line below after creating the group in your Azure DevOps project.
+  - group: vg-astral-cqre
+  - template: templates/variables-common.yml
+  - name: ROLLING_PR_TITLE_INTUNE
+    value: "Intune drift review (rolling)"
+  - name: ROLLING_PR_TITLE_ENTRA
+    value: "Entra drift review (rolling)"
+  - name: INTUNE_BACKUP_SUBDIR
+    value: intune
+  - name: ENTRA_BACKUP_SUBDIR
+    value: entra
+  - name: INTUNECD_VERSION
+    value: 2.5.0
+  - name: MD_TO_PDF_VERSION
+    value: 5.2.5
+  - name: EXCLUDE_SCRIPT_BACKUP
+    value: false
+  - name: ENABLE_ENTRA_CONDITIONAL_ACCESS
+    value: true
+  - name: INTUNE_EXCLUDE_CSV
+    value: ""
+  - name: ENTRA_INCLUDE_NAMED_LOCATIONS
+    value: true
+  - name: ENTRA_INCLUDE_AUTHENTICATION_STRENGTHS
+    value: true
+  - name: ENTRA_INCLUDE_CONDITIONAL_ACCESS
+    value: true
+  - name: ENTRA_INCLUDE_ENTERPRISE_APPS
+    value: true
+  - name: ENTRA_ENTERPRISE_APP_WORKERS
+    value: 8
+  - name: ENTRA_INCLUDE_APP_REGISTRATIONS
+    value: true
+  - name: SPLIT_DOCUMENTATION
+    value: true
+  - name: ENABLE_TAGGING
+    value: false
+  - name: ROLLING_PR_MERGE_STRATEGY
+    value: rebase
+  - name: AUTO_REMEDIATE_ON_PR_REJECTION
+    value: true
+
+jobs:
+  - job: test_python
+    displayName: Run Python unit tests
+    pool:
+      name: $(AGENT_POOL_NAME)
+    steps:
+      - checkout: self
+
+      - task: Bash@3
+        displayName: unittest discover
+        inputs:
+          targetType: inline
+          script: |
+            set -euo pipefail
+            python3 -m unittest discover -s tests -v
+          workingDirectory: "$(Build.SourcesDirectory)"
+
+  - job: backup_intune
+    displayName: Backup & commit Intune configuration
+    condition: eq(variables['ENABLE_WORKLOAD_INTUNE'], 'true')
+    pool:
+      name: $(AGENT_POOL_NAME)
+    continueOnError: false
+    steps:
+      - checkout: self
+        persistCredentials: true
+
+      # Uncomment the block below for agent-side debugging.
+      # - task: Bash@3
+      #   displayName: DEBUG — dump agent state (Intune)
+      #   inputs:
+      #     targetType: inline
+      #     script: |
+      #       set -euo pipefail
+      #       echo "=== Variables ==="
+      #       echo "BACKUP_FOLDER=$(BACKUP_FOLDER)"
+      #       echo "INTUNE_BACKUP_SUBDIR=$(INTUNE_BACKUP_SUBDIR)"
+      #       echo "DRIFT_BRANCH_INTUNE=$(DRIFT_BRANCH_INTUNE)"
+      #       echo "BASELINE_BRANCH=$(BASELINE_BRANCH)"
+      #       echo "AGENT_POOL_NAME=$(AGENT_POOL_NAME)"
+      #       echo "=== Git state ==="
+      #       git branch -a
+      #       git log --oneline -5
+      #       git status --short
+      #       echo "=== File system ==="
+      #       ls -la "$(Build.SourcesDirectory)"
+      #       find "$(BACKUP_FOLDER)" -maxdepth 2 -type d 2>/dev/null || true
+      #   workingDirectory: "$(Build.SourcesDirectory)"
+
+      - task: Bash@3
+        displayName: Snapshot validation helper script (Intune job)
+        inputs:
+          targetType: inline
+          script: |
+            set -euo pipefail
+            SCRIPT_ROOT="$(Agent.TempDirectory)/pipeline-scripts-intune"
+            rm -rf "$SCRIPT_ROOT"
+            mkdir -p "$SCRIPT_ROOT"
+            cp "$(Build.SourcesDirectory)/scripts/validate_backup_outputs.py" "$SCRIPT_ROOT/validate_backup_outputs.py"
+            chmod +x "$SCRIPT_ROOT/validate_backup_outputs.py"
+            echo "##vso[task.setvariable variable=PIPELINE_SCRIPT_ROOT]$SCRIPT_ROOT"
+          workingDirectory: "$(Build.SourcesDirectory)"
+          failOnStderr: true
+
+      - task: Bash@3
+        displayName: Prepare drift branch from baseline
+        inputs:
+          targetType: inline
+          script: |
+            set -euo pipefail
+            if git ls-remote --exit-code --heads origin "$(DRIFT_BRANCH_INTUNE)" >/dev/null 2>&1; then
+              git fetch --quiet origin "$(BASELINE_BRANCH)" "$(DRIFT_BRANCH_INTUNE)"
+            else
+              git fetch --quiet origin "$(BASELINE_BRANCH)"
+            fi
+            git checkout --force -B "$(DRIFT_BRANCH_INTUNE)" "origin/$(BASELINE_BRANCH)"
+          workingDirectory: "$(Build.SourcesDirectory)"
+          failOnStderr: false
+
+      - task: Bash@3
+        displayName: Determine run mode (light vs full)
+        name: setRunMode
+        inputs:
+          targetType: inline
+          script: |
+            set -euo pipefail
+            LOCAL_NOW="$(TZ=$(BACKUP_TIMEZONE) date '+%Y-%m-%d %H:%M:%S %Z')"
+            LOCAL_HOUR="$(TZ=$(BACKUP_TIMEZONE) date '+%H')"
+            FORCE_FULL_PARAM="$(echo '${{ parameters.forceFullRun }}' | tr '[:upper:]' '[:lower:]')"
+            if [ "$FORCE_FULL_PARAM" = "true" ]; then
+              FULL_RUN=1
+              MODE="full"
+              REASON="forced by parameter forceFullRun=true"
+            elif [ "$LOCAL_HOUR" = "$(FULL_RUN_HOUR)" ]; then
+              FULL_RUN=1
+              MODE="full"
+              REASON="scheduled midnight full run"
+            else
+              FULL_RUN=0
+              MODE="light"
+              REASON="default hourly light run"
+            fi
+            echo "Run mode decision: $MODE ($REASON; local time ($(BACKUP_TIMEZONE)): $LOCAL_NOW)"
+            echo "##vso[task.setvariable variable=FULL_RUN]$FULL_RUN"
+            echo "##vso[task.setvariable variable=FULL_RUN;isOutput=true]$FULL_RUN"
+          workingDirectory: "$(Build.SourcesDirectory)"
+          failOnStderr: true
+
+      - task: Bash@3
+        displayName: Reset backup workspace for Intune workload
+        inputs:
+          targetType: inline
+          script: |
+            set -euo pipefail
+            INTUNE_ROOT="$(Build.SourcesDirectory)/$(BACKUP_FOLDER)/$(INTUNE_BACKUP_SUBDIR)"
+            INTUNE_REPORTS_ROOT="$(Build.SourcesDirectory)/$(BACKUP_FOLDER)/$(REPORTS_SUBDIR)/intune"
+            rm -rfv "$INTUNE_ROOT"
+            rm -rfv "$INTUNE_REPORTS_ROOT"
+            mkdir -p "$INTUNE_ROOT"
+          workingDirectory: "$(Build.SourcesDirectory)"
+          failOnStderr: false
+
+      - task: Bash@3
+        displayName: Install IntuneCD
+        inputs:
+          targetType: inline
+          script: |
+            set -euo pipefail
+            pip3 install "IntuneCD==$(INTUNECD_VERSION)"
+          workingDirectory: "$(Build.SourcesDirectory)"
+          failOnStderr: true
+
+      - task: AzurePowerShell@5
+        displayName: Get Graph Token for Workload Federated Credential
+        inputs:
+          azureSubscription: $(SERVICE_CONNECTION_NAME)
+          azurePowerShellVersion: LatestVersion
+          ScriptType: inlineScript
+          Inline: |
+            $getTokenParams = @{
+              ResourceTypeName = 'MSGraph'
+              AsSecureString   = $true
+              ErrorAction      = 'Stop'
+            }
+            $tokenCommand = Get-Command Get-AzAccessToken -ErrorAction Stop
+            if ($tokenCommand.Parameters.ContainsKey('ForceRefresh')) {
+              $getTokenParams['ForceRefresh'] = $true
+              Write-Host "Requesting Graph token with ForceRefresh=true"
+            } else {
+              Write-Host "Get-AzAccessToken does not support ForceRefresh in this Az.Accounts version"
+            }
+            $accessToken = ([PSCredential]::New('dummy', (Get-AzAccessToken @getTokenParams).Token).GetNetworkCredential().Password)
+
+            $tokenParts = $accessToken.Split('.')
+            if ($tokenParts.Length -lt 2) { throw "Invalid Graph access token format." }
+            $payload = $tokenParts[1].Replace('-', '+').Replace('_', '/')
+            switch ($payload.Length % 4) {
+              2 { $payload += '==' }
+              3 { $payload += '=' }
+            }
+            $payloadJson = [System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String($payload))
+            $claims = $payloadJson | ConvertFrom-Json
+            $roles = @($claims.roles)
+
+            $appId = [string]$claims.appid
+            $appIdFingerprint = if ($appId.Length -ge 16) { "$($appId.Substring(0,8))...$($appId.Substring($appId.Length-8,8))" } else { $appId }
+            $oid = [string]$claims.oid
+            $sortedRoles = $roles | Sort-Object
+
+            $issuedAt = if ($claims.iat) { [DateTimeOffset]::FromUnixTimeSeconds([int64]$claims.iat).UtcDateTime.ToString("yyyy-MM-ddTHH:mm:ssZ") } else { "n/a" }
+            $expiresAt = if ($claims.exp) { [DateTimeOffset]::FromUnixTimeSeconds([int64]$claims.exp).UtcDateTime.ToString("yyyy-MM-ddTHH:mm:ssZ") } else { "n/a" }
+            Write-Host "Graph token claims: appid=$appId appid(fingerprint)=$appIdFingerprint oid=$oid tid=$($claims.tid) aud=$($claims.aud) iat=$issuedAt exp=$expiresAt"
+            Write-Host "Graph token roles: $($sortedRoles -join ', ')"
+
+            $requiredRoles = @('DeviceManagementScripts.Read.All', 'DeviceManagementScripts.ReadWrite.All')
+            if (-not ($roles | Where-Object { $requiredRoles -contains $_ })) {
+              if ("$(EXCLUDE_SCRIPT_BACKUP)" -eq "true") {
+                Write-Host "##vso[task.logissue type=warning]Graph token does not contain DeviceManagementScripts.Read.All or DeviceManagementScripts.ReadWrite.All."
+                Write-Host "##vso[task.logissue type=warning]Continuing because EXCLUDE_SCRIPT_BACKUP=true and script categories are excluded from backup."
+              } else {
+                Write-Host "##vso[task.logissue type=error]Graph token does not contain DeviceManagementScripts.Read.All or DeviceManagementScripts.ReadWrite.All."
+                throw "Service connection token is missing required script permissions."
+              }
+            }
+
+            if ("$(ENABLE_ENTRA_CONDITIONAL_ACCESS)" -ne "true") {
+              $missingConditionalAccessRoles = @()
+              if (-not ($roles -contains 'Policy.Read.All')) { $missingConditionalAccessRoles += 'Policy.Read.All' }
+              if (-not ($roles -contains 'Policy.Read.ConditionalAccess')) { $missingConditionalAccessRoles += 'Policy.Read.ConditionalAccess' }
+              if ($missingConditionalAccessRoles.Count -gt 0) {
+                Write-Host "##vso[task.logissue type=error]Graph token is missing Conditional Access roles: $($missingConditionalAccessRoles -join ', ')"
+                throw "Service connection token is missing required Conditional Access permissions."
+              }
+            }
+
+            if (-not ($roles -contains 'Group.Read.All')) {
+              Write-Host "##vso[task.logissue type=warning]Graph token does not contain Group.Read.All."
+              if ($roles -contains 'GroupSettings.Read.All') {
+                Write-Host "##vso[task.logissue type=warning]GroupSettings.Read.All is present but it does not replace Group.Read.All for assignment target group resolution."
+              }
+              Write-Host "##vso[task.logissue type=warning]Group-assigned targets may be exported without groupId/groupDisplayName."
+            }
+
+            Write-Host "##vso[task.setvariable variable=accessToken;issecret=true]$accessToken"
+
+      - task: Bash@3
+        displayName: Create Intune backup
+        inputs:
+          targetType: inline
+          script: |
+            set -euo pipefail
+            INTUNE_ROOT="$(Build.SourcesDirectory)/$(BACKUP_FOLDER)/$(INTUNE_BACKUP_SUBDIR)"
+            mkdir -p "$INTUNE_ROOT"
+
+            BACKUP_START=$(date +%Y.%m.%d:%H.%M.%S)
+            echo "##vso[task.setVariable variable=BACKUP_START]$BACKUP_START"
+
+            backup_log="$(mktemp)"
+            trap 'rm -f "$backup_log"' EXIT
+
+            EXCLUDE_ARGS=(
+              CompliancePartnerHeartbeat
+              ManagedGooglePlay
+              VPPusedLicenseCount
+            )
+            if [ "$(ENABLE_ENTRA_CONDITIONAL_ACCESS)" = "true" ]; then
+              EXCLUDE_ARGS+=(ConditionalAccess)
+            fi
+            if [ "$(EXCLUDE_SCRIPT_BACKUP)" = "true" ]; then
+              EXCLUDE_ARGS+=(
+                ComplianceScripts
+                CustomAttributes
+                ProactiveRemediation
+                PowershellScripts
+                ShellScripts
+              )
+            fi
+            if [ -n "$(INTUNE_EXCLUDE_CSV)" ]; then
+              IFS=',' read -r -a raw_items <<< "$(INTUNE_EXCLUDE_CSV)"
+              for item in "${raw_items[@]}"; do
+                trimmed="$(echo "$item" | xargs)"
+                if [ -n "$trimmed" ]; then
+                  EXCLUDE_ARGS+=("$trimmed")
+                fi
+              done
+            fi
+
+            set +e
+            IntuneCD-startbackup \
+              --token "$(accessToken)" \
+              --mode=1 \
+              --output=json \
+              --path="$INTUNE_ROOT" \
+              --exclude "${EXCLUDE_ARGS[@]}" \
+              --append-id \
+              --ignore-omasettings \
+              --enrich-documentation \
+              2>&1 | tee "$backup_log"
+            intunecd_exit="${PIPESTATUS[0]}"
+            set -e
+
+            handled_403=0
+            has_auth_403=0
+            if grep -Eiq "Application is not authorized to perform this operation|one of the following scopes|Request failed with status 403" "$backup_log"; then
+              has_auth_403=1
+              if [ "$(EXCLUDE_SCRIPT_BACKUP)" = "true" ] && grep -Eiq "DeviceManagementScripts\\.Read\\.All|DeviceManagementScripts\\.ReadWrite\\.All" "$backup_log"; then
+                echo "##vso[task.logissue type=warning]Ignoring script-related 403 because EXCLUDE_SCRIPT_BACKUP=true."
+                handled_403=1
+              fi
+              if [ "$(ENABLE_ENTRA_CONDITIONAL_ACCESS)" = "true" ] && grep -Eiq "Policy\\.Read\\.ConditionalAccess|conditionalAccess/policies" "$backup_log"; then
+                echo "##vso[task.logissue type=warning]Ignoring Conditional Access-related 403 in Intune workload because ENABLE_ENTRA_CONDITIONAL_ACCESS=true."
+                handled_403=1
+              fi
+              if [ "$handled_403" -ne 1 ]; then
+                echo "##vso[task.logissue type=error]Intune backup has Microsoft Graph authorization failures (HTTP 403)."
+                echo "##vso[task.logissue type=error]Grant required Graph application permissions and admin consent."
+                exit 1
+              fi
+            fi
+
+            non_403_statuses="$(grep -Eo "status[[:space:]]+[0-9]{3}" "$backup_log" | grep -Eo "[0-9]{3}" | sort -u | grep -Ev "^403$" || true)"
+            if [ -n "$non_403_statuses" ]; then
+              echo "##vso[task.logissue type=error]Intune backup log contains non-403 HTTP failures: $non_403_statuses"
+              exit 1
+            fi
+
+            if [ "$intunecd_exit" -ne 0 ]; then
+              if [ "$has_auth_403" -eq 1 ] && [ "$handled_403" -eq 1 ]; then
+                echo "##vso[task.logissue type=warning]IntuneCD exited non-zero, but only allowed 403 scopes were detected for this mode. Continuing."
+              else
+                echo "##vso[task.logissue type=error]IntuneCD backup command failed with exit code $intunecd_exit."
+                exit "$intunecd_exit"
+              fi
+            fi
+          workingDirectory: "$(Build.SourcesDirectory)"
+          failOnStderr: false
+
+      - task: Bash@3
+        displayName: Revert partial Intune Settings Catalog exports
+        inputs:
+          targetType: inline
+          script: |
+            set -euo pipefail
+            python3 "$(Build.SourcesDirectory)/scripts/filter_intune_partial_settings_noise.py" \
+              --repo-root "$(Build.SourcesDirectory)" \
+              --backup-root "$(Build.SourcesDirectory)/$(BACKUP_FOLDER)/$(INTUNE_BACKUP_SUBDIR)" \
+              --baseline-ref "origin/$(BASELINE_BRANCH)" \
+              --fail-on-unresolved-partial-exports true
+          workingDirectory: "$(Build.SourcesDirectory)"
+          failOnStderr: true
+
+      - task: Bash@3
+        displayName: Revert formatting-only Intune JSON exports
+        inputs:
+          targetType: inline
+          script: |
+            set -euo pipefail
+            python3 "$(Build.SourcesDirectory)/scripts/filter_intune_formatting_noise.py" \
+              --repo-root "$(Build.SourcesDirectory)" \
+              --backup-root "$(Build.SourcesDirectory)/$(BACKUP_FOLDER)/$(INTUNE_BACKUP_SUBDIR)" \
+              --baseline-ref "origin/$(BASELINE_BRANCH)"
+          workingDirectory: "$(Build.SourcesDirectory)"
+          failOnStderr: true
+
+      - task: Bash@3
+        displayName: Restore intermittently omitted Intune export files
+        inputs:
+          targetType: inline
+          script: |
+            set -euo pipefail
+            python3 "$(Build.SourcesDirectory)/scripts/filter_intune_omission_noise.py" \
+              --repo-root "$(Build.SourcesDirectory)" \
+              --backup-root "$(Build.SourcesDirectory)/$(BACKUP_FOLDER)/$(INTUNE_BACKUP_SUBDIR)" \
+              --baseline-ref "origin/$(BASELINE_BRANCH)"
+          workingDirectory: "$(Build.SourcesDirectory)"
+          failOnStderr: true
+
+      - task: Bash@3
+        displayName: Resolve assignment group names
+        inputs:
+          targetType: inline
+          script: |
+            set -euo pipefail
+            python3 - <<'PY'
+            import json
+            import os
+            import pathlib
+            import re
+            import urllib.error
+            import urllib.parse
+            import urllib.request
+
+            root = pathlib.Path(os.environ["BUILD_SOURCESDIRECTORY"]) / os.environ["BACKUP_FOLDER"]
+            token = os.environ.get("ACCESS_TOKEN", "").strip()
+            if not token:
+              print("No Graph token available. Skipping assignment group name enrichment.")
+              raise SystemExit(0)
+
+            if not root.exists():
+              print(f"Backup folder not found: {root}. Skipping assignment group name enrichment.")
+              raise SystemExit(0)
+
+            group_target_type = "#microsoft.graph.groupAssignmentTarget"
+            guid_pattern = re.compile(
+              r"([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})"
+            )
+
+            cache = {}
+            assignment_cache = {}
+            looked_up = 0
+            updated_files = 0
+            group_targets_seen = 0
+            group_targets_without_id_before = 0
+            group_targets_without_id_after = 0
+            files_with_missing_group_targets = 0
+            files_with_restored_group_ids = 0
+            restored_group_ids = 0
+            assignment_endpoint_hits = 0
+
+            assignment_endpoint_templates = [
+              "https://graph.microsoft.com/beta/deviceManagement/deviceConfigurations/{object_id}/assignments",
+              "https://graph.microsoft.com/beta/deviceManagement/configurationPolicies/{object_id}/assignments",
+              "https://graph.microsoft.com/beta/deviceManagement/groupPolicyConfigurations/{object_id}/assignments",
+              "https://graph.microsoft.com/beta/deviceManagement/deviceCompliancePolicies/{object_id}/assignments",
+              "https://graph.microsoft.com/beta/deviceManagement/deviceHealthScripts/{object_id}/assignments",
+              "https://graph.microsoft.com/beta/deviceManagement/deviceManagementScripts/{object_id}/assignments",
+              "https://graph.microsoft.com/beta/deviceManagement/deviceShellScripts/{object_id}/assignments",
+              "https://graph.microsoft.com/beta/deviceManagement/deviceCustomAttributeShellScripts/{object_id}/assignments",
+              "https://graph.microsoft.com/beta/deviceManagement/deviceEnrollmentConfigurations/{object_id}/assignments",
+              "https://graph.microsoft.com/beta/deviceManagement/windowsAutopilotDeploymentProfiles/{object_id}/assignments",
+              "https://graph.microsoft.com/beta/deviceAppManagement/mobileApps/{object_id}/assignments",
+              "https://graph.microsoft.com/beta/deviceAppManagement/mobileAppConfigurations/{object_id}/assignments",
+              "https://graph.microsoft.com/beta/deviceAppManagement/targetedManagedAppConfigurations/{object_id}/assignments",
+              "https://graph.microsoft.com/beta/deviceAppManagement/androidManagedAppProtections/{object_id}/assignments",
+              "https://graph.microsoft.com/beta/deviceAppManagement/iosManagedAppProtections/{object_id}/assignments",
+            ]
+
+            def object_id_from_filename(file_path: pathlib.Path):
+              match = guid_pattern.search(file_path.name)
+              if not match:
+                return None
+              return match.group(1)
+
+            def resolve_group_name(group_id: str):
+              nonlocal_vars["looked_up"] += 1
+              if group_id in cache:
+                return cache[group_id]
+              url = (
+                "https://graph.microsoft.com/v1.0/groups/"
+                + urllib.parse.quote(group_id)
+                + "?$select=displayName"
+              )
+              req = urllib.request.Request(
+                url,
+                headers={
+                  "Authorization": f"Bearer {token}",
+                  "Accept": "application/json",
+                },
+                method="GET",
+              )
+              try:
+                with urllib.request.urlopen(req, timeout=20) as resp:
+                  payload = json.loads(resp.read().decode("utf-8"))
+                  name = payload.get("displayName")
+              except urllib.error.HTTPError as exc:
+                print(f"Warning: unable to resolve group {group_id} (HTTP {exc.code})")
+                name = None
+              except Exception as exc:
+                print(f"Warning: unable to resolve group {group_id} ({exc})")
+                name = None
+              cache[group_id] = name
+              return name
+
+            def assignment_signature(assignment):
+              if not isinstance(assignment, dict):
+                return (None, None, None, None, None)
+              target = assignment.get("target")
+              if not isinstance(target, dict):
+                return (assignment.get("intent"), assignment.get("source"), None, None, None)
+              return (
+                assignment.get("intent"),
+                assignment.get("source"),
+                target.get("@odata.type"),
+                target.get("deviceAndAppManagementAssignmentFilterId"),
+                target.get("deviceAndAppManagementAssignmentFilterType"),
+              )
+
+            def fetch_assignments(object_id: str):
+              if object_id in assignment_cache:
+                return assignment_cache[object_id]
+              safe_id = urllib.parse.quote(object_id)
+              for endpoint_template in assignment_endpoint_templates:
+                url = endpoint_template.format(object_id=safe_id)
+                req = urllib.request.Request(
+                  url,
+                  headers={
+                    "Authorization": f"Bearer {token}",
+                    "Accept": "application/json",
+                  },
+                  method="GET",
+                )
+                try:
+                  with urllib.request.urlopen(req, timeout=20) as resp:
+                    payload = json.loads(resp.read().decode("utf-8"))
+                except urllib.error.HTTPError as exc:
+                  if exc.code in (400, 404):
+                    continue
+                  print(f"Warning: assignment query failed for object {object_id} at {url} (HTTP {exc.code})")
+                  continue
+                except Exception as exc:
+                  print(f"Warning: assignment query failed for object {object_id} at {url} ({exc})")
+                  continue
+
+                value = payload.get("value")
+                if isinstance(value, list):
+                  assignment_cache[object_id] = (value, url)
+                  return value, url
+
+              assignment_cache[object_id] = ([], None)
+              return assignment_cache[object_id]
+
+            def collect_group_assignments(node):
+              found = []
+              if isinstance(node, dict):
+                target = node.get("target")
+                if isinstance(target, dict) and target.get("@odata.type") == group_target_type:
+                  found.append(node)
+                for value in node.values():
+                  found.extend(collect_group_assignments(value))
+              elif isinstance(node, list):
+                for item in node:
+                  found.extend(collect_group_assignments(item))
+              return found
+
+            nonlocal_vars = {"looked_up": 0}
+            json_files = sorted(root.rglob("*.json"))
+            for file_path in json_files:
+              try:
+                content = json.loads(file_path.read_text(encoding="utf-8"))
+              except Exception:
+                continue
+
+              file_changed = False
+              local_group_assignments = collect_group_assignments(content)
+              if not local_group_assignments:
+                continue
+
+              file_missing_before = 0
+              file_missing_assignments = []
+              for assignment in local_group_assignments:
+                target = assignment.get("target", {})
+                group_targets_seen += 1
+                group_id = target.get("groupId")
+                if isinstance(group_id, str) and group_id:
+                  group_name = resolve_group_name(group_id)
+                  if group_name and target.get("groupDisplayName") != group_name:
+                    target["groupDisplayName"] = group_name
+                    file_changed = True
+                else:
+                  group_targets_without_id_before += 1
+                  file_missing_before += 1
+                  file_missing_assignments.append(assignment)
+
+              if file_missing_before > 0:
+                files_with_missing_group_targets += 1
+                object_id = object_id_from_filename(file_path)
+                if object_id:
+                  remote_assignments, matched_endpoint = fetch_assignments(object_id)
+                  if matched_endpoint:
+                    assignment_endpoint_hits += 1
+                  remote_group_assignments = []
+                  for remote_assignment in remote_assignments:
+                    if not isinstance(remote_assignment, dict):
+                      continue
+                    remote_target = remote_assignment.get("target")
+                    if not isinstance(remote_target, dict):
+                      continue
+                    if remote_target.get("@odata.type") != group_target_type:
+                      continue
+                    remote_group_id = remote_target.get("groupId")
+                    if isinstance(remote_group_id, str) and remote_group_id:
+                      remote_group_assignments.append(remote_assignment)
+
+                  if remote_group_assignments:
+                    by_signature = {}
+                    for item in remote_group_assignments:
+                      by_signature.setdefault(assignment_signature(item), []).append(item)
+                    used_remote = set()
+                    file_restored_count = 0
+
+                    for local_assignment in file_missing_assignments:
+                      selected_remote = None
+                      sig = assignment_signature(local_assignment)
+                      candidates = by_signature.get(sig, [])
+                      for candidate in candidates:
+                        candidate_id = id(candidate)
+                        if candidate_id in used_remote:
+                          continue
+                        selected_remote = candidate
+                        used_remote.add(candidate_id)
+                        break
+                      if selected_remote is None:
+                        for candidate in remote_group_assignments:
+                          candidate_id = id(candidate)
+                          if candidate_id in used_remote:
+                            continue
+                          selected_remote = candidate
+                          used_remote.add(candidate_id)
+                          break
+                      if selected_remote is None:
+                        continue
+
+                      remote_target = selected_remote.get("target", {})
+                      remote_group_id = remote_target.get("groupId")
+                      if not (isinstance(remote_group_id, str) and remote_group_id):
+                        continue
+
+                      local_target = local_assignment.get("target", {})
+                      local_target["groupId"] = remote_group_id
+                      remote_group_name = remote_target.get("groupDisplayName") or remote_target.get("groupName")
+                      if isinstance(remote_group_name, str) and remote_group_name:
+                        local_target["groupDisplayName"] = remote_group_name
+                      else:
+                        group_name = resolve_group_name(remote_group_id)
+                        if group_name:
+                          local_target["groupDisplayName"] = group_name
+                      file_changed = True
+                      file_restored_count += 1
+                      restored_group_ids += 1
+
+                    if file_restored_count > 0:
+                      files_with_restored_group_ids += 1
+
+              file_missing_after = 0
+              for assignment in local_group_assignments:
+                target = assignment.get("target", {})
+                group_id = target.get("groupId")
+                if not (isinstance(group_id, str) and group_id):
+                  file_missing_after += 1
+              group_targets_without_id_after += file_missing_after
+
+              if file_changed:
+                file_path.write_text(json.dumps(content, indent=5, ensure_ascii=False) + "\n", encoding="utf-8")
+                updated_files += 1
+
+              looked_up = nonlocal_vars["looked_up"]
+            print(
+              "Assignment group name enrichment complete. "
+              + f"Files updated: {updated_files}. "
+              + f"Group lookups performed: {looked_up}. "
+              + f"Assignment endpoints matched: {assignment_endpoint_hits}. "
+              + f"Group IDs restored from Graph assignments: {restored_group_ids}."
+            )
+            if files_with_missing_group_targets > 0:
+              print(
+                "Assignment targets missing groupId before fallback: "
+                + str(group_targets_without_id_before)
+                + " across "
+                + str(files_with_missing_group_targets)
+                + " files."
+              )
+            if files_with_restored_group_ids > 0:
+              print(
+                "Assignment targets restored from endpoint fallback in "
+                + str(files_with_restored_group_ids)
+                + " files."
+              )
+            if group_targets_seen > 0 and group_targets_without_id_after > 0:
+              print(
+                "Warning: "
+                + str(group_targets_without_id_after)
+                + " of "
+                + str(group_targets_seen)
+                + " group assignment targets still do not include groupId after fallback."
+              )
+              print("Warning: when groupId is unavailable from source APIs, groupDisplayName cannot be resolved.")
+            PY
+          workingDirectory: "$(Build.SourcesDirectory)"
+          failOnStderr: false
+        env:
+          BACKUP_FOLDER: $(BACKUP_FOLDER)/$(INTUNE_BACKUP_SUBDIR)
+          ACCESS_TOKEN: $(accessToken)
+          BUILD_SOURCESDIRECTORY: $(Build.SourcesDirectory)
+
+      - task: Bash@3
+        displayName: Generate policy assignment report
+        inputs:
+          targetType: inline
+          script: |
+            set -euo pipefail
+            python3 "$(Build.SourcesDirectory)/scripts/generate_assignment_report.py" \
+              --root "$(Build.SourcesDirectory)/$(BACKUP_FOLDER)/$(INTUNE_BACKUP_SUBDIR)" \
+              --output-dir "$(Build.SourcesDirectory)/$(BACKUP_FOLDER)/$(REPORTS_SUBDIR)/intune"
+          workingDirectory: "$(Build.SourcesDirectory)"
+          failOnStderr: true
+
+      - task: Bash@3
+        displayName: Generate apps inventory report
+        condition: and(eq(variables['ENABLE_WORKLOAD_ENTRA'], 'false'), or(eq(variables['ENTRA_INCLUDE_APP_REGISTRATIONS'], 'true'), eq(variables['ENTRA_INCLUDE_ENTERPRISE_APPS'], 'true')))
+        inputs:
+          targetType: inline
+          script: |
+            set -euo pipefail
+            python3 "$(Build.SourcesDirectory)/scripts/generate_app_inventory_report.py" \
+              --root "$(Build.SourcesDirectory)/$(BACKUP_FOLDER)/$(ENTRA_BACKUP_SUBDIR)" \
+              --output-dir "$(Build.SourcesDirectory)/$(BACKUP_FOLDER)/$(REPORTS_SUBDIR)/entra"
+          workingDirectory: "$(Build.SourcesDirectory)"
+          failOnStderr: true
+
+      - task: Bash@3
+        displayName: Generate object inventory reports
+        inputs:
+          targetType: inline
+          script: |
+            set -euo pipefail
+            python3 "$(Build.SourcesDirectory)/scripts/generate_object_inventory_reports.py" \
+              --root "$(Build.SourcesDirectory)/$(BACKUP_FOLDER)/$(INTUNE_BACKUP_SUBDIR)" \
+              --output-dir "$(Build.SourcesDirectory)/$(BACKUP_FOLDER)/$(REPORTS_SUBDIR)/intune"
+          workingDirectory: "$(Build.SourcesDirectory)"
+          failOnStderr: true
+
+      - task: Bash@3
+        displayName: Validate Intune backup outputs
+        inputs:
+          targetType: inline
+          script: |
+            set -euo pipefail
+            MODE="light"
+            if [ "$(FULL_RUN)" = "1" ]; then
+              MODE="full"
+            fi
+            python3 "$(PIPELINE_SCRIPT_ROOT)/validate_backup_outputs.py" \
+              --workload intune \
+              --mode "$MODE" \
+              --root "$(Build.SourcesDirectory)/$(BACKUP_FOLDER)/$(INTUNE_BACKUP_SUBDIR)" \
+              --reports-root "$(Build.SourcesDirectory)/$(BACKUP_FOLDER)/$(REPORTS_SUBDIR)/intune"
+          workingDirectory: "$(Build.SourcesDirectory)"
+          failOnStderr: true
+
+      - task: PowerShell@2
+        displayName: Find change author & commit the backup
+        name: commitAndSetVariable
+        inputs:
+          targetType: inline
+          script: |
+            $root = "$(Build.SourcesDirectory)"
+            Set-Location $root
+
+            $serviceCommitUserName = "$(USER_NAME)"
+            if ([string]::IsNullOrWhiteSpace($serviceCommitUserName)) { $serviceCommitUserName = "unknown" }
+            $serviceCommitUserEmail = "$(USER_EMAIL)"
+            if ([string]::IsNullOrWhiteSpace($serviceCommitUserEmail)) { $serviceCommitUserEmail = "unknown@unknown.com" }
+
+            $fallbackCommitUserName = $serviceCommitUserName
+            $fallbackCommitUserEmail = $serviceCommitUserEmail
+
+            $buildReason = "$(Build.Reason)"
+            $requestedForName = "$(Build.RequestedFor)"
+            $requestedForEmail = "$(Build.RequestedForEmail)"
+            if (
+              $buildReason -ne "Schedule" -and
+              -not [string]::IsNullOrWhiteSpace($requestedForEmail) -and
+              $requestedForEmail -like "*@*"
+            ) {
+              $fallbackCommitUserEmail = $requestedForEmail
+              if (-not [string]::IsNullOrWhiteSpace($requestedForName)) {
+                $fallbackCommitUserName = $requestedForName
+              } else {
+                $fallbackCommitUserName = ($requestedForEmail -split "@")[0]
+              }
+              Write-Host "Fallback commit identity: manual requester '$fallbackCommitUserName <$fallbackCommitUserEmail>'"
+            } else {
+              Write-Host "Fallback commit identity: service '$fallbackCommitUserName <$fallbackCommitUserEmail>'"
+            }
+
+            git config user.name $fallbackCommitUserName
+            git config user.email $fallbackCommitUserEmail
+            git config core.longpaths true
+            git config core.quotepath off
+            git config core.eol lf
+            git config core.autocrlf false
+
+            $untrackedFile = git ls-files --others --exclude-standard --full-name
+            $trackedFile = git ls-files --modified --full-name
+            $generatedSplitMarkdownPattern = '^' + [Regex]::Escape("$(BACKUP_FOLDER)") + '/.*\.md$'
+            $generatedReportPattern = '^' + [Regex]::Escape("$(BACKUP_FOLDER)/$(REPORTS_SUBDIR)/")
+            $workloadConfigPattern = '^' + [Regex]::Escape("$(BACKUP_FOLDER)/$(INTUNE_BACKUP_SUBDIR)/")
+            Write-Host "DEBUG: BACKUP_FOLDER=$(BACKUP_FOLDER), INTUNE_BACKUP_SUBDIR=$(INTUNE_BACKUP_SUBDIR)"
+            Write-Host "DEBUG: workloadConfigPattern = $workloadConfigPattern"
+            Write-Host "DEBUG: untracked count = $($untrackedFile.Count), tracked count = $($trackedFile.Count)"
+            $allFiles = @()
+            if ($untrackedFile) { $allFiles += $untrackedFile }
+            if ($trackedFile) { $allFiles += $trackedFile }
+            $changedFile = $allFiles | ? {
+              $_ -and
+              $_ -match $workloadConfigPattern -and
+              $_ -notmatch $generatedSplitMarkdownPattern -and
+              $_ -notmatch $generatedReportPattern -and
+              $_ -notlike "*/Assignment Report/*"
+            }
+            Write-Host "DEBUG: changed count = $($changedFile.Count)"
+            if ($changedFile.Count -gt 0) {
+              $changedFile | Select-Object -First 5 | ForEach-Object { Write-Host "DEBUG: changed file: $_" }
+            }
+
+            if ($changedFile) {
+              git show-ref --verify --quiet "refs/remotes/origin/$(DRIFT_BRANCH_INTUNE)"
+              $hasRemoteDrift = $LASTEXITCODE -eq 0
+              if ($hasRemoteDrift) {
+                git diff --quiet "origin/$(DRIFT_BRANCH_INTUNE)" -- "$(BACKUP_FOLDER)/$(INTUNE_BACKUP_SUBDIR)"
+                if ($LASTEXITCODE -eq 0) {
+                  "No Intune change detected (snapshot identical to existing drift branch)"
+                  echo "##vso[task.setVariable variable=CHANGE_DETECTED]0"
+                  echo "##vso[task.setVariable variable=CHANGE_DETECTED;isOutput=true]0"
+                  echo "##vso[task.setVariable variable=ROLLING_PR_SYNC_REQUIRED]1"
+                  echo "##vso[task.setVariable variable=ROLLING_PR_SYNC_REQUIRED;isOutput=true]1"
+                  exit 0
+                }
+              }
+
+              if (!(Get-Module "Microsoft.Graph.DeviceManagement.Administration" -ListAvailable)) {
+                Install-Module Microsoft.Graph.DeviceManagement.Administration -AllowClobber -Force -AcceptLicense
+              }
+
+              Write-Host "Authenticating to Graph API"
+              $secureToken = ConvertTo-SecureString -String "$(accessToken)" -AsPlainText -Force
+              Connect-MgGraph -AccessToken $secureToken -NoWelcome
+
+              function _startProcess {
+                [CmdletBinding()]
+                param (
+                  [string] $filePath = '',
+                  [string] $argumentList = '',
+                  [string] $workingDirectory = (Get-Location),
+                  [switch] $dontWait,
+                  [switch] $outputErr2Std
+                )
+
+                $p = New-Object System.Diagnostics.Process
+                $p.StartInfo.UseShellExecute = $false
+                $p.StartInfo.RedirectStandardOutput = $true
+                $p.StartInfo.RedirectStandardError = $true
+                $p.StartInfo.WorkingDirectory = $workingDirectory
+                $p.StartInfo.FileName = $filePath
+                $p.StartInfo.Arguments = $argumentList
+                [void]$p.Start()
+                if (!$dontWait) { $p.WaitForExit() }
+
+                $result = $p.StandardOutput.ReadToEnd()
+                if ($result) { $result }
+
+                if ($outputErr2Std) {
+                  $p.StandardError.ReadToEnd()
+                } else {
+                  if ($err = $p.StandardError.ReadToEnd()) { Write-Error $err }
+                }
+              }
+
+              function _getFirstNonEmptyString {
+                [CmdletBinding()]
+                param ([object] $value)
+
+                if ($value -is [string]) {
+                  if (-not [string]::IsNullOrWhiteSpace($value)) {
+                    return $value.Trim()
+                  }
+                  return $null
+                }
+
+                if ($value -is [System.Collections.IEnumerable]) {
+                  foreach ($item in $value) {
+                    $resolved = _getFirstNonEmptyString $item
+                    if ($resolved) {
+                      return $resolved
+                    }
+                  }
+                }
+
+                if ($null -ne $value) {
+                  $stringValue = [string] $value
+                  if (-not [string]::IsNullOrWhiteSpace($stringValue)) {
+                    return $stringValue.Trim()
+                  }
+                }
+
+                return $null
+              }
+
+              function _getGraphPropertyValue {
+                [CmdletBinding()]
+                param (
+                  [object] $object,
+                  [string[]] $candidateNames
+                )
+
+                if ($null -eq $object) {
+                  return $null
+                }
+
+                foreach ($candidateName in $candidateNames) {
+                  $property = $object.PSObject.Properties | ? { $_.Name -eq $candidateName } | select -First 1
+                  if ($property) {
+                    $resolved = _getFirstNonEmptyString $property.Value
+                    if ($resolved) {
+                      return $resolved
+                    }
+                  }
+                }
+
+                $additionalProperty = $object.PSObject.Properties | ? { $_.Name -eq 'AdditionalProperties' } | select -First 1
+                if ($additionalProperty -and $additionalProperty.Value -is [System.Collections.IDictionary]) {
+                  $additionalPropertyKeys = @($additionalProperty.Value.Keys)
+                  foreach ($candidateName in $candidateNames) {
+                    $candidateKeys = @($candidateName)
+                    if ($candidateName.Length -gt 0) {
+                      $candidateKeys += ($candidateName.Substring(0, 1).ToLowerInvariant() + $candidateName.Substring(1))
+                    }
+                    foreach ($candidateKey in ($candidateKeys | Select-Object -Unique)) {
+                      if ($additionalPropertyKeys -contains $candidateKey) {
+                        $resolved = _getFirstNonEmptyString $additionalProperty.Value[$candidateKey]
+                        if ($resolved) {
+                          return $resolved
+                        }
+                      }
+                    }
+                  }
+                }
+
+                return $null
+              }
+
+              function _getActorIdentity {
+                [CmdletBinding()]
+                param ([object] $actor)
+
+                # Graph module updates can move actor fields between typed properties and AdditionalProperties.
+                $userPrincipalName = _getGraphPropertyValue $actor @('UserPrincipalName', 'EmailAddress', 'Email')
+                $userDisplayName = _getGraphPropertyValue $actor @('UserDisplayName', 'DisplayName')
+                if ($userPrincipalName) {
+                  $actorName = $userDisplayName
+                  if (-not $actorName) {
+                    $actorName = ($userPrincipalName -split '@')[0]
+                  }
+                  return [PSCustomObject]@{
+                    Key   = "user:$userPrincipalName"
+                    Value = $userPrincipalName
+                    Name  = $actorName
+                  }
+                }
+
+                $applicationDisplayName = _getGraphPropertyValue $actor @('ApplicationDisplayName', 'AppDisplayName', 'ApplicationName')
+                if ($applicationDisplayName) {
+                  return [PSCustomObject]@{
+                    Key   = "sp:$applicationDisplayName"
+                    Value = ($applicationDisplayName + " (SP)")
+                    Name  = $applicationDisplayName
+                  }
+                }
+
+                if ($userDisplayName) {
+                  return [PSCustomObject]@{
+                    Key   = "display:$userDisplayName"
+                    Value = $userDisplayName
+                    Name  = $userDisplayName
+                  }
+                }
+
+                return $null
+              }
+
+              function _getResourceId {
+                [CmdletBinding()]
+                param ([string] $filePath)
+
+                $fileName = [System.IO.Path]::GetFileNameWithoutExtension($filePath)
+
+                if ($filePath -like "*Device Configurations/mobileconfig/*") {
+                  $parentFolderPath = Split-Path (Split-Path $filePath -Parent) -Parent
+                  $fileName = Get-ChildItem $parentFolderPath -File | ? {
+                    (ConvertFrom-Json -InputObject (Get-Content $_.FullName -Raw)).payloadFileName -eq [System.IO.Path]::GetFileName($filePath)
+                  } | select -expand BaseName
+                  if (!$fileName) {
+                    Write-Warning "Unable to find 'parent' config file for $filePath"
+                    return
+                  }
+                } elseif ($filePath -like "*/Managed Google Play/*") {
+                  return ($modificationEvent | ? { $_.Category -eq 'Enrollment' -and $_.ActivityType -eq "Patch AndroidForWorkSettings" }).Resources.ResourceId
+                }
+
+                $delimiter = "__"
+                if ($fileName -like "*$delimiter*") {
+                  $resourceId = ($fileName -split $delimiter)[-1]
+                  $resourceId = $resourceId -replace "^_*"
+                } else {
+                  $resourceId = $null
+                }
+
+                return $resourceId
+              }
+
+              $gitCommitDepth = 30
+              git fetch --depth=$gitCommitDepth
+              $commitList = _startProcess git "--no-pager log --no-show-signature -$gitCommitDepth --format=%s%%%%%%%cI" -outputErr2Std -dontWait
+              $lastCommitDate = $commitList -split "`n" | ? { $_ } | % {
+                $commitName, $commitDate = $_ -split "%%%"
+                if ($commitName -match "^\d{4}\.\d{2}\.\d{2}_\d{2}\.\d{2} -- ") { $commitDate }
+              }
+
+              if ($lastCommitDate) {
+                $lastCommitDate = Get-Date @($lastCommitDate)[0]
+              } else {
+                Write-Warning "Unable to obtain date of the last backup config commit. ALL Intune audit events will be gathered."
+              }
+
+              $modificationData = New-Object System.Collections.ArrayList
+
+              $filter = @("activityResult eq 'Success'", "ActivityOperationType ne 'Get'")
+
+              if ($lastCommitDate) {
+                $lastCommitDate = $lastCommitDate.ToUniversalTime()
+                $filterDateTimeFrom = Get-Date -Date $lastCommitDate -Format "yyyy-MM-ddTHH:mm:ss"
+                $filter += "ActivityDateTime ge $filterDateTimeFrom`Z"
+              }
+
+              $backupStart = [DateTime]::ParseExact("$(BACKUP_START)", "yyyy.MM.dd:HH.mm.ss", $null).ToUniversalTime()
+              $auditQueryEnd = $backupStart.AddMinutes(-10)
+              $filterDateTimeTo = Get-Date -Date $auditQueryEnd -Format "yyyy-MM-ddTHH:mm:ss"
+              $filter += "ActivityDateTime le $filterDateTimeTo`Z"
+
+              $eventFilter = $filter -join " and "
+
+              "`nGetting Intune event logs"
+              "`t- from: '$lastCommitDate' (UTC) to: '$auditQueryEnd' (UTC)"
+              "`t- filter: $eventFilter"
+              $modificationEvent = Get-MgDeviceManagementAuditEvent -Filter $eventFilter -All
+
+              $changedFileCount = @($changedFile).Count
+              $showPerFileLog = $changedFileCount -le 100
+              $unresolvedAuthorCount = 0
+              $nonResourceFileCount = 0
+
+              if ($showPerFileLog) {
+                "`nProcessing changed files"
+              } else {
+                "`nProcessing changed files ($changedFileCount total, condensed logging enabled)"
+              }
+              foreach ($file in $changedFile) {
+                $resourceId = _getResourceId $file
+
+                if ($resourceId) {
+                  if ($showPerFileLog) {
+                    "`t- $resourceId ($file)"
+                  }
+                  $resourceModificationEvent = $modificationEvent | ? { $_.Resources.ResourceId -eq $resourceId }
+
+                  $modificationAuthor = @()
+                  $resourceModificationEvent.Actor | % {
+                    $actorIdentity = _getActorIdentity $_
+                    if ($actorIdentity) {
+                      $modificationAuthor += $actorIdentity
+                    }
+                  }
+                  $modificationAuthor = $modificationAuthor | Sort-Object Key -Unique
+                } else {
+                  $nonResourceFileCount++
+                  $modificationAuthor = $null
+                }
+
+                if ($modificationAuthor) {
+                  if ($showPerFileLog) {
+                    "`t`t- changed by: $($modificationAuthor.Name -join ', ')"
+                  }
+                } else {
+                  if ($resourceId) {
+                    $unresolvedAuthorCount++
+                  }
+                  if ($showPerFileLog) {
+                    "`t`t- unable to find out who made the change"
+                  }
+                  $modificationAuthor = @([PSCustomObject]@{
+                    Key   = "fallback:$fallbackCommitUserEmail"
+                    Value = $fallbackCommitUserEmail
+                    Name  = $fallbackCommitUserName
+                  })
+                }
+
+                $null = $modificationData.Add([PSCustomObject]@{
+                  resourceId              = $resourceId
+                  file                    = Join-Path $root $file
+                  modificationAuthorKey   = ($modificationAuthor.Key -join '&')
+                  modificationAuthorValue = $modificationAuthor.Value
+                  modificationAuthorName  = $modificationAuthor.Name
+                })
+              }
+
+              if ($nonResourceFileCount -gt 0) {
+                Write-Host "Skipped resourceId lookup for $nonResourceFileCount non-resource files."
+              }
+              if ($unresolvedAuthorCount -gt 0) {
+                Write-Warning "Unable to resolve author from Intune audit logs for $unresolvedAuthorCount of $changedFileCount changed files. Fallback identity used."
+              }
+
+              "`nCommit changes"
+              $modificationData | Group-Object modificationAuthorKey | % {
+                $modificationAuthorValue = @($_.Group | % { $_.modificationAuthorValue } | ? { $_ } | Select-Object -Unique)
+                $modificationAuthorName = @($_.Group | % { $_.modificationAuthorName } | ? { $_ } | Select-Object -Unique)
+                $modifiedFile = $_.Group.File
+
+                $modifiedFile | % {
+                  "`t- Adding $_"
+                  $gitResult = _startProcess git -ArgumentList "add `"$_`"" -dontWait -outputErr2Std
+                  if ($gitResult -match "^fatal:") { throw $gitResult }
+                }
+
+                "`t- Setting commit author(s): $($modificationAuthorName -join ', ')"
+                git config user.name ($modificationAuthorName -join ', ')
+                git config user.email ($modificationAuthorValue -join ', ')
+
+                $DATEF = (Get-Date $backupStart -f "yyyy.MM.dd_HH.mm")
+                $commitName = "$DATEF` -- $($modificationAuthorName -join ', ')"
+
+                "`t- Creating commit '$commitName'"
+                $null = _startProcess git -ArgumentList "commit -m `"$commitName`"" -dontWait
+
+                $unpushedCommit = _startProcess git -ArgumentList "cherry -v origin/$(BASELINE_BRANCH)"
+                if ([string]::IsNullOrEmpty($unpushedCommit)) {
+                  Write-Warning "Nothing to commit?! This shouldn't happen."
+                  echo "##vso[task.setVariable variable=CHANGE_DETECTED]0"
+                  echo "##vso[task.setVariable variable=CHANGE_DETECTED;isOutput=true]0"
+                  echo "##vso[task.setVariable variable=ROLLING_PR_SYNC_REQUIRED]0"
+                  echo "##vso[task.setVariable variable=ROLLING_PR_SYNC_REQUIRED;isOutput=true]0"
+                } else {
+                  echo "##vso[task.setVariable variable=COMMIT_DATE;isOutput=true]$DATEF"
+                  echo "##vso[task.setVariable variable=MODIFICATION_AUTHOR;isOutput=true]$(($modificationData.modificationAuthorValue | select -Unique | Sort-Object) -join ', ')"
+                }
+              }
+
+              "`nPush changes to drift branch"
+              git push --force-with-lease origin "HEAD:$(DRIFT_BRANCH_INTUNE)"
+              if ($LASTEXITCODE -ne 0) { throw "Failed to push backup commits to origin/$(DRIFT_BRANCH_INTUNE)" }
+              $commitSha = (git rev-parse HEAD).Trim()
+              echo "##vso[task.setVariable variable=CHANGE_DETECTED]1"
+              echo "##vso[task.setVariable variable=CHANGE_DETECTED;isOutput=true]1"
+              echo "##vso[task.setVariable variable=ROLLING_PR_SYNC_REQUIRED]1"
+              echo "##vso[task.setVariable variable=ROLLING_PR_SYNC_REQUIRED;isOutput=true]1"
+              echo "##vso[task.setVariable variable=COMMIT_SHA;isOutput=true]$commitSha"
+            } else {
+              "No change detected"
+              echo "##vso[task.setVariable variable=CHANGE_DETECTED]0"
+              echo "##vso[task.setVariable variable=CHANGE_DETECTED;isOutput=true]0"
+              echo "##vso[task.setVariable variable=ROLLING_PR_SYNC_REQUIRED]0"
+              echo "##vso[task.setVariable variable=ROLLING_PR_SYNC_REQUIRED;isOutput=true]0"
+            }
+
+      # Create markdown documentation (non-drift output)
+      - task: Bash@3
+        displayName: Generate markdown document
+        condition: and(eq(variables['CHANGE_DETECTED'], '1'), eq(variables['FULL_RUN'], '1'))
+        inputs:
+          targetType: inline
+          script: |
+            set -euo pipefail
+
+            INTRO="Intune backup and documentation generated at $(Build.Repository.Uri) <img align=\"right\" width=\"96\" height=\"96\" src=\"./logo.png\">"
+
+            if [ "$(SPLIT_DOCUMENTATION)" = "true" ]; then
+              IntuneCD-startdocumentation \
+                --path="$(Build.SourcesDirectory)/$(BACKUP_FOLDER)/$(INTUNE_BACKUP_SUBDIR)" \
+                --tenantname="$TENANT_NAME" \
+                --intro="$INTRO" \
+                --split \
+                --enrich-documentation
+              sed "s#](\\./#](./$(BACKUP_FOLDER)/$(INTUNE_BACKUP_SUBDIR)/#g" \
+                "$(Build.SourcesDirectory)/$(BACKUP_FOLDER)/$(INTUNE_BACKUP_SUBDIR)/index.md" \
+                > "$(Build.SourcesDirectory)/prod-as-built.md"
+            else
+              IntuneCD-startdocumentation \
+                --path="$(Build.SourcesDirectory)/$(BACKUP_FOLDER)/$(INTUNE_BACKUP_SUBDIR)" \
+                --outpath="$(Build.SourcesDirectory)/prod-as-built.md" \
+                --tenantname="$TENANT_NAME" \
+                --intro="$INTRO" \
+                --enrich-documentation
+            fi
+          workingDirectory: "$(Build.SourcesDirectory)"
+          failOnStderr: false
+        env:
+          TENANT_NAME: $(TENANT_NAME)
+
+  - job: create_or_update_intune_pr
+    displayName: Create or update rolling Intune drift PR
+    dependsOn: backup_intune
+    condition: and(eq(variables['ENABLE_WORKLOAD_INTUNE'], 'true'), succeeded(), or(eq(dependencies.backup_intune.outputs['commitAndSetVariable.CHANGE_DETECTED'], '1'), eq(dependencies.backup_intune.outputs['commitAndSetVariable.ROLLING_PR_SYNC_REQUIRED'], '1')))
+    pool:
+      name: $(AGENT_POOL_NAME)
+    steps:
+      - checkout: self
+        persistCredentials: true
+
+      - task: Bash@3
+        displayName: Ensure rolling PR exists
+        inputs:
+          targetType: inline
+          script: |
+            set -euo pipefail
+            python3 "$(Build.SourcesDirectory)/scripts/ensure_rolling_pr.py" \
+              --repo-root "$(Build.SourcesDirectory)" \
+              --workload "intune" \
+              --drift-branch "$(DRIFT_BRANCH_INTUNE)" \
+              --baseline-branch "$(BASELINE_BRANCH)" \
+              --pr-title "$(ROLLING_PR_TITLE_INTUNE)"
+          failOnStderr: true
+        env:
+          SYSTEM_ACCESSTOKEN: $(System.AccessToken)
+          SYSTEM_COLLECTIONURI: $(System.CollectionUri)
+          SYSTEM_TEAMPROJECT: $(System.TeamProject)
+          BUILD_REPOSITORY_ID: $(Build.Repository.ID)
+          BUILD_BUILDNUMBER: $(Build.BuildNumber)
+          BUILD_BUILDID: $(Build.BuildId)
+          AUTO_REMEDIATE_ON_PR_REJECTION: $(AUTO_REMEDIATE_ON_PR_REJECTION)
+          AUTO_REMEDIATE_RESTORE_PIPELINE_ID: $(AUTO_REMEDIATE_RESTORE_PIPELINE_ID)
+          AUTO_REMEDIATE_DRY_RUN: $(AUTO_REMEDIATE_DRY_RUN)
+          AUTO_REMEDIATE_UPDATE_ASSIGNMENTS: $(AUTO_REMEDIATE_UPDATE_ASSIGNMENTS)
+          AUTO_REMEDIATE_REMOVE_OBJECTS: $(AUTO_REMEDIATE_REMOVE_OBJECTS)
+          AUTO_REMEDIATE_MAX_WORKERS: $(AUTO_REMEDIATE_MAX_WORKERS)
+          AUTO_REMEDIATE_EXCLUDE_CSV: $(AUTO_REMEDIATE_EXCLUDE_CSV)
+          AUTO_REMEDIATE_INCLUDE_ENTRA_UPDATE: false
+          ROLLING_PR_DELAY_REVIEWER_NOTIFICATIONS: $(ROLLING_PR_DELAY_REVIEWER_NOTIFICATIONS)
+          ROLLING_PR_MERGE_STRATEGY: $(ROLLING_PR_MERGE_STRATEGY)
+
+  - job: update_intune_pr_summary
+    displayName: Update rolling Intune PR summary
+    dependsOn:
+      - backup_intune
+      - create_or_update_intune_pr
+    condition: and(eq(variables['ENABLE_WORKLOAD_INTUNE'], 'true'), eq(variables['ENABLE_PR_REVIEW_SUMMARY'], 'true'), or(eq(dependencies.backup_intune.outputs['commitAndSetVariable.CHANGE_DETECTED'], '1'), eq(dependencies.backup_intune.outputs['commitAndSetVariable.ROLLING_PR_SYNC_REQUIRED'], '1')), in(dependencies.backup_intune.result, 'Succeeded', 'SucceededWithIssues'), in(dependencies.create_or_update_intune_pr.result, 'Succeeded', 'SucceededWithIssues', 'Skipped'))
+    pool:
+      name: $(AGENT_POOL_NAME)
+    continueOnError: false
+    steps:
+      - checkout: self
+        persistCredentials: true
+
+      - task: Bash@3
+        displayName: Validate Azure OpenAI availability (Intune)
+        condition: eq(variables['ENABLE_PR_AI_SUMMARY'], 'true')
+        inputs:
+          targetType: inline
+          script: |
+            set -euo pipefail
+            python3 "$(Build.SourcesDirectory)/scripts/diagnostics/precheck_azure_openai_availability.py"
+          workingDirectory: "$(Build.SourcesDirectory)"
+          failOnStderr: false
+        env:
+          ENABLE_PR_AI_SUMMARY: $(ENABLE_PR_AI_SUMMARY)
+          AZURE_OPENAI_ENDPOINT: $(AZURE_OPENAI_ENDPOINT)
+          AZURE_OPENAI_DEPLOYMENT: $(AZURE_OPENAI_DEPLOYMENT)
+          AZURE_OPENAI_API_KEY: $(AZURE_OPENAI_API_KEY)
+          AZURE_OPENAI_API_VERSION: $(AZURE_OPENAI_API_VERSION)
+          REQUIRE_CHANGE_TICKETS: $(REQUIRE_CHANGE_TICKETS)
+          CHANGE_TICKET_REGEX: $(CHANGE_TICKET_REGEX)
+          DEBUG_CHANGE_TICKET_THREADS: $(DEBUG_CHANGE_TICKET_THREADS)
+          ROLLING_PR_DELAY_REVIEWER_NOTIFICATIONS: $(ROLLING_PR_DELAY_REVIEWER_NOTIFICATIONS)
+
+      - task: Bash@3
+        displayName: Debug change-ticket gate vars (Intune)
+        inputs:
+          targetType: inline
+          script: |
+            set -euo pipefail
+            echo "ENABLE_PR_REVIEW_SUMMARY='$(ENABLE_PR_REVIEW_SUMMARY)'"
+            echo "REQUIRE_CHANGE_TICKETS='$(REQUIRE_CHANGE_TICKETS)'"
+            echo "CHANGE_TICKET_REGEX='$(CHANGE_TICKET_REGEX)'"
+            echo "DEBUG_CHANGE_TICKET_THREADS='$(DEBUG_CHANGE_TICKET_THREADS)'"
+          workingDirectory: "$(Build.SourcesDirectory)"
+          failOnStderr: false
+
+      - task: Bash@3
+        displayName: Update automated reviewer summary (Intune)
+        inputs:
+          targetType: inline
+          script: |
+            set -euo pipefail
+            python3 "$(Build.SourcesDirectory)/scripts/update_pr_review_summary.py" \
+              --repo-root "$(Build.SourcesDirectory)" \
+              --workload "intune" \
+              --backup-folder "$(BACKUP_FOLDER)" \
+              --reports-subdir "$(REPORTS_SUBDIR)" \
+              --drift-branch "$(DRIFT_BRANCH_INTUNE)" \
+              --baseline-branch "$(BASELINE_BRANCH)"
+          workingDirectory: "$(Build.SourcesDirectory)"
+          failOnStderr: false
+        env:
+          SYSTEM_ACCESSTOKEN: $(System.AccessToken)
+          SYSTEM_COLLECTIONURI: $(System.CollectionUri)
+          SYSTEM_TEAMPROJECT: $(System.TeamProject)
+          BUILD_REPOSITORY_ID: $(Build.Repository.ID)
+          ENABLE_PR_AI_SUMMARY: $(ENABLE_PR_AI_SUMMARY)
+          AZURE_OPENAI_ENDPOINT: $(AZURE_OPENAI_ENDPOINT)
+          AZURE_OPENAI_DEPLOYMENT: $(AZURE_OPENAI_DEPLOYMENT)
+          AZURE_OPENAI_API_KEY: $(AZURE_OPENAI_API_KEY)
+          AZURE_OPENAI_API_VERSION: $(AZURE_OPENAI_API_VERSION)
+          REQUIRE_CHANGE_TICKETS: $(REQUIRE_CHANGE_TICKETS)
+          CHANGE_TICKET_REGEX: $(CHANGE_TICKET_REGEX)
+          DEBUG_CHANGE_TICKET_THREADS: $(DEBUG_CHANGE_TICKET_THREADS)
+
+      - task: Bash@3
+        displayName: Apply reviewer /reject decisions (Intune)
+        condition: eq(variables['ENABLE_PR_REVIEWER_DECISIONS'], 'true')
+        inputs:
+          targetType: inline
+          script: |
+            set -euo pipefail
+            python3 "$(Build.SourcesDirectory)/scripts/apply_reviewer_rejections.py" \
+              --repo-root "$(Build.SourcesDirectory)" \
+              --workload "intune" \
+              --drift-branch "$(DRIFT_BRANCH_INTUNE)" \
+              --baseline-branch "$(BASELINE_BRANCH)"
+          workingDirectory: "$(Build.SourcesDirectory)"
+          failOnStderr: false
+        env:
+          SYSTEM_ACCESSTOKEN: $(System.AccessToken)
+          SYSTEM_COLLECTIONURI: $(System.CollectionUri)
+          SYSTEM_TEAMPROJECT: $(System.TeamProject)
+          BUILD_REPOSITORY_ID: $(Build.Repository.ID)
+
+      - task: Bash@3
+        displayName: Queue post-merge remediation from reviewer /reject (Intune)
+        condition: eq(variables['AUTO_REMEDIATE_AFTER_MERGE'], 'true')
+        inputs:
+          targetType: inline
+          script: |
+            set -euo pipefail
+            python3 "$(Build.SourcesDirectory)/scripts/queue_post_merge_restore.py" \
+              --workload "intune" \
+              --drift-branch "$(DRIFT_BRANCH_INTUNE)" \
+              --baseline-branch "$(BASELINE_BRANCH)"
+          workingDirectory: "$(Build.SourcesDirectory)"
+          failOnStderr: false
+        env:
+          SYSTEM_ACCESSTOKEN: $(System.AccessToken)
+          SYSTEM_COLLECTIONURI: $(System.CollectionUri)
+          SYSTEM_TEAMPROJECT: $(System.TeamProject)
+          BUILD_REPOSITORY_ID: $(Build.Repository.ID)
+          AUTO_REMEDIATE_AFTER_MERGE: $(AUTO_REMEDIATE_AFTER_MERGE)
+          AUTO_REMEDIATE_AFTER_MERGE_LOOKBACK_HOURS: $(AUTO_REMEDIATE_AFTER_MERGE_LOOKBACK_HOURS)
+          AUTO_REMEDIATE_RESTORE_PIPELINE_ID: $(AUTO_REMEDIATE_RESTORE_PIPELINE_ID)
+          AUTO_REMEDIATE_DRY_RUN: $(AUTO_REMEDIATE_DRY_RUN)
+          AUTO_REMEDIATE_UPDATE_ASSIGNMENTS: $(AUTO_REMEDIATE_UPDATE_ASSIGNMENTS)
+          AUTO_REMEDIATE_REMOVE_OBJECTS: $(AUTO_REMEDIATE_REMOVE_OBJECTS)
+          AUTO_REMEDIATE_MAX_WORKERS: $(AUTO_REMEDIATE_MAX_WORKERS)
+          AUTO_REMEDIATE_EXCLUDE_CSV: $(AUTO_REMEDIATE_EXCLUDE_CSV)
+          AUTO_REMEDIATE_INCLUDE_ENTRA_UPDATE: false
+
+  - job: backup_entra
+    displayName: Backup & commit Entra configuration
+    condition: eq(variables['ENABLE_WORKLOAD_ENTRA'], 'true')
+    pool:
+      name: $(AGENT_POOL_NAME)
+    continueOnError: false
+    steps:
+      - checkout: self
+        persistCredentials: true
+
+      # Uncomment the block below for agent-side debugging.
+      # - task: Bash@3
+      #   displayName: DEBUG — dump agent state (Entra)
+      #   inputs:
+      #     targetType: inline
+      #     script: |
+      #       set -euo pipefail
+      #       echo "=== Variables ==="
+      #       echo "BACKUP_FOLDER=$(BACKUP_FOLDER)"
+      #       echo "ENTRA_BACKUP_SUBDIR=$(ENTRA_BACKUP_SUBDIR)"
+      #       echo "DRIFT_BRANCH_ENTRA=$(DRIFT_BRANCH_ENTRA)"
+      #       echo "BASELINE_BRANCH=$(BASELINE_BRANCH)"
+      #       echo "AGENT_POOL_NAME=$(AGENT_POOL_NAME)"
+      #       echo "=== Git state ==="
+      #       git branch -a
+      #       git log --oneline -5
+      #       git status --short
+      #       echo "=== File system ==="
+      #       ls -la "$(Build.SourcesDirectory)"
+      #       find "$(BACKUP_FOLDER)" -maxdepth 2 -type d 2>/dev/null || true
+      #   workingDirectory: "$(Build.SourcesDirectory)"
+
+      - task: Bash@3
+        displayName: Snapshot export/validation helper scripts (Entra job)
+        inputs:
+          targetType: inline
+          script: |
+            set -euo pipefail
+            SCRIPT_ROOT="$(Agent.TempDirectory)/pipeline-scripts-entra"
+            rm -rf "$SCRIPT_ROOT"
+            mkdir -p "$SCRIPT_ROOT"
+            cp "$(Build.SourcesDirectory)/scripts/export_entra_baseline.py" "$SCRIPT_ROOT/export_entra_baseline.py"
+            cp "$(Build.SourcesDirectory)/scripts/validate_backup_outputs.py" "$SCRIPT_ROOT/validate_backup_outputs.py"
+            chmod +x "$SCRIPT_ROOT/export_entra_baseline.py" "$SCRIPT_ROOT/validate_backup_outputs.py"
+            echo "##vso[task.setvariable variable=PIPELINE_SCRIPT_ROOT]$SCRIPT_ROOT"
+          workingDirectory: "$(Build.SourcesDirectory)"
+          failOnStderr: true
+
+      - task: Bash@3
+        displayName: Prepare Entra drift branch from baseline
+        inputs:
+          targetType: inline
+          script: |
+            set -euo pipefail
+            if git ls-remote --exit-code --heads origin "$(DRIFT_BRANCH_ENTRA)" >/dev/null 2>&1; then
+              git fetch --quiet origin "$(BASELINE_BRANCH)" "$(DRIFT_BRANCH_ENTRA)"
+            else
+              git fetch --quiet origin "$(BASELINE_BRANCH)"
+            fi
+            git checkout --force -B "$(DRIFT_BRANCH_ENTRA)" "origin/$(BASELINE_BRANCH)"
+          workingDirectory: "$(Build.SourcesDirectory)"
+          failOnStderr: false
+
+      - task: Bash@3
+        displayName: Determine Entra export scope (light vs full)
+        inputs:
+          targetType: inline
+          script: |
+            set -euo pipefail
+            LOCAL_NOW="$(TZ=$(BACKUP_TIMEZONE) date '+%Y-%m-%d %H:%M:%S %Z')"
+            LOCAL_HOUR="$(TZ=$(BACKUP_TIMEZONE) date '+%H')"
+
+            FORCE_FULL_PARAM="$(echo '${{ parameters.forceFullRun }}' | tr '[:upper:]' '[:lower:]')"
+            if [ "$FORCE_FULL_PARAM" = "true" ]; then
+              MODE="full"
+              FULL_RUN=1
+              MODE_REASON="forced by parameter forceFullRun=true"
+            elif [ "$LOCAL_HOUR" = "$(FULL_RUN_HOUR)" ]; then
+              MODE="full"
+              FULL_RUN=1
+              MODE_REASON="scheduled midnight full run"
+            else
+              MODE="light"
+              FULL_RUN=0
+              MODE_REASON="default hourly light run"
+            fi
+
+            if [ "$(ENTRA_INCLUDE_ENTERPRISE_APPS)" = "true" ] && [ "$FULL_RUN" = "1" ]; then
+              ENTRA_INCLUDE_ENTERPRISE_APPS_EFFECTIVE="true"
+              ENTERPRISE_SCOPE_REASON="enabled (full run)"
+            elif [ "$(ENTRA_INCLUDE_ENTERPRISE_APPS)" = "true" ] && [ "$FULL_RUN" = "0" ]; then
+              ENTRA_INCLUDE_ENTERPRISE_APPS_EFFECTIVE="false"
+              ENTERPRISE_SCOPE_REASON="disabled (light run)"
+            else
+              ENTRA_INCLUDE_ENTERPRISE_APPS_EFFECTIVE="false"
+              ENTERPRISE_SCOPE_REASON="disabled (pipeline variable)"
+            fi
+
+            if [ "$(ENTRA_INCLUDE_APP_REGISTRATIONS)" = "true" ] && [ "$FULL_RUN" = "1" ]; then
+              ENTRA_INCLUDE_APP_REGISTRATIONS_EFFECTIVE="true"
+              APP_REG_SCOPE_REASON="enabled (full run)"
+            elif [ "$(ENTRA_INCLUDE_APP_REGISTRATIONS)" = "true" ] && [ "$FULL_RUN" = "0" ]; then
+              ENTRA_INCLUDE_APP_REGISTRATIONS_EFFECTIVE="false"
+              APP_REG_SCOPE_REASON="disabled (light run; TODO: resolution-flip issue)"
+            else
+              ENTRA_INCLUDE_APP_REGISTRATIONS_EFFECTIVE="false"
+              APP_REG_SCOPE_REASON="disabled (pipeline variable)"
+            fi
+
+            echo "Run mode decision (Entra): $MODE ($MODE_REASON; local time ($(BACKUP_TIMEZONE)): $LOCAL_NOW)"
+            echo "Enterprise Applications export scope: $ENTERPRISE_SCOPE_REASON"
+            echo "App Registrations export scope: $APP_REG_SCOPE_REASON"
+            echo "##vso[task.setvariable variable=ENTRA_RUN_MODE]$MODE"
+            echo "##vso[task.setvariable variable=ENTRA_INCLUDE_ENTERPRISE_APPS_EFFECTIVE]$ENTRA_INCLUDE_ENTERPRISE_APPS_EFFECTIVE"
+            echo "##vso[task.setvariable variable=ENTRA_INCLUDE_APP_REGISTRATIONS_EFFECTIVE]$ENTRA_INCLUDE_APP_REGISTRATIONS_EFFECTIVE"
+          workingDirectory: "$(Build.SourcesDirectory)"
+          failOnStderr: true
+
+      - task: Bash@3
+        displayName: Reset Entra export paths
+        inputs:
+          targetType: inline
+          script: |
+            set -euo pipefail
+            ENTRA_ROOT="$(Build.SourcesDirectory)/$(BACKUP_FOLDER)/$(ENTRA_BACKUP_SUBDIR)"
+            ENTRA_REPORTS_ROOT="$(Build.SourcesDirectory)/$(BACKUP_FOLDER)/$(REPORTS_SUBDIR)/entra"
+            mkdir -p "$ENTRA_ROOT"
+            PRESERVE_DIRS=()
+            if [ "$(ENTRA_INCLUDE_ENTERPRISE_APPS)" = "true" ] && [ "$(ENTRA_INCLUDE_ENTERPRISE_APPS_EFFECTIVE)" != "true" ]; then
+              PRESERVE_DIRS+=("Enterprise Applications")
+            fi
+            if [ "$(ENTRA_INCLUDE_APP_REGISTRATIONS)" = "true" ] && [ "$(ENTRA_INCLUDE_APP_REGISTRATIONS_EFFECTIVE)" != "true" ]; then
+              PRESERVE_DIRS+=("App Registrations")
+            fi
+            if [ "${#PRESERVE_DIRS[@]}" -gt 0 ]; then
+              echo "Preserving Entra baseline categories in light run: ${PRESERVE_DIRS[*]}"
+              if git show-ref --verify --quiet "refs/remotes/origin/$(DRIFT_BRANCH_ENTRA)"; then
+                for preserve_name in "${PRESERVE_DIRS[@]}"; do
+                  preserve_path="$(BACKUP_FOLDER)/$(ENTRA_BACKUP_SUBDIR)/$preserve_name"
+                  if git cat-file -e "origin/$(DRIFT_BRANCH_ENTRA):$preserve_path" 2>/dev/null; then
+                    git checkout --quiet "origin/$(DRIFT_BRANCH_ENTRA)" -- "$preserve_path" || true
+                  fi
+                done
+              fi
+              find "$ENTRA_ROOT" -mindepth 1 -maxdepth 1 -print0 | while IFS= read -r -d '' entry; do
+                entry_name="$(basename "$entry")"
+                keep=0
+                for preserve_name in "${PRESERVE_DIRS[@]}"; do
+                  if [ "$entry_name" = "$preserve_name" ]; then
+                    keep=1
+                    break
+                  fi
+                done
+                if [ "$keep" = "0" ]; then
+                  rm -rf "$entry"
+                fi
+              done
+            else
+              rm -rf "$ENTRA_ROOT"
+            fi
+            rm -rf "$ENTRA_REPORTS_ROOT"
+            mkdir -p "$ENTRA_ROOT"
+          workingDirectory: "$(Build.SourcesDirectory)"
+          failOnStderr: false
+
+      - task: Bash@3
+        displayName: Set Entra backup start time
+        inputs:
+          targetType: inline
+          script: |
+            set -euo pipefail
+            BACKUP_START="$(date +%Y.%m.%d:%H.%M.%S)"
+            echo "Entra backup start time (UTC): $BACKUP_START"
+            echo "##vso[task.setvariable variable=BACKUP_START]$BACKUP_START"
+          workingDirectory: "$(Build.SourcesDirectory)"
+          failOnStderr: true
+
+      - task: AzurePowerShell@5
+        displayName: Get Graph Token for Entra workload
+        inputs:
+          azureSubscription: $(SERVICE_CONNECTION_NAME)
+          azurePowerShellVersion: LatestVersion
+          ScriptType: inlineScript
+          Inline: |
+            $getTokenParams = @{
+              ResourceTypeName = 'MSGraph'
+              AsSecureString   = $true
+              ErrorAction      = 'Stop'
+            }
+            $tokenCommand = Get-Command Get-AzAccessToken -ErrorAction Stop
+            if ($tokenCommand.Parameters.ContainsKey('ForceRefresh')) {
+              $getTokenParams['ForceRefresh'] = $true
+            }
+            $accessToken = ([PSCredential]::New('dummy', (Get-AzAccessToken @getTokenParams).Token).GetNetworkCredential().Password)
+
+            $tokenParts = $accessToken.Split('.')
+            if ($tokenParts.Length -lt 2) { throw "Invalid Graph access token format." }
+            $payload = $tokenParts[1].Replace('-', '+').Replace('_', '/')
+            switch ($payload.Length % 4) {
+              2 { $payload += '==' }
+              3 { $payload += '=' }
+            }
+            $payloadJson = [System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String($payload))
+            $claims = $payloadJson | ConvertFrom-Json
+            $roles = @($claims.roles)
+            $sortedRoles = $roles | Sort-Object
+            Write-Host "Graph token roles (Entra workload): $($sortedRoles -join ', ')"
+
+            $missingRoles = @()
+            if ("$(ENTRA_INCLUDE_CONDITIONAL_ACCESS)" -eq "true") {
+              if (-not ($roles -contains 'Policy.Read.All')) { $missingRoles += 'Policy.Read.All' }
+              if (-not ($roles -contains 'Policy.Read.ConditionalAccess')) { $missingRoles += 'Policy.Read.ConditionalAccess' }
+            }
+            if ("$(ENTRA_INCLUDE_APP_REGISTRATIONS_EFFECTIVE)" -eq "true" -or "$(ENTRA_INCLUDE_ENTERPRISE_APPS_EFFECTIVE)" -eq "true") {
+              if (-not ($roles -contains 'Application.Read.All')) { $missingRoles += 'Application.Read.All' }
+            }
+            if ($missingRoles.Count -gt 0) {
+              $missingRoles = $missingRoles | Select-Object -Unique
+              Write-Host "##vso[task.logissue type=error]Graph token is missing Entra workload roles: $($missingRoles -join ', ')"
+              throw "Service connection token is missing required Entra permissions."
+            }
+
+            Write-Host "##vso[task.setvariable variable=accessToken;issecret=true]$accessToken"
+
+      - task: Bash@3
+        displayName: Export Entra baseline objects
+        inputs:
+          targetType: inline
+          script: |
+            set -euo pipefail
+            echo "Starting Entra baseline export (separate workload branch)..."
+            timeout 45m python3 -u "$(PIPELINE_SCRIPT_ROOT)/export_entra_baseline.py" \
+              --root "$(Build.SourcesDirectory)/$(BACKUP_FOLDER)/$(ENTRA_BACKUP_SUBDIR)" \
+              --token "$(accessToken)" \
+              --previous-snapshot-ref "origin/$(DRIFT_BRANCH_ENTRA)" \
+              --include-named-locations "$(ENTRA_INCLUDE_NAMED_LOCATIONS)" \
+              --include-authentication-strengths "$(ENTRA_INCLUDE_AUTHENTICATION_STRENGTHS)" \
+              --include-conditional-access "$(ENTRA_INCLUDE_CONDITIONAL_ACCESS)" \
+              --include-enterprise-applications "$(ENTRA_INCLUDE_ENTERPRISE_APPS_EFFECTIVE)" \
+              --enterprise-app-workers "$(ENTRA_ENTERPRISE_APP_WORKERS)" \
+              --include-app-registrations "$(ENTRA_INCLUDE_APP_REGISTRATIONS_EFFECTIVE)" \
+              --fail-on-export-error "true"
+          workingDirectory: "$(Build.SourcesDirectory)"
+          failOnStderr: false
+
+      - task: Bash@3
+        displayName: Resolve Conditional Access reference names (Entra)
+        condition: eq(variables['ENTRA_INCLUDE_CONDITIONAL_ACCESS'], 'true')
+        inputs:
+          targetType: inline
+          script: |
+            set -euo pipefail
+            python3 "$(Build.SourcesDirectory)/scripts/resolve_ca_references.py" \
+              --root "$(Build.SourcesDirectory)/$(BACKUP_FOLDER)/$(ENTRA_BACKUP_SUBDIR)" \
+              --token "$(accessToken)"
+          workingDirectory: "$(Build.SourcesDirectory)"
+          failOnStderr: false
+
+      - task: Bash@3
+        displayName: Generate policy assignment report (Entra CA)
+        condition: eq(variables['ENTRA_INCLUDE_CONDITIONAL_ACCESS'], 'true')
+        inputs:
+          targetType: inline
+          script: |
+            set -euo pipefail
+            python3 "$(Build.SourcesDirectory)/scripts/generate_assignment_report.py" \
+              --root "$(Build.SourcesDirectory)/$(BACKUP_FOLDER)/$(ENTRA_BACKUP_SUBDIR)" \
+              --output-dir "$(Build.SourcesDirectory)/$(BACKUP_FOLDER)/$(REPORTS_SUBDIR)/entra"
+          workingDirectory: "$(Build.SourcesDirectory)"
+          failOnStderr: true
+
+      - task: Bash@3
+        displayName: Generate apps inventory report (Entra)
+        condition: or(eq(variables['ENTRA_INCLUDE_APP_REGISTRATIONS_EFFECTIVE'], 'true'), eq(variables['ENTRA_INCLUDE_ENTERPRISE_APPS_EFFECTIVE'], 'true'))
+        inputs:
+          targetType: inline
+          script: |
+            set -euo pipefail
+            python3 "$(Build.SourcesDirectory)/scripts/generate_app_inventory_report.py" \
+              --root "$(Build.SourcesDirectory)/$(BACKUP_FOLDER)/$(ENTRA_BACKUP_SUBDIR)" \
+              --output-dir "$(Build.SourcesDirectory)/$(BACKUP_FOLDER)/$(REPORTS_SUBDIR)/entra"
+          workingDirectory: "$(Build.SourcesDirectory)"
+          failOnStderr: true
+
+      - task: Bash@3
+        displayName: Generate object inventory reports (Entra)
+        inputs:
+          targetType: inline
+          script: |
+            set -euo pipefail
+            python3 "$(Build.SourcesDirectory)/scripts/generate_object_inventory_reports.py" \
+              --root "$(Build.SourcesDirectory)/$(BACKUP_FOLDER)/$(ENTRA_BACKUP_SUBDIR)" \
+              --output-dir "$(Build.SourcesDirectory)/$(BACKUP_FOLDER)/$(REPORTS_SUBDIR)/entra"
+          workingDirectory: "$(Build.SourcesDirectory)"
+          failOnStderr: true
+
+      - task: Bash@3
+        displayName: Validate Entra backup outputs
+        inputs:
+          targetType: inline
+          script: |
+            set -euo pipefail
+            python3 "$(PIPELINE_SCRIPT_ROOT)/validate_backup_outputs.py" \
+              --workload entra \
+              --mode "$(ENTRA_RUN_MODE)" \
+              --root "$(Build.SourcesDirectory)/$(BACKUP_FOLDER)/$(ENTRA_BACKUP_SUBDIR)" \
+              --reports-root "$(Build.SourcesDirectory)/$(BACKUP_FOLDER)/$(REPORTS_SUBDIR)/entra" \
+              --include-named-locations "$(ENTRA_INCLUDE_NAMED_LOCATIONS)" \
+              --include-authentication-strengths "$(ENTRA_INCLUDE_AUTHENTICATION_STRENGTHS)" \
+              --include-conditional-access "$(ENTRA_INCLUDE_CONDITIONAL_ACCESS)" \
+              --include-enterprise-applications "$(ENTRA_INCLUDE_ENTERPRISE_APPS)" \
+              --include-enterprise-applications-effective "$(ENTRA_INCLUDE_ENTERPRISE_APPS_EFFECTIVE)" \
+              --include-app-registrations "$(ENTRA_INCLUDE_APP_REGISTRATIONS)" \
+              --include-app-registrations-effective "$(ENTRA_INCLUDE_APP_REGISTRATIONS_EFFECTIVE)"
+          workingDirectory: "$(Build.SourcesDirectory)"
+          failOnStderr: true
+
+      - task: Bash@3
+        displayName: Revert enrichment-only Entra drift noise
+        inputs:
+          targetType: inline
+          script: |
+            set -euo pipefail
+            python3 "$(Build.SourcesDirectory)/scripts/filter_entra_enrichment_noise.py" \
+              --repo-root "$(Build.SourcesDirectory)" \
+              --workload-root "$(BACKUP_FOLDER)/$(ENTRA_BACKUP_SUBDIR)" \
+              --fail-on-residual-enrichment-drift "true"
+          workingDirectory: "$(Build.SourcesDirectory)"
+          failOnStderr: true
+
+      - task: Bash@3
+        displayName: Commit & push Entra drift branch
+        name: commitEntra
+        inputs:
+          targetType: inline
+          script: |
+            set -euo pipefail
+            python3 "$(Build.SourcesDirectory)/scripts/commit_entra_drift.py" \
+              --repo-root "$(Build.SourcesDirectory)" \
+              --workload-root "$(BACKUP_FOLDER)/$(ENTRA_BACKUP_SUBDIR)" \
+              --baseline-branch "$(BASELINE_BRANCH)" \
+              --drift-branch "$(DRIFT_BRANCH_ENTRA)" \
+              --access-token "$(accessToken)" \
+              --service-name "$(USER_NAME)" \
+              --service-email "$(USER_EMAIL)" \
+              --build-reason "$(Build.Reason)" \
+              --requested-for "$(Build.RequestedFor)" \
+              --requested-for-email "$(Build.RequestedForEmail)" \
+              --backup-start "$(BACKUP_START)"
+          workingDirectory: "$(Build.SourcesDirectory)"
+          failOnStderr: false
+
+  - job: create_or_update_entra_pr
+    displayName: Create or update rolling Entra drift PR
+    dependsOn: backup_entra
+    condition: and(eq(variables['ENABLE_WORKLOAD_ENTRA'], 'true'), succeeded(), or(eq(dependencies.backup_entra.outputs['commitEntra.CHANGE_DETECTED'], '1'), eq(dependencies.backup_entra.outputs['commitEntra.ROLLING_PR_SYNC_REQUIRED'], '1')))
+    pool:
+      name: $(AGENT_POOL_NAME)
+    steps:
+      - checkout: self
+        persistCredentials: true
+
+      - task: Bash@3
+        displayName: Ensure rolling Entra PR exists
+        inputs:
+          targetType: inline
+          script: |
+            set -euo pipefail
+            python3 "$(Build.SourcesDirectory)/scripts/ensure_rolling_pr.py" \
+              --repo-root "$(Build.SourcesDirectory)" \
+              --workload "entra" \
+              --drift-branch "$(DRIFT_BRANCH_ENTRA)" \
+              --baseline-branch "$(BASELINE_BRANCH)" \
+              --pr-title "$(ROLLING_PR_TITLE_ENTRA)"
+          failOnStderr: true
+        env:
+          SYSTEM_ACCESSTOKEN: $(System.AccessToken)
+          SYSTEM_COLLECTIONURI: $(System.CollectionUri)
+          SYSTEM_TEAMPROJECT: $(System.TeamProject)
+          BUILD_REPOSITORY_ID: $(Build.Repository.ID)
+          BUILD_BUILDNUMBER: $(Build.BuildNumber)
+          BUILD_BUILDID: $(Build.BuildId)
+          AUTO_REMEDIATE_ON_PR_REJECTION: $(AUTO_REMEDIATE_ON_PR_REJECTION)
+          AUTO_REMEDIATE_RESTORE_PIPELINE_ID: $(AUTO_REMEDIATE_RESTORE_PIPELINE_ID)
+          AUTO_REMEDIATE_DRY_RUN: $(AUTO_REMEDIATE_DRY_RUN)
+          AUTO_REMEDIATE_UPDATE_ASSIGNMENTS: $(AUTO_REMEDIATE_UPDATE_ASSIGNMENTS)
+          AUTO_REMEDIATE_REMOVE_OBJECTS: $(AUTO_REMEDIATE_REMOVE_OBJECTS)
+          AUTO_REMEDIATE_MAX_WORKERS: $(AUTO_REMEDIATE_MAX_WORKERS)
+          AUTO_REMEDIATE_EXCLUDE_CSV: $(AUTO_REMEDIATE_EXCLUDE_CSV)
+          AUTO_REMEDIATE_INCLUDE_ENTRA_UPDATE: true
+          ROLLING_PR_DELAY_REVIEWER_NOTIFICATIONS: $(ROLLING_PR_DELAY_REVIEWER_NOTIFICATIONS)
+          ROLLING_PR_MERGE_STRATEGY: $(ROLLING_PR_MERGE_STRATEGY)
+
+  - job: update_entra_pr_summary
+    displayName: Update rolling Entra PR summary
+    dependsOn:
+      - backup_entra
+      - create_or_update_entra_pr
+    condition: and(eq(variables['ENABLE_WORKLOAD_ENTRA'], 'true'), eq(variables['ENABLE_PR_REVIEW_SUMMARY'], 'true'), or(eq(dependencies.backup_entra.outputs['commitEntra.CHANGE_DETECTED'], '1'), eq(dependencies.backup_entra.outputs['commitEntra.ROLLING_PR_SYNC_REQUIRED'], '1')), in(dependencies.backup_entra.result, 'Succeeded', 'SucceededWithIssues'), in(dependencies.create_or_update_entra_pr.result, 'Succeeded', 'SucceededWithIssues', 'Skipped'))
+    pool:
+      name: $(AGENT_POOL_NAME)
+    continueOnError: false
+    steps:
+      - checkout: self
+        persistCredentials: true
+
+      - task: Bash@3
+        displayName: Validate Azure OpenAI availability (Entra)
+        condition: eq(variables['ENABLE_PR_AI_SUMMARY'], 'true')
+        inputs:
+          targetType: inline
+          script: |
+            set -euo pipefail
+            python3 "$(Build.SourcesDirectory)/scripts/diagnostics/precheck_azure_openai_availability.py"
+          workingDirectory: "$(Build.SourcesDirectory)"
+          failOnStderr: false
+        env:
+          ENABLE_PR_AI_SUMMARY: $(ENABLE_PR_AI_SUMMARY)
+          AZURE_OPENAI_ENDPOINT: $(AZURE_OPENAI_ENDPOINT)
+          AZURE_OPENAI_DEPLOYMENT: $(AZURE_OPENAI_DEPLOYMENT)
+          AZURE_OPENAI_API_KEY: $(AZURE_OPENAI_API_KEY)
+          AZURE_OPENAI_API_VERSION: $(AZURE_OPENAI_API_VERSION)
+
+      - task: Bash@3
+        displayName: Debug change-ticket gate vars (Entra)
+        inputs:
+          targetType: inline
+          script: |
+            set -euo pipefail
+            echo "ENABLE_PR_REVIEW_SUMMARY='$(ENABLE_PR_REVIEW_SUMMARY)'"
+            echo "REQUIRE_CHANGE_TICKETS='$(REQUIRE_CHANGE_TICKETS)'"
+            echo "CHANGE_TICKET_REGEX='$(CHANGE_TICKET_REGEX)'"
+            echo "DEBUG_CHANGE_TICKET_THREADS='$(DEBUG_CHANGE_TICKET_THREADS)'"
+          workingDirectory: "$(Build.SourcesDirectory)"
+          failOnStderr: false
+
+      - task: Bash@3
+        displayName: Update automated reviewer summary (Entra)
+        inputs:
+          targetType: inline
+          script: |
+            set -euo pipefail
+            python3 "$(Build.SourcesDirectory)/scripts/update_pr_review_summary.py" \
+              --repo-root "$(Build.SourcesDirectory)" \
+              --workload "entra" \
+              --backup-folder "$(BACKUP_FOLDER)" \
+              --reports-subdir "$(REPORTS_SUBDIR)" \
+              --drift-branch "$(DRIFT_BRANCH_ENTRA)" \
+              --baseline-branch "$(BASELINE_BRANCH)"
+          workingDirectory: "$(Build.SourcesDirectory)"
+          failOnStderr: false
+        env:
+          SYSTEM_ACCESSTOKEN: $(System.AccessToken)
+          SYSTEM_COLLECTIONURI: $(System.CollectionUri)
+          SYSTEM_TEAMPROJECT: $(System.TeamProject)
+          BUILD_REPOSITORY_ID: $(Build.Repository.ID)
+          ENABLE_PR_AI_SUMMARY: $(ENABLE_PR_AI_SUMMARY)
+          AZURE_OPENAI_ENDPOINT: $(AZURE_OPENAI_ENDPOINT)
+          AZURE_OPENAI_DEPLOYMENT: $(AZURE_OPENAI_DEPLOYMENT)
+          AZURE_OPENAI_API_KEY: $(AZURE_OPENAI_API_KEY)
+          AZURE_OPENAI_API_VERSION: $(AZURE_OPENAI_API_VERSION)
+          REQUIRE_CHANGE_TICKETS: $(REQUIRE_CHANGE_TICKETS)
+          CHANGE_TICKET_REGEX: $(CHANGE_TICKET_REGEX)
+          DEBUG_CHANGE_TICKET_THREADS: $(DEBUG_CHANGE_TICKET_THREADS)
+          ROLLING_PR_DELAY_REVIEWER_NOTIFICATIONS: $(ROLLING_PR_DELAY_REVIEWER_NOTIFICATIONS)
+
+      - task: Bash@3
+        displayName: Apply reviewer /reject decisions (Entra)
+        condition: eq(variables['ENABLE_PR_REVIEWER_DECISIONS'], 'true')
+        inputs:
+          targetType: inline
+          script: |
+            set -euo pipefail
+            python3 "$(Build.SourcesDirectory)/scripts/apply_reviewer_rejections.py" \
+              --repo-root "$(Build.SourcesDirectory)" \
+              --workload "entra" \
+              --drift-branch "$(DRIFT_BRANCH_ENTRA)" \
+              --baseline-branch "$(BASELINE_BRANCH)"
+          workingDirectory: "$(Build.SourcesDirectory)"
+          failOnStderr: false
+        env:
+          SYSTEM_ACCESSTOKEN: $(System.AccessToken)
+          SYSTEM_COLLECTIONURI: $(System.CollectionUri)
+          SYSTEM_TEAMPROJECT: $(System.TeamProject)
+          BUILD_REPOSITORY_ID: $(Build.Repository.ID)
+
+      - task: Bash@3
+        displayName: Queue post-merge remediation from reviewer /reject (Entra)
+        condition: eq(variables['AUTO_REMEDIATE_AFTER_MERGE'], 'true')
+        inputs:
+          targetType: inline
+          script: |
+            set -euo pipefail
+            python3 "$(Build.SourcesDirectory)/scripts/queue_post_merge_restore.py" \
+              --workload "entra" \
+              --drift-branch "$(DRIFT_BRANCH_ENTRA)" \
+              --baseline-branch "$(BASELINE_BRANCH)"
+          workingDirectory: "$(Build.SourcesDirectory)"
+          failOnStderr: false
+        env:
+          SYSTEM_ACCESSTOKEN: $(System.AccessToken)
+          SYSTEM_COLLECTIONURI: $(System.CollectionUri)
+          SYSTEM_TEAMPROJECT: $(System.TeamProject)
+          BUILD_REPOSITORY_ID: $(Build.Repository.ID)
+          AUTO_REMEDIATE_AFTER_MERGE: $(AUTO_REMEDIATE_AFTER_MERGE)
+          AUTO_REMEDIATE_AFTER_MERGE_LOOKBACK_HOURS: $(AUTO_REMEDIATE_AFTER_MERGE_LOOKBACK_HOURS)
+          AUTO_REMEDIATE_RESTORE_PIPELINE_ID: $(AUTO_REMEDIATE_RESTORE_PIPELINE_ID)
+          AUTO_REMEDIATE_DRY_RUN: $(AUTO_REMEDIATE_DRY_RUN)
+          AUTO_REMEDIATE_UPDATE_ASSIGNMENTS: $(AUTO_REMEDIATE_UPDATE_ASSIGNMENTS)
+          AUTO_REMEDIATE_REMOVE_OBJECTS: $(AUTO_REMEDIATE_REMOVE_OBJECTS)
+          AUTO_REMEDIATE_MAX_WORKERS: $(AUTO_REMEDIATE_MAX_WORKERS)
+          AUTO_REMEDIATE_EXCLUDE_CSV: $(AUTO_REMEDIATE_EXCLUDE_CSV)
+          AUTO_REMEDIATE_INCLUDE_ENTRA_UPDATE: true
+
+  - job: tag
+    displayName: Tag repo
+    dependsOn: backup_intune
+    condition: and(eq(variables['ENABLE_TAGGING'], 'true'), succeeded(), eq(dependencies.backup_intune.outputs['commitAndSetVariable.CHANGE_DETECTED'], '1'), eq(dependencies.backup_intune.outputs['setRunMode.FULL_RUN'], '1'))
+    pool:
+      name: $(AGENT_POOL_NAME)
+    continueOnError: false
+    variables:
+      COMMIT_DATE: $[ dependencies.backup_intune.outputs['commitAndSetVariable.COMMIT_DATE'] ]
+      MODIFICATION_AUTHOR: $[ dependencies.backup_intune.outputs['commitAndSetVariable.MODIFICATION_AUTHOR'] ]
+      COMMIT_SHA: $[ dependencies.backup_intune.outputs['commitAndSetVariable.COMMIT_SHA'] ]
+    steps:
+      - checkout: self
+        persistCredentials: true
+
+      - task: Bash@3
+        displayName: Configure Git
+        inputs:
+          targetType: inline
+          script: |
+            git config user.name "$(USER_NAME)"
+            git config user.email "$(USER_EMAIL)"
+          workingDirectory: "$(Build.SourcesDirectory)"
+          failOnStderr: true
+
+      - task: Bash@3
+        displayName: Pull origin
+        inputs:
+          targetType: inline
+          script: |
+            set -euo pipefail
+            git fetch --quiet origin "$(DRIFT_BRANCH_INTUNE)"
+            git checkout --force -B "$(DRIFT_BRANCH_INTUNE)" "origin/$(DRIFT_BRANCH_INTUNE)"
+          workingDirectory: "$(Build.SourcesDirectory)"
+          failOnStderr: false
+
+      - task: PowerShell@2
+        displayName: Git tag
+        inputs:
+          targetType: inline
+          pwsh: true
+          script: |
+            $ErrorActionPreference = "Stop"
+            $DATEF = "$(COMMIT_DATE)"
+            $COMMIT_SHA = "$(COMMIT_SHA)"
+            Write-Host "Creating TAG '$DATEF'"
+            if ([string]::IsNullOrWhiteSpace($COMMIT_SHA)) { throw "COMMIT_SHA is empty; backup job did not publish commit SHA." }
+            $existingTag = git ls-remote --tags origin "refs/tags/$DATEF"
+            if ($LASTEXITCODE -ne 0) { throw "Failed to query existing tags from origin." }
+            if (-not [string]::IsNullOrWhiteSpace($existingTag)) {
+              Write-Host "Tag '$DATEF' already exists on origin. Skipping."
+              exit 0
+            }
+            git tag -a "$DATEF" "$COMMIT_SHA" -m "$DATEF -- Intune configuration snapshot (changes made by: $(MODIFICATION_AUTHOR))"
+            if ($LASTEXITCODE -ne 0) { throw "Failed to create tag '$DATEF'" }
+            git push origin "$DATEF" 2>&1 | Out-Null
+            if ($LASTEXITCODE -ne 0) { throw "Failed to push tag '$DATEF'" }
+          workingDirectory: "$(Build.SourcesDirectory)"
+          failOnStderr: false
+
+  # Publish PDF & HTML documents as artifacts
+  - job: publish
+    displayName: Publish as-built artifacts
+    dependsOn: backup_intune
+    condition: and(succeeded(), eq(dependencies.backup_intune.outputs['commitAndSetVariable.CHANGE_DETECTED'], '1'), eq(dependencies.backup_intune.outputs['setRunMode.FULL_RUN'], '1'))
+    pool:
+      name: $(AGENT_POOL_NAME)
+    continueOnError: false
+    steps:
+      - checkout: self
+        persistCredentials: true
+
+      - task: Bash@3
+        displayName: Pull latest drift branch
+        inputs:
+          targetType: inline
+          script: |
+            set -euo pipefail
+            git fetch --quiet origin "$(DRIFT_BRANCH_INTUNE)"
+            git checkout --force -B "$(DRIFT_BRANCH_INTUNE)" "origin/$(DRIFT_BRANCH_INTUNE)"
+          workingDirectory: "$(Build.SourcesDirectory)"
+          failOnStderr: false
+
+      - task: NodeTool@0
+        displayName: Install Node.js
+        inputs:
+          versionSpec: "20.x"
+
+      - task: Bash@3
+        displayName: Install md-to-pdf
+        inputs:
+          targetType: inline
+          script: |
+            set -euo pipefail
+            npm i --location=global "md-to-pdf@$(MD_TO_PDF_VERSION)"
+          workingDirectory: "$(Build.SourcesDirectory)"
+          failOnStderr: true
+
+      - task: Bash@3
+        displayName: Ensure browser dependencies for md-to-pdf
+        inputs:
+          targetType: inline
+          script: |
+            set -euo pipefail
+
+            has_libglib() {
+              if command -v ldconfig >/dev/null 2>&1; then
+                ldconfig -p 2>/dev/null | grep -q "libglib-2.0.so.0" && return 0
+              fi
+              find /lib /usr/lib /usr/local/lib -type f -name "libglib-2.0.so.0*" 2>/dev/null | grep -q .
+            }
+
+            if has_libglib; then
+              echo "Browser dependencies look present."
+              echo "##vso[task.setvariable variable=BROWSER_DEPS_READY]1"
+              exit 0
+            fi
+
+            echo "libglib-2.0.so.0 not found. Attempting to install Chromium runtime dependencies."
+
+            if command -v apt-get >/dev/null 2>&1; then
+              SUDO=""
+              if command -v sudo >/dev/null 2>&1; then
+                SUDO="sudo"
+              fi
+
+              set +e
+              $SUDO apt-get update
+              apt_update_rc=$?
+              if [ "$apt_update_rc" -eq 0 ]; then
+                $SUDO env DEBIAN_FRONTEND=noninteractive apt-get install -y \
+                  libasound2 \
+                  libatk-bridge2.0-0 \
+                  libatk1.0-0 \
+                  libc6 \
+                  libcairo2 \
+                  libcups2 \
+                  libdbus-1-3 \
+                  libdrm2 \
+                  libexpat1 \
+                  libfontconfig1 \
+                  libgbm1 \
+                  libglib2.0-0 \
+                  libgtk-3-0 \
+                  libnspr4 \
+                  libnss3 \
+                  libpango-1.0-0 \
+                  libx11-6 \
+                  libx11-xcb1 \
+                  libxcb1 \
+                  libxcomposite1 \
+                  libxdamage1 \
+                  libxext6 \
+                  libxfixes3 \
+                  libxkbcommon0 \
+                  libxrandr2
+                apt_install_rc=$?
+                if [ "$apt_install_rc" -ne 0 ]; then
+                  echo "##vso[task.logissue type=warning]apt-get install failed with code $apt_install_rc. HTML/PDF conversion will be skipped."
+                fi
+              else
+                echo "##vso[task.logissue type=warning]apt-get update failed with code $apt_update_rc. HTML/PDF conversion will be skipped."
+              fi
+              set -e
+            else
+              echo "##vso[task.logissue type=warning]apt-get is not available on this agent. Cannot auto-install browser dependencies."
+            fi
+
+            if has_libglib; then
+              echo "Browser dependencies are ready."
+              echo "##vso[task.setvariable variable=BROWSER_DEPS_READY]1"
+            else
+              echo "##vso[task.logissue type=warning]Browser dependencies still missing (libglib-2.0.so.0). HTML/PDF conversion will be skipped."
+              echo "##vso[task.setvariable variable=BROWSER_DEPS_READY]0"
+            fi
+          workingDirectory: "$(Build.SourcesDirectory)"
+          failOnStderr: false
+
+      - task: Bash@3
+        displayName: Convert markdown to HTML
+        condition: and(eq(variables['CHANGE_DETECTED'], '1'), eq(variables['FULL_RUN'], '1'), ne(variables['SPLIT_DOCUMENTATION'], 'true'), eq(variables['BROWSER_DEPS_READY'], '1'))
+        inputs:
+          targetType: inline
+          script: |
+            set -euo pipefail
+            INPUT_FILE="$(Build.SourcesDirectory)/prod-as-built.md"
+            OUTPUT_FILE="$(Build.SourcesDirectory)/prod-as-built.html"
+            [ -s "$INPUT_FILE" ]
+            wc -c "$INPUT_FILE"
+            time timeout 20m md-to-pdf "$INPUT_FILE" \
+              --config-file "$(Build.SourcesDirectory)/md2pdf/htmlconfig.json" \
+              --as-html \
+              --launch-options '{"args":["--no-sandbox","--disable-dev-shm-usage"]}' \
+              > "$OUTPUT_FILE"
+            [ -s "$OUTPUT_FILE" ]
+          workingDirectory: "$(Build.SourcesDirectory)"
+          failOnStderr: true
+
+      - task: Bash@3
+        displayName: Collect split markdown docs
+        condition: and(eq(variables['CHANGE_DETECTED'], '1'), eq(variables['FULL_RUN'], '1'), eq(variables['SPLIT_DOCUMENTATION'], 'true'))
+        inputs:
+          targetType: inline
+          script: |
+            set -euo pipefail
+            SRC_DIR="$(Build.SourcesDirectory)/$(BACKUP_FOLDER)/$(INTUNE_BACKUP_SUBDIR)"
+            OUT_DIR="$(Build.SourcesDirectory)/prod-as-built-split-md"
+            rm -rf "$OUT_DIR"
+            mkdir -p "$OUT_DIR"
+            while IFS= read -r f; do
+              rel_path="${f#"$SRC_DIR/"}"
+              mkdir -p "$OUT_DIR/$(dirname "$rel_path")"
+              cp "$f" "$OUT_DIR/$rel_path"
+            done < <(find "$SRC_DIR" -type f -name '*.md' | sort)
+            find "$OUT_DIR" -type f -name '*.md' | wc -l
+            [ -n "$(find "$OUT_DIR" -type f -name '*.md' -print -quit)" ]
+          workingDirectory: "$(Build.SourcesDirectory)"
+          failOnStderr: true
+
+      - task: Bash@3
+        displayName: Convert split markdown to HTML
+        condition: and(eq(variables['CHANGE_DETECTED'], '1'), eq(variables['FULL_RUN'], '1'), eq(variables['SPLIT_DOCUMENTATION'], 'true'), eq(variables['BROWSER_DEPS_READY'], '1'))
+        inputs:
+          targetType: inline
+          script: |
+            set -euo pipefail
+            SRC_DIR="$(Build.SourcesDirectory)/prod-as-built-split-md"
+            OUT_DIR="$(Build.SourcesDirectory)/prod-as-built-split-html"
+            rm -rf "$OUT_DIR"
+            mkdir -p "$OUT_DIR"
+            count=0
+            while IFS= read -r md_file; do
+              count=$((count + 1))
+              wc -c "$md_file"
+              rel_path="${md_file#"$SRC_DIR/"}"
+              out_html="$OUT_DIR/${rel_path%.md}.html"
+              mkdir -p "$(dirname "$out_html")"
+              timeout 5m md-to-pdf "$md_file" \
+                --config-file "$(Build.SourcesDirectory)/md2pdf/htmlconfig.json" \
+                --as-html \
+                --launch-options '{"args":["--no-sandbox","--disable-dev-shm-usage"]}' \
+                > "$out_html"
+              [ -s "$out_html" ]
+            done < <(find "$SRC_DIR" -type f -name '*.md' | sort)
+            echo "Converted $count markdown files to split HTML artifacts."
+            [ "$count" -gt 0 ]
+          workingDirectory: "$(Build.SourcesDirectory)"
+          failOnStderr: true
+
+      - task: PublishBuildArtifacts@1
+        condition: and(eq(variables['CHANGE_DETECTED'], '1'), eq(variables['FULL_RUN'], '1'), ne(variables['SPLIT_DOCUMENTATION'], 'true'), eq(variables['BROWSER_DEPS_READY'], '1'))
+        inputs:
+          pathToPublish: "$(Build.SourcesDirectory)/prod-as-built.html"
+          artifactName: "prod-as-built-html"
+
+      - task: PublishBuildArtifacts@1
+        condition: and(eq(variables['CHANGE_DETECTED'], '1'), eq(variables['FULL_RUN'], '1'), eq(variables['SPLIT_DOCUMENTATION'], 'true'))
+        inputs:
+          pathToPublish: "$(Build.SourcesDirectory)/prod-as-built-split-md"
+          artifactName: "prod-as-built-split-markdown"
+
+      - task: PublishBuildArtifacts@1
+        condition: and(eq(variables['CHANGE_DETECTED'], '1'), eq(variables['FULL_RUN'], '1'), eq(variables['SPLIT_DOCUMENTATION'], 'true'), eq(variables['BROWSER_DEPS_READY'], '1'))
+        inputs:
+          pathToPublish: "$(Build.SourcesDirectory)/prod-as-built-split-html"
+          artifactName: "prod-as-built-split-html"
+
+      - task: Bash@3
+        displayName: Convert markdown to PDF
+        condition: and(eq(variables['CHANGE_DETECTED'], '1'), eq(variables['FULL_RUN'], '1'), ne(variables['SPLIT_DOCUMENTATION'], 'true'), eq(variables['BROWSER_DEPS_READY'], '1'))
+        inputs:
+          targetType: inline
+          script: |
+            set -euo pipefail
+            INPUT_FILE="$(Build.SourcesDirectory)/prod-as-built.md"
+            OUTPUT_FILE="$(Build.SourcesDirectory)/prod-as-built.pdf"
+            [ -s "$INPUT_FILE" ]
+            wc -c "$INPUT_FILE"
+            time timeout 20m md-to-pdf "$INPUT_FILE" \
+              --config-file "$(Build.SourcesDirectory)/md2pdf/pdfconfig.json" \
+              --launch-options '{"args":["--no-sandbox","--disable-dev-shm-usage"]}' \
+              > "$OUTPUT_FILE"
+            [ -s "$OUTPUT_FILE" ]
+          workingDirectory: "$(Build.SourcesDirectory)"
+          failOnStderr: true
+
+      - task: Bash@3
+        displayName: Convert split markdown to PDF
+        condition: and(eq(variables['CHANGE_DETECTED'], '1'), eq(variables['FULL_RUN'], '1'), eq(variables['SPLIT_DOCUMENTATION'], 'true'), eq(variables['BROWSER_DEPS_READY'], '1'))
+        inputs:
+          targetType: inline
+          script: |
+            set -euo pipefail
+            SRC_DIR="$(Build.SourcesDirectory)/prod-as-built-split-md"
+            OUT_DIR="$(Build.SourcesDirectory)/prod-as-built-split-pdf"
+            rm -rf "$OUT_DIR"
+            mkdir -p "$OUT_DIR"
+            count=0
+            while IFS= read -r md_file; do
+              count=$((count + 1))
+              wc -c "$md_file"
+              rel_path="${md_file#"$SRC_DIR/"}"
+              out_pdf="$OUT_DIR/${rel_path%.md}.pdf"
+              mkdir -p "$(dirname "$out_pdf")"
+              timeout 5m md-to-pdf "$md_file" \
+                --config-file "$(Build.SourcesDirectory)/md2pdf/pdfconfig.json" \
+                --launch-options '{"args":["--no-sandbox","--disable-dev-shm-usage"]}' \
+                > "$out_pdf"
+              [ -s "$out_pdf" ]
+            done < <(find "$SRC_DIR" -type f -name '*.md' | sort)
+            echo "Converted $count markdown files to split PDF artifacts."
+            [ "$count" -gt 0 ]
+          workingDirectory: "$(Build.SourcesDirectory)"
+          failOnStderr: true
+
+      - task: PublishBuildArtifacts@1
+        condition: and(eq(variables['CHANGE_DETECTED'], '1'), eq(variables['FULL_RUN'], '1'), ne(variables['SPLIT_DOCUMENTATION'], 'true'), eq(variables['BROWSER_DEPS_READY'], '1'))
+        inputs:
+          pathToPublish: "$(Build.SourcesDirectory)/prod-as-built.pdf"
+          artifactName: "prod-as-built-pdf"
+
+      - task: PublishBuildArtifacts@1
+        condition: and(eq(variables['CHANGE_DETECTED'], '1'), eq(variables['FULL_RUN'], '1'), eq(variables['SPLIT_DOCUMENTATION'], 'true'), eq(variables['BROWSER_DEPS_READY'], '1'))
+        inputs:
+          pathToPublish: "$(Build.SourcesDirectory)/prod-as-built-split-pdf"
+          artifactName: "prod-as-built-split-pdf"

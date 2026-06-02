@@ -1,0 +1,19 @@
+.DS_Store
+docs/share/
+docs/security-review-package.pdf
+docs/security-review-questionnaire.pdf
+node_modules/
+__pycache__/
+*.py[cod]
+*$py.class
+package.json
+package-lock.json
+**/local.settings.json
+
+# Azure Function deployment artifacts (copied/generated during zip build)
+infra/change-probe/.python_packages/
+infra/change-probe/scripts/
+*.zip
+
+# Saved deployment defaults (local user preferences)
+.astral-deploy.json

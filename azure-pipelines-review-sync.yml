@@ -1,0 +1,234 @@
+trigger: none
+pr: none
+
+schedules:
+  - cron: "*/20 * * * *"
+    displayName: "Review decision sync (every 20 minutes)"
+    branches:
+      include:
+        - main
+    always: true
+    batch: true
+
+variables:
+  # Tenant-specific values are expected in a variable group (see templates/variables-tenant.yml).
+  # Uncomment the line below after creating the group in your Azure DevOps project.
+  - group: vg-astral-cqre
+  - template: templates/variables-common.yml
+
+jobs:
+  - job: sync_intune_review_decisions
+    displayName: Sync Intune reviewer decisions
+    condition: eq(variables['ENABLE_WORKLOAD_INTUNE'], 'true')
+    pool:
+      name: $(AGENT_POOL_NAME)
+    steps:
+      - checkout: self
+        persistCredentials: true
+
+      # Uncomment the block below for agent-side debugging.
+      # - task: Bash@3
+      #   displayName: DEBUG — dump agent state (Intune review sync)
+      #   inputs:
+      #     targetType: inline
+      #     script: |
+      #       set -euo pipefail
+      #       echo "=== Variables ==="
+      #       echo "BACKUP_FOLDER=$(BACKUP_FOLDER)"
+      #       echo "DRIFT_BRANCH_INTUNE=$(DRIFT_BRANCH_INTUNE)"
+      #       echo "BASELINE_BRANCH=$(BASELINE_BRANCH)"
+      #       echo "=== Git state ==="
+      #       git branch -a
+      #       git log --oneline -5
+      #       git status --short
+      #       echo "=== File system ==="
+      #       ls -la "$(Build.SourcesDirectory)"
+      #       find "$(BACKUP_FOLDER)" -maxdepth 2 -type d 2>/dev/null || true
+      #   workingDirectory: "$(Build.SourcesDirectory)"
+
+      - task: Bash@3
+        displayName: Apply reviewer /reject decisions (Intune)
+        condition: eq(variables['ENABLE_PR_REVIEWER_DECISIONS'], 'true')
+        inputs:
+          targetType: inline
+          script: |
+            set -euo pipefail
+            python3 "$(Build.SourcesDirectory)/scripts/apply_reviewer_rejections.py" \
+              --repo-root "$(Build.SourcesDirectory)" \
+              --workload "intune" \
+              --drift-branch "$(DRIFT_BRANCH_INTUNE)" \
+              --baseline-branch "$(BASELINE_BRANCH)"
+          workingDirectory: "$(Build.SourcesDirectory)"
+          failOnStderr: false
+        env:
+          SYSTEM_ACCESSTOKEN: $(System.AccessToken)
+          SYSTEM_COLLECTIONURI: $(System.CollectionUri)
+          SYSTEM_TEAMPROJECT: $(System.TeamProject)
+          BUILD_REPOSITORY_ID: $(Build.Repository.ID)
+
+      - task: Bash@3
+        displayName: Update automated reviewer summary (Intune)
+        condition: eq(variables['ENABLE_PR_REVIEW_SUMMARY'], 'true')
+        inputs:
+          targetType: inline
+          script: |
+            set -euo pipefail
+            python3 "$(Build.SourcesDirectory)/scripts/update_pr_review_summary.py" \
+              --repo-root "$(Build.SourcesDirectory)" \
+              --workload "intune" \
+              --backup-folder "$(BACKUP_FOLDER)" \
+              --reports-subdir "$(REPORTS_SUBDIR)" \
+              --drift-branch "$(DRIFT_BRANCH_INTUNE)" \
+              --baseline-branch "$(BASELINE_BRANCH)"
+          workingDirectory: "$(Build.SourcesDirectory)"
+          failOnStderr: false
+        env:
+          SYSTEM_ACCESSTOKEN: $(System.AccessToken)
+          SYSTEM_COLLECTIONURI: $(System.CollectionUri)
+          SYSTEM_TEAMPROJECT: $(System.TeamProject)
+          BUILD_REPOSITORY_ID: $(Build.Repository.ID)
+          ENABLE_PR_AI_SUMMARY: $(ENABLE_PR_AI_SUMMARY)
+          AZURE_OPENAI_ENDPOINT: $(AZURE_OPENAI_ENDPOINT)
+          AZURE_OPENAI_DEPLOYMENT: $(AZURE_OPENAI_DEPLOYMENT)
+          AZURE_OPENAI_API_KEY: $(AZURE_OPENAI_API_KEY)
+          AZURE_OPENAI_API_VERSION: $(AZURE_OPENAI_API_VERSION)
+          REQUIRE_CHANGE_TICKETS: $(REQUIRE_CHANGE_TICKETS)
+          CHANGE_TICKET_REGEX: $(CHANGE_TICKET_REGEX)
+          DEBUG_CHANGE_TICKET_THREADS: $(DEBUG_CHANGE_TICKET_THREADS)
+          ROLLING_PR_DELAY_REVIEWER_NOTIFICATIONS: $(ROLLING_PR_DELAY_REVIEWER_NOTIFICATIONS)
+
+      - task: Bash@3
+        displayName: Queue post-merge remediation from reviewer /reject (Intune)
+        condition: eq(variables['AUTO_REMEDIATE_AFTER_MERGE'], 'true')
+        inputs:
+          targetType: inline
+          script: |
+            set -euo pipefail
+            python3 "$(Build.SourcesDirectory)/scripts/queue_post_merge_restore.py" \
+              --workload "intune" \
+              --drift-branch "$(DRIFT_BRANCH_INTUNE)" \
+              --baseline-branch "$(BASELINE_BRANCH)"
+          workingDirectory: "$(Build.SourcesDirectory)"
+          failOnStderr: false
+        env:
+          SYSTEM_ACCESSTOKEN: $(System.AccessToken)
+          SYSTEM_COLLECTIONURI: $(System.CollectionUri)
+          SYSTEM_TEAMPROJECT: $(System.TeamProject)
+          BUILD_REPOSITORY_ID: $(Build.Repository.ID)
+          AUTO_REMEDIATE_AFTER_MERGE: $(AUTO_REMEDIATE_AFTER_MERGE)
+          AUTO_REMEDIATE_AFTER_MERGE_LOOKBACK_HOURS: $(AUTO_REMEDIATE_AFTER_MERGE_LOOKBACK_HOURS)
+          AUTO_REMEDIATE_RESTORE_PIPELINE_ID: $(AUTO_REMEDIATE_RESTORE_PIPELINE_ID)
+          AUTO_REMEDIATE_DRY_RUN: $(AUTO_REMEDIATE_DRY_RUN)
+          AUTO_REMEDIATE_UPDATE_ASSIGNMENTS: $(AUTO_REMEDIATE_UPDATE_ASSIGNMENTS)
+          AUTO_REMEDIATE_REMOVE_OBJECTS: $(AUTO_REMEDIATE_REMOVE_OBJECTS)
+          AUTO_REMEDIATE_MAX_WORKERS: $(AUTO_REMEDIATE_MAX_WORKERS)
+          AUTO_REMEDIATE_EXCLUDE_CSV: $(AUTO_REMEDIATE_EXCLUDE_CSV)
+          AUTO_REMEDIATE_INCLUDE_ENTRA_UPDATE: false
+
+  - job: sync_entra_review_decisions
+    displayName: Sync Entra reviewer decisions
+    condition: eq(variables['ENABLE_WORKLOAD_ENTRA'], 'true')
+    pool:
+      name: $(AGENT_POOL_NAME)
+    steps:
+      - checkout: self
+        persistCredentials: true
+
+      # Uncomment the block below for agent-side debugging.
+      # - task: Bash@3
+      #   displayName: DEBUG — dump agent state (Entra review sync)
+      #   inputs:
+      #     targetType: inline
+      #     script: |
+      #       set -euo pipefail
+      #       echo "=== Variables ==="
+      #       echo "BACKUP_FOLDER=$(BACKUP_FOLDER)"
+      #       echo "DRIFT_BRANCH_ENTRA=$(DRIFT_BRANCH_ENTRA)"
+      #       echo "BASELINE_BRANCH=$(BASELINE_BRANCH)"
+      #       echo "=== Git state ==="
+      #       git branch -a
+      #       git log --oneline -5
+      #       git status --short
+      #       echo "=== File system ==="
+      #       ls -la "$(Build.SourcesDirectory)"
+      #       find "$(BACKUP_FOLDER)" -maxdepth 2 -type d 2>/dev/null || true
+      #   workingDirectory: "$(Build.SourcesDirectory)"
+
+      - task: Bash@3
+        displayName: Apply reviewer /reject decisions (Entra)
+        condition: eq(variables['ENABLE_PR_REVIEWER_DECISIONS'], 'true')
+        inputs:
+          targetType: inline
+          script: |
+            set -euo pipefail
+            python3 "$(Build.SourcesDirectory)/scripts/apply_reviewer_rejections.py" \
+              --repo-root "$(Build.SourcesDirectory)" \
+              --workload "entra" \
+              --drift-branch "$(DRIFT_BRANCH_ENTRA)" \
+              --baseline-branch "$(BASELINE_BRANCH)"
+          workingDirectory: "$(Build.SourcesDirectory)"
+          failOnStderr: false
+        env:
+          SYSTEM_ACCESSTOKEN: $(System.AccessToken)
+          SYSTEM_COLLECTIONURI: $(System.CollectionUri)
+          SYSTEM_TEAMPROJECT: $(System.TeamProject)
+          BUILD_REPOSITORY_ID: $(Build.Repository.ID)
+
+      - task: Bash@3
+        displayName: Update automated reviewer summary (Entra)
+        condition: eq(variables['ENABLE_PR_REVIEW_SUMMARY'], 'true')
+        inputs:
+          targetType: inline
+          script: |
+            set -euo pipefail
+            python3 "$(Build.SourcesDirectory)/scripts/update_pr_review_summary.py" \
+              --repo-root "$(Build.SourcesDirectory)" \
+              --workload "entra" \
+              --backup-folder "$(BACKUP_FOLDER)" \
+              --reports-subdir "$(REPORTS_SUBDIR)" \
+              --drift-branch "$(DRIFT_BRANCH_ENTRA)" \
+              --baseline-branch "$(BASELINE_BRANCH)"
+          workingDirectory: "$(Build.SourcesDirectory)"
+          failOnStderr: false
+        env:
+          SYSTEM_ACCESSTOKEN: $(System.AccessToken)
+          SYSTEM_COLLECTIONURI: $(System.CollectionUri)
+          SYSTEM_TEAMPROJECT: $(System.TeamProject)
+          BUILD_REPOSITORY_ID: $(Build.Repository.ID)
+          ENABLE_PR_AI_SUMMARY: $(ENABLE_PR_AI_SUMMARY)
+          AZURE_OPENAI_ENDPOINT: $(AZURE_OPENAI_ENDPOINT)
+          AZURE_OPENAI_DEPLOYMENT: $(AZURE_OPENAI_DEPLOYMENT)
+          AZURE_OPENAI_API_KEY: $(AZURE_OPENAI_API_KEY)
+          AZURE_OPENAI_API_VERSION: $(AZURE_OPENAI_API_VERSION)
+          REQUIRE_CHANGE_TICKETS: $(REQUIRE_CHANGE_TICKETS)
+          CHANGE_TICKET_REGEX: $(CHANGE_TICKET_REGEX)
+          DEBUG_CHANGE_TICKET_THREADS: $(DEBUG_CHANGE_TICKET_THREADS)
+          ROLLING_PR_DELAY_REVIEWER_NOTIFICATIONS: $(ROLLING_PR_DELAY_REVIEWER_NOTIFICATIONS)
+
+      - task: Bash@3
+        displayName: Queue post-merge remediation from reviewer /reject (Entra)
+        condition: eq(variables['AUTO_REMEDIATE_AFTER_MERGE'], 'true')
+        inputs:
+          targetType: inline
+          script: |
+            set -euo pipefail
+            python3 "$(Build.SourcesDirectory)/scripts/queue_post_merge_restore.py" \
+              --workload "entra" \
+              --drift-branch "$(DRIFT_BRANCH_ENTRA)" \
+              --baseline-branch "$(BASELINE_BRANCH)"
+          workingDirectory: "$(Build.SourcesDirectory)"
+          failOnStderr: false
+        env:
+          SYSTEM_ACCESSTOKEN: $(System.AccessToken)
+          SYSTEM_COLLECTIONURI: $(System.CollectionUri)
+          SYSTEM_TEAMPROJECT: $(System.TeamProject)
+          BUILD_REPOSITORY_ID: $(Build.Repository.ID)
+          AUTO_REMEDIATE_AFTER_MERGE: $(AUTO_REMEDIATE_AFTER_MERGE)
+          AUTO_REMEDIATE_AFTER_MERGE_LOOKBACK_HOURS: $(AUTO_REMEDIATE_AFTER_MERGE_LOOKBACK_HOURS)
+          AUTO_REMEDIATE_RESTORE_PIPELINE_ID: $(AUTO_REMEDIATE_RESTORE_PIPELINE_ID)
+          AUTO_REMEDIATE_DRY_RUN: $(AUTO_REMEDIATE_DRY_RUN)
+          AUTO_REMEDIATE_UPDATE_ASSIGNMENTS: $(AUTO_REMEDIATE_UPDATE_ASSIGNMENTS)
+          AUTO_REMEDIATE_REMOVE_OBJECTS: $(AUTO_REMEDIATE_REMOVE_OBJECTS)
+          AUTO_REMEDIATE_MAX_WORKERS: $(AUTO_REMEDIATE_MAX_WORKERS)
+          AUTO_REMEDIATE_EXCLUDE_CSV: $(AUTO_REMEDIATE_EXCLUDE_CSV)
+          AUTO_REMEDIATE_INCLUDE_ENTRA_UPDATE: true
