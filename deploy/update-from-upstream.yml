@@ -21,15 +21,17 @@ pr: none
 
 parameters:
   - name: upstreamRef
-    displayName: "Upstream ref to pull (leave blank for latest main, or enter a tag e.g. v1.2.0)"
+    displayName: "Upstream ref to pull (latest = pull latest main, or enter a tag e.g. v1.2.0)"
     type: string
-    default: ""
+    default: "latest"
   - name: dryRun
     displayName: "Dry run (show incoming changes without merging)"
     type: boolean
     default: false
 
 variables:
+  # Uncomment after creating your tenant variable group (see onboarding runbook Step 3).
+  # - group: vg-astral-tenant
   - template: ../templates/variables-common.yml
 
 jobs:
@@ -66,12 +68,12 @@ jobs:
             echo "Fetching from $UPSTREAM_URL ..."
             git fetch upstream --tags
 
-            if [ -n "$UPSTREAM_REF" ]; then
-              FETCH_REF="$UPSTREAM_REF"
-              echo "Pinned ref: $FETCH_REF"
-            else
+            if [ "$UPSTREAM_REF" = "latest" ] || [ -z "$UPSTREAM_REF" ]; then
               FETCH_REF="upstream/main"
               echo "Using latest upstream main."
+            else
+              FETCH_REF="$UPSTREAM_REF"
+              echo "Pinned ref: $FETCH_REF"
             fi
 
             # Resolve to a commit SHA for display
@@ -132,11 +134,11 @@ jobs:
             FETCH_REF="$(FETCH_REF)"
             UPSTREAM_SHA="$(UPSTREAM_SHA)"
             UPSTREAM_REF_LABEL="${{ parameters.upstreamRef }}"
-            if [ -z "$UPSTREAM_REF_LABEL" ]; then
+            if [ "$UPSTREAM_REF_LABEL" = "latest" ] || [ -z "$UPSTREAM_REF_LABEL" ]; then
               UPSTREAM_REF_LABEL="main @ ${UPSTREAM_SHA:0:7}"
             fi
 
-            git checkout main
+            git checkout -B main origin/main
 
             # Attempt merge — commit message stored in variable to avoid YAML parsing issues
             COMMIT_MSG=$(printf 'Update from upstream ASTRAL %s\n\nSource: https://github.com/cqrenet/astral\nRef: %s (%s)' \
@@ -170,9 +172,9 @@ jobs:
             set -euo pipefail
             git push origin main
             echo "Update pushed successfully."
+          workingDirectory: "$(Build.SourcesDirectory)"
         env:
           SYSTEM_ACCESSTOKEN: $(System.AccessToken)
-        workingDirectory: "$(Build.SourcesDirectory)"
 
       - task: Bash@3
         displayName: Dry run summary

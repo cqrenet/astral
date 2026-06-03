@@ -241,6 +241,32 @@ def policy_deep_dive(workload: str, category: str, name: str) -> str:
     )
 
 
+# ---------------------------------------------------------------------------
+# OAuth 2.0 authorization server metadata (RFC 8414)
+# Enables Claude Desktop and other MCP clients to discover Entra ID auth.
+# Required env vars: ENTRA_TENANT_ID, MCP_CLIENT_ID
+# ---------------------------------------------------------------------------
+
+_entra_tenant_id = os.environ.get("ENTRA_TENANT_ID", "").strip()
+_mcp_client_id   = os.environ.get("MCP_CLIENT_ID", "").strip()
+
+
+def _build_oauth_metadata() -> dict | None:
+    if not _entra_tenant_id or not _mcp_client_id:
+        return None
+    base = f"https://login.microsoftonline.com/{_entra_tenant_id}"
+    return {
+        "issuer":                             f"{base}/v2.0",
+        "authorization_endpoint":             f"{base}/oauth2/v2.0/authorize",
+        "token_endpoint":                     f"{base}/oauth2/v2.0/token",
+        "scopes_supported":                   [f"api://{_mcp_client_id}/user_impersonation", "openid", "profile", "offline_access"],
+        "response_types_supported":           ["code"],
+        "grant_types_supported":              ["authorization_code", "refresh_token"],
+        "code_challenge_methods_supported":   ["S256"],
+        "token_endpoint_auth_methods_supported": ["none"],
+    }
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="ASTRAL MCP Server")
     parser.add_argument(
@@ -261,9 +287,32 @@ def main() -> int:
     )
 
     if args.transport == "sse":
-        mcp.settings.host = args.host
-        mcp.settings.port = args.port
-        mcp.run(transport="sse")
+        import uvicorn
+        from starlette.applications import Starlette
+        from starlette.responses import JSONResponse
+        from starlette.routing import Mount, Route
+
+        oauth_meta = _build_oauth_metadata()
+
+        async def oauth_metadata_handler(request):
+            return JSONResponse(oauth_meta)
+
+        async def health(request):
+            return JSONResponse({"status": "ok"})
+
+        sse_app = mcp.sse_app()
+
+        routes = []
+        if oauth_meta:
+            routes.append(Route("/.well-known/oauth-authorization-server", oauth_metadata_handler))
+            logger.info("OAuth discovery endpoint enabled (tenant=%s, client=%s)", _entra_tenant_id, _mcp_client_id)
+        else:
+            logger.info("OAuth discovery endpoint disabled — set ENTRA_TENANT_ID and MCP_CLIENT_ID to enable.")
+        routes.append(Route("/health", health))
+        routes.append(Mount("/", app=sse_app))
+
+        app = Starlette(routes=routes)
+        uvicorn.run(app, host=args.host, port=args.port)
     else:
         mcp.run(transport="stdio")
     return 0

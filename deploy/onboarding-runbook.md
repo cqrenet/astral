@@ -52,6 +52,7 @@ Do this for:
 - `azure-pipelines-review-sync.yml`
 - `azure-pipelines-restore.yml`
 - `deploy/validate-deployment.yml`
+- `deploy/update-from-upstream.yml`
 
 Commit and push the changes.
 

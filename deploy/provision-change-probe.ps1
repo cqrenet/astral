@@ -328,6 +328,35 @@ if ($needGraph) {
         $mcpAuthSecretObj = Add-MgApplicationPassword -ApplicationId $mcpAuthApp.Id -BodyParameter $mcpAuthPasswordCred
         $mcpAuthAppId  = $mcpAuthApp.AppId
         $mcpAuthSecret = $mcpAuthSecretObj.SecretText
+
+        # Expose a scope so OAuth clients can request user_impersonation
+        $existingScopes = $mcpAuthApp.Api.Oauth2PermissionScopes
+        $scopeId = [System.Guid]::NewGuid().ToString()
+        $userImpersonationScope = $existingScopes | Where-Object { $_.Value -eq "user_impersonation" } | Select-Object -First 1
+        if (-not $userImpersonationScope) {
+            Write-Host "Adding user_impersonation scope to MCP auth app..." -ForegroundColor Cyan
+            $newScope = @{
+                Id                      = $scopeId
+                Value                   = "user_impersonation"
+                AdminConsentDisplayName = "Access ASTRAL MCP Server"
+                AdminConsentDescription = "Allows the application to query tenant state and drift history via the ASTRAL MCP Server."
+                UserConsentDisplayName  = "Access ASTRAL MCP Server"
+                UserConsentDescription  = "Allows this app to query your tenant configuration via ASTRAL."
+                IsEnabled               = $true
+                Type                    = "User"
+            }
+            $updatedScopes = @($newScope)
+            if ($existingScopes) { $updatedScopes += $existingScopes }
+            Update-MgApplication -ApplicationId $mcpAuthApp.Id -Api @{ oauth2PermissionScopes = $updatedScopes }
+            Write-Host "Scope added." -ForegroundColor Green
+        }
+
+        # Configure as a public client with localhost redirect URI for OAuth PKCE flow
+        Write-Host "Configuring MCP auth app as public client for OAuth..." -ForegroundColor Cyan
+        Update-MgApplication -ApplicationId $mcpAuthApp.Id `
+            -IsFallbackPublicClient $true `
+            -PublicClient @{ redirectUris = @("http://localhost") }
+        Write-Host "Public client configured." -ForegroundColor Green
     }
 
     # ---------------------------------------------------------------------------
@@ -857,6 +886,8 @@ if ($mcpDeploy) {
         "ADO_PROJECT=$AdoProject",
         "ADO_BRANCH=$AdoBranch",
         "ADO_TOKEN=$AdoToken",
+        "ENTRA_TENANT_ID=$tenantId",
+        "MCP_CLIENT_ID=$mcpAuthAppId",
         "--output", "none"
     )
 
