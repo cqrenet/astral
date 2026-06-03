@@ -96,25 +96,50 @@ jobs:
             COLLECTION_URI="$(System.CollectionUri)"
             PROJECT="$(System.TeamProject)"
             REPO_ID="$(Build.Repository.ID)"
-            API="${COLLECTION_URI%/}/${PROJECT}/_apis/git/repositories/${REPO_ID}/pullrequests?api-version=7.1"
+            BASE_URL="${COLLECTION_URI%/}/${PROJECT}/_apis/git/repositories/${REPO_ID}"
 
-            BODY=$(cat <<EOF
-            {
-              "sourceRefName": "refs/heads/main",
-              "targetRefName": "refs/heads/main",
-              "title": "ASTRAL validation test PR",
-              "description": "This is a temporary PR created by the validate-deployment pipeline. It will be abandoned immediately.",
-              "isDraft": true
+            curl_api() {
+              local METHOD="$1"; shift
+              local URL="$1"; shift
+              local RESPONSE HTTP_CODE
+              RESPONSE=$(curl -s -w "\n%{http_code}" -u ":$TOKEN" -H "Content-Type: application/json" -X "$METHOD" "$@" "$URL")
+              HTTP_CODE=$(echo "$RESPONSE" | tail -1)
+              BODY=$(echo "$RESPONSE" | head -n -1)
+              if [ "$HTTP_CODE" -lt 200 ] || [ "$HTTP_CODE" -ge 300 ]; then
+                echo "##[error]API call failed ($METHOD $URL) — HTTP $HTTP_CODE"
+                echo "$BODY"
+                exit 1
+              fi
+              echo "$BODY"
             }
-            EOF
-            )
 
+            # Get the current HEAD commit of main to create a temp branch
+            echo "Getting main branch HEAD..."
+            REFS_RESPONSE=$(curl_api GET "${BASE_URL}/refs?filter=heads/main&api-version=7.1")
+            MAIN_SHA=$(echo "$REFS_RESPONSE" | python3 -c "import sys,json; print(json.load(sys.stdin)['value'][0]['objectId'])")
+            echo "main HEAD: $MAIN_SHA"
+
+            # Create a temporary branch
+            TEMP_BRANCH="validation/astral-validate-$(date +%s)"
+            echo "Creating temp branch $TEMP_BRANCH..."
+            curl_api POST "${BASE_URL}/refs?api-version=7.1" \
+              -d "[{\"name\":\"refs/heads/${TEMP_BRANCH}\",\"oldObjectId\":\"0000000000000000000000000000000000000000\",\"newObjectId\":\"${MAIN_SHA}\"}]" > /dev/null
+
+            # Create draft PR from temp branch to main
             echo "Creating test PR..."
-            PR_RESPONSE=$(curl -sf -u ":$TOKEN" -H "Content-Type: application/json" -d "$BODY" "$API")
+            PR_BODY="{\"sourceRefName\":\"refs/heads/${TEMP_BRANCH}\",\"targetRefName\":\"refs/heads/main\",\"title\":\"ASTRAL validation test PR\",\"description\":\"Temporary PR created by validate-deployment pipeline. Will be abandoned immediately.\",\"isDraft\":true}"
+            PR_RESPONSE=$(curl_api POST "${BASE_URL}/pullrequests?api-version=7.1" -d "$PR_BODY")
             PR_ID=$(echo "$PR_RESPONSE" | python3 -c "import sys,json; print(json.load(sys.stdin)['pullRequestId'])")
             echo "Created test PR #$PR_ID"
 
-            ABANDON_API="${COLLECTION_URI%/}/${PROJECT}/_apis/git/repositories/${REPO_ID}/pullrequests/${PR_ID}?api-version=7.1"
+            # Abandon the PR
             echo "Abandoning test PR #$PR_ID..."
-            curl -sf -u ":$TOKEN" -H "Content-Type: application/json" -X PATCH -d '{"status":"abandoned"}' "$ABANDON_API"
+            curl_api PATCH "${BASE_URL}/pullrequests/${PR_ID}?api-version=7.1" \
+              -d '{"status":"abandoned"}' > /dev/null
+
+            # Delete the temp branch
+            echo "Deleting temp branch..."
+            curl_api POST "${BASE_URL}/refs?api-version=7.1" \
+              -d "[{\"name\":\"refs/heads/${TEMP_BRANCH}\",\"oldObjectId\":\"${MAIN_SHA}\",\"newObjectId\":\"0000000000000000000000000000000000000000\"}]" > /dev/null
+
             echo "PR creation and abandonment successful."
