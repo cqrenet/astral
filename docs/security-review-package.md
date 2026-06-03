@@ -2,7 +2,7 @@
 
 # ASTRAL Security Review Package
 
-Prepared: 2026-04-20
+Prepared: 2026-06-03
 
 ## Purpose
 
@@ -27,21 +27,22 @@ ASTRAL is an Azure DevOps pipeline based administrative workflow, not a customer
 
 Key characteristics:
 
-- No inbound listener or public application endpoint is exposed by this repository.
-- The normal operating mode is outbound-only scheduled jobs from Azure DevOps to Microsoft Graph and Azure DevOps APIs.
+- The core backup, review, and restore pipelines are outbound-only scheduled jobs from Azure DevOps to Microsoft Graph and Azure DevOps APIs — no inbound endpoint.
+- The MCP server (optional) is the one exception: it is an HTTPS inbound endpoint hosted on Azure Container Apps that exposes tenant state and drift history to AI assistants. It is protected by API key or Entra ID bearer token authentication.
 - The default backup/review path is read-oriented against Microsoft Graph.
 - A separate restore path can write configuration back to the tenant, but only through the dedicated restore pipeline and only when enabled and authorized.
 - AI-assisted PR summaries are optional and are not required for backup, review, or restore.
+- The public source repository is available at https://github.com/cqrenet/astral.
 
 ## Deployment Modes
 
 The repository can be deployed progressively. It does not need to be introduced as an all-or-nothing package.
 
-| Mode | Scope | Graph Access Profile | Azure DevOps Scope | AI |
-| --- | --- | --- | --- | --- |
-| Backup-only | Export tenant configuration, generate reports, retain Git-tracked snapshots | Read-only | Repository and scheduled pipeline only | Disabled |
-| Review package | Backup-only plus rolling PR review, reviewer summaries, optional change-ticket threads, reviewer `/accept` and `/reject` processing | Read-only | Repository, PR workflows, review-sync pipeline | Optional |
-| Full package | Review package plus restore pipeline, rollback support, selective remediation, and optional auto-remediation | Read + Write for restore path only | Repository, PR workflows, review-sync, restore pipeline | Optional |
+| Mode | Scope | Graph Access Profile | Azure DevOps Scope | AI | MCP Server |
+| --- | --- | --- | --- | --- | --- |
+| Backup-only | Export tenant configuration, generate reports, retain Git-tracked snapshots | Read-only | Repository and scheduled pipeline only | Disabled | Optional |
+| Review package | Backup-only plus rolling PR review, reviewer summaries, optional change-ticket threads, reviewer `/accept` and `/reject` processing | Read-only | Repository, PR workflows, review-sync pipeline | Optional | Optional |
+| Full package | Review package plus restore pipeline, rollback support, selective remediation, and optional auto-remediation | Read + Write for restore path only | Repository, PR workflows, review-sync, restore pipeline | Optional | Optional |
 
 Important clarifications:
 
@@ -65,6 +66,8 @@ Important clarifications:
 | Azure DevOps Git repository | Stores approved baseline, drift branches, JSON exports, reports, docs | Primary configuration store |
 | Microsoft Graph | Source of Intune and Entra configuration; optional target for restore; audit log source for probe | Production tenant access |
 | Azure DevOps REST APIs | PR creation/update, review thread sync, restore queueing, pipeline trigger | Change-management control plane |
+| Optional: MCP server (`infra/mcp-server`) | Azure Container Apps-hosted HTTPS endpoint exposing tenant state and drift history to MCP-capable AI assistants | First and only inbound endpoint in the platform; protected by API key or Entra ID bearer token; read-only access to Git data via ADO REST API |
+| Optional: Azure Container Registry | Hosts the MCP server container image built during provisioning | Image supply chain — should be scoped to the deployment subscription |
 | Optional Azure OpenAI | PR summary generation only | Optional data egress path |
 
 ### High-Level Flow
@@ -86,15 +89,16 @@ flowchart LR
     J --> N["Rolling PR approval / rejection"]
     N -. optional remediation .-> O["Restore pipeline"]
     O --> B
+    P["AI assistant<br/>Claude / Cursor / Copilot"] -- "HTTPS · API key or Entra ID" --> Q["MCP server<br/>Azure Container Apps"]
+    Q --> I
 ```
 
 ## Deployment Model
 
 ### Backup and Review
 
-The main pipeline runs daily at 02:00 on `main` to generate a full tenant snapshot, reports, and documentation artifacts. The primary trigger is the event-driven change probe, which queues the pipeline on demand when drift is detected.
+The main pipeline runs daily at 02:00 on `main` to generate a full tenant snapshot, reports, and documentation artifacts. It is also triggered on demand by the change probe when drift is detected (see the Change Probe section below).
 
-- On change detection: the probe timer polls audit logs every 5 minutes. After a 15-minute quiet window with no new events, it queues the backup pipeline.
 - Daily at 02:00: export Intune and Entra configuration, generate reports, commit drift to rolling workload branches, and update one rolling PR per workload.
 - When delayed reviewer notifications are enabled, newly created rolling PRs are opened as Azure DevOps draft PRs, the automated summary is inserted, and the PR is then published for reviewer notification.
 - At the configured full-run hour: perform the same work plus documentation artifact generation (Markdown, and optionally HTML/PDF if browser dependencies are available).
@@ -105,6 +109,78 @@ The workload branches are:
 - `drift/entra`
 
 Reviewers approve or reject drift through Azure DevOps pull requests. The system is intentionally ex-post change management: admins may make changes in the Microsoft admin portals, and this system detects, records, and routes those changes for review.
+
+### Change Probe
+
+The change probe is an event-driven trigger for the backup pipeline. Without it, the backup pipeline runs only on its daily schedule. With it, the pipeline is also queued automatically whenever real configuration changes are detected in the tenant.
+
+#### Why it exists
+
+Microsoft Graph change notifications and delta queries do not support Intune device management or Conditional Access resources, so a polling architecture against audit logs is used instead of a push-notification model.
+
+#### Architecture
+
+The change probe is implemented as an Azure Function App with two functions:
+
+- **`probe_timer`** — runs on a 5-minute timer. Calls Microsoft Graph to read recent Intune and Entra audit log entries. Evaluates a debouncer state machine to determine whether a backup should be triggered.
+- **`queue_consumer`** — triggered by a message on an Azure Queue Storage queue. Calls the Azure DevOps REST API to queue the backup pipeline.
+
+State is persisted in an Azure Table Storage table (`ProbeState`, singleton row `default`).
+
+#### Debouncer state machine
+
+The debouncer prevents backup storms during bulk changes:
+
+```
+idle  →  (audit log activity detected)  →  armed
+armed →  (15-minute quiet window elapses with no new activity)  →  emit queue message  →  cooldown
+cooldown  →  (30-minute cooldown elapses)  →  idle
+```
+
+- **Idle**: no recent audit activity. No action.
+- **Armed**: activity detected; waiting for the tenant to settle. Timer continues polling. If more activity arrives, the quiet window resets.
+- **Cooldown**: a backup has been queued. No further triggers until cooldown elapses, preventing rapid re-queues during bulk changes.
+
+#### Authentication and identity
+
+The change probe uses a **dedicated Entra app registration** (`ASTRAL Change Probe`) that is completely separate from the pipeline service connection identity used for backup and restore.
+
+- The app registration is created by `deploy/provision-change-probe.ps1`.
+- It authenticates to Microsoft Graph using a **client secret** stored as an Azure Function App application setting (`PROBE_APP_SECRET`). The secret is not stored in the repository.
+- It authenticates to Azure DevOps using an ADO PAT (`ADO_TOKEN`) stored as an Azure Function App application setting.
+- Neither credential is present in the repository or in pipeline variables.
+
+Required Microsoft Graph application permissions (read-only):
+
+- `AuditLog.Read.All` — reads Intune and Entra audit logs
+- `DeviceManagementApps.Read.All`
+- `DeviceManagementConfiguration.Read.All`
+- `DeviceManagementManagedDevices.Read.All`
+- `Policy.Read.All`
+- `Policy.Read.ConditionalAccess`
+- `Application.Read.All`
+
+The probe has no write permissions. It cannot modify any tenant configuration, queue a restore, or access the Git repository.
+
+#### Network posture
+
+The change probe is outbound-only. It makes HTTPS calls to:
+
+- `graph.microsoft.com` (audit log polling)
+- Azure Table Storage (debouncer state read/write)
+- Azure Queue Storage (trigger message emit)
+- Azure DevOps REST API (pipeline queue)
+
+No inbound endpoint is created by the Function App for this purpose.
+
+#### Identity isolation rationale
+
+The probe uses a separate identity from the backup pipeline service connection deliberately:
+
+- the probe requires `AuditLog.Read.All`, which the backup pipeline does not need,
+- the backup pipeline service connection uses federated credentials (workload identity), while the probe uses a client secret appropriate for a long-running Function App,
+- if the probe credentials are compromised, the blast radius is limited to audit log read access and the ability to trigger (not modify) the backup pipeline,
+- the backup pipeline identity retains no ability to read audit logs or emit queue messages.
 
 ### Review Sync
 
@@ -155,9 +231,9 @@ It supports:
 
 The pipelines obtain a Microsoft Graph access token at runtime using the Azure DevOps service connection configured in `SERVICE_CONNECTION_NAME` (e.g. `sc-astral-backup`).
 
-The change probe uses a **separate Entra app registration** (`ASTRAL Change Probe`) with its own client credentials to authenticate to Microsoft Graph for audit log polling. This app is created by `deploy/provision-change-probe.ps1` and is distinct from the pipeline service connection identity.
+The change probe uses a separate identity — see the **Change Probe** section under Deployment Model for the full authentication and permission model.
 
-Observed controls in the implementation:
+Observed controls in the implementation (backup/restore pipelines):
 
 - token acquisition is performed at runtime with `Get-AzAccessToken`,
 - token role claims are inspected before proceeding,
@@ -186,6 +262,18 @@ If restore auto-queue is enabled, the pipeline identity also needs:
 - `Queue builds`,
 - explicit pipeline authorization when enforced by the project.
 
+### MCP Server Authentication
+
+The MCP server (Azure Container Apps) supports two authentication modes:
+
+**API key (default)**
+A 32-character random key is generated during provisioning and injected as the `MCP_API_KEY` environment variable. Clients pass it via the `x-api-key` request header. Suitable for controlled internal use where the key can be securely distributed.
+
+**Entra ID bearer token (recommended for production)**
+Azure Container Apps built-in authentication is configured against the customer's Entra tenant. Clients pass a valid Entra bearer token. This integrates with the customer's existing identity and conditional access posture and is the recommended production mode.
+
+The MCP server authenticates to Azure DevOps using an ADO PAT (`ADO_TOKEN`) scoped to Build read. It has no access to Microsoft Graph directly and cannot modify any data.
+
 ### Graph Permissions by Mode
 
 #### Backup / Review Mode
@@ -208,20 +296,6 @@ Read-oriented Graph application permissions documented in the repository:
 - `RoleManagement.Read.Directory` or `Directory.Read.All` for richer enrichment
 - `AuditLog.Read.All` if commit author attribution is desired
 
-#### Change Probe Mode
-
-The probe app registration requires these read-only Graph application permissions:
-
-- `AuditLog.Read.All` (reads directory and Intune audit logs)
-- `DeviceManagementApps.Read.All`
-- `DeviceManagementConfiguration.Read.All`
-- `DeviceManagementManagedDevices.Read.All`
-- `Policy.Read.All`
-- `Policy.Read.ConditionalAccess`
-- `Application.Read.All`
-
-The probe does **not** require write permissions. It only polls audit logs and queues the backup pipeline.
-
 #### Restore Mode
 
 Write-capable Graph application permissions documented in the repository:
@@ -240,9 +314,9 @@ Write-capable Graph application permissions documented in the repository:
 
 ### Network Exposure
 
-- No inbound application endpoint is created by this repository.
-- The system is pipeline-driven and relies on outbound HTTPS calls.
-- Required outbound destinations are:
+- The core backup, review, and restore pipelines create no inbound application endpoint.
+- The optional MCP server (Azure Container Apps) is the one inbound endpoint. It is HTTPS only and requires authentication (API key or Entra ID bearer token). It exposes a read-only view of Git-stored tenant state; it does not have write access to Microsoft Graph or Azure DevOps.
+- Required outbound destinations for the pipelines:
   - `graph.microsoft.com`
   - Azure DevOps organization APIs
   - Azure Table Storage (for probe state)
@@ -251,13 +325,15 @@ Write-capable Graph application permissions documented in the repository:
   - Python package registry for `IntuneCD`
   - npm registry for `md-to-pdf`
   - optional OS package repositories when HTML/PDF conversion needs Chromium libraries
+- Required outbound destinations for the MCP server:
+  - Azure DevOps REST API (reads `tenant-state/` from Git)
 
 ### Secrets Handling
 
 - Graph tokens are obtained just-in-time rather than stored in the repository.
 - The pipeline marks the Graph token as a secret variable.
 - The implementation logs token claims and roles for diagnostics, but not the token value itself.
-- The change probe app secret is stored as an Azure Function App setting (`PROBE_APP_SECRET`), not in the repository.
+- The change probe app secret and ADO token are stored as Azure Function App application settings, not in the repository — see the Change Probe section for the full credential model.
 - Azure OpenAI uses a pipeline secret variable when enabled.
 - The pipeline logic itself does not depend on repository-stored application secrets; separate secret scanning of exported tenant content is still recommended.
 
@@ -430,7 +506,13 @@ The statements in this document are based on the implementation in:
 - `scripts/apply_reviewer_rejections.py`
 - `scripts/queue_post_merge_restore.py`
 - `scripts/export_entra_baseline.py`
+- `scripts/astral_mcp_tools.py`
 - `scripts/probe_tenant_changes.py`
 - `scripts/trigger_backup_pipeline.py`
 - `infra/change-probe/probe_timer/__init__.py`
 - `infra/change-probe/queue_consumer/__init__.py`
+- `infra/mcp-server/mcp_server.py`
+- `infra/mcp-server/README.md`
+- `deploy/provision-change-probe.ps1`
+
+The public source repository is available at https://github.com/cqrenet/astral.

@@ -2,18 +2,19 @@
 
 # ASTRAL Security Review Questionnaire
 
-Prepared: 2026-04-20
+Prepared: 2026-06-03
 
 This appendix is a shorter, copy/paste-friendly companion to the full ASTRAL security review package.
 
 | Question | Answer |
 | --- | --- |
-| What is the system? | ASTRAL is an Azure DevOps pipeline workflow that exports Microsoft Intune and selected Entra ID configuration, stores approved baseline snapshots in Git, and raises configuration drift for review through rolling pull requests. |
-| What deployment modes are supported? | The same repository can be operated in progressive modes: backup-only, review package, or full package with restore/remediation. AI is optional in all modes. |
-| Is it a public-facing application? | No. It is an administrative pipeline workflow with no public UI or inbound application endpoint created by this repository. |
-| Does it require inbound network access from the internet? | No. The implemented workflow is outbound-only over HTTPS. |
+| What is the system? | ASTRAL is an Azure DevOps pipeline workflow that exports Microsoft Intune and selected Entra ID configuration, stores approved baseline snapshots in Git, and raises configuration drift for review through rolling pull requests. An optional MCP server exposes tenant state and drift history to AI assistants over HTTPS. The public source repository is at https://github.com/cqrenet/astral. |
+| What deployment modes are supported? | The same repository can be operated in progressive modes: backup-only, review package, or full package with restore/remediation. AI summaries and the MCP server are optional in all modes. |
+| Is it a public-facing application? | The core pipelines are not — they are outbound-only scheduled jobs with no inbound endpoint. The optional MCP server (Azure Container Apps) is the one inbound HTTPS endpoint; it is read-only and requires authentication (API key or Entra ID bearer token). |
+| Does it require inbound network access from the internet? | The core pipelines do not. The optional MCP server does — it is an HTTPS inbound endpoint on Azure Container Apps protected by authentication. |
 | What production systems does it access? | Microsoft Graph for Intune and Entra configuration and audit logs; Azure DevOps APIs for pull request and pipeline operations; Azure Storage (Table and Queue) for probe state and trigger messages. |
-| Does it make production changes? | Backup and review pipelines are read-oriented against Microsoft Graph. The restore pipeline is write-capable and can apply approved baseline configuration back to the tenant when explicitly enabled and authorized. |
+| Does it make production changes? | Backup and review pipelines are read-oriented against Microsoft Graph. The restore pipeline is write-capable and can apply approved baseline configuration back to the tenant when explicitly enabled and authorized. The change probe has no write access — it only reads audit logs and queues the backup pipeline. |
+| What is the change probe? | An Azure Function App that polls Microsoft Graph audit logs every 5 minutes to detect real tenant changes. It uses a debouncer state machine (idle → armed → cooldown) with a 15-minute quiet window before triggering, preventing backup storms during bulk changes. It uses a dedicated Entra app registration with its own client secret, completely separate from the backup pipeline identity. It is outbound-only with no inbound endpoint. |
 | What data is processed? | Administrative configuration data such as Intune policies, device configuration, enrollment profiles, apps, scripts, conditional access, named locations, authentication strengths, app registrations, and enterprise application metadata. |
 | Does it process end-user business content? | It is not designed for business content. However, exported admin-authored scripts or custom payloads can contain sensitive operational data if the tenant already stores it there. |
 | Where is data stored? | In the Azure DevOps Git repository, Azure DevOps pull requests/threads, build logs, and optional build artifacts such as markdown, HTML, and PDF documentation. |
@@ -26,10 +27,11 @@ This appendix is a shorter, copy/paste-friendly companion to the full ASTRAL sec
 | What change-control mechanism exists? | Drift is committed to dedicated workload branches and reviewed through rolling pull requests into `main`. New rolling PRs can be created as drafts until the automated summary is inserted, and optional per-file change-ticket threads and reviewer `/reject` commands are supported. |
 | Can reviewers block or scope changes? | Yes. Reviewers can approve the rolling PR, reject it, or reject individual file-level drift items through PR threads when that feature is enabled. |
 | Is rollback supported? | Yes. The restore pipeline supports full restore, selective restore by file path, historical restore by Git ref, and dry-run mode. |
-| What external network destinations are required? | Microsoft Graph, Azure DevOps APIs, Azure Storage (Table and Queue), optional Azure OpenAI, Python package registry for `IntuneCD`, npm registry for `md-to-pdf`, and optionally OS package repositories when browser dependencies are installed for HTML/PDF generation. |
-| Does the system send data to AI services? | Only if Azure OpenAI summary generation is explicitly configured. It is optional for the platform overall. |
-| What AI service is intended? | A customer-controlled Azure OpenAI deployment configured through the Azure OpenAI endpoint and deployment variables, rather than an unrelated public AI service. |
+| What external network destinations are required? | Pipelines: Microsoft Graph, Azure DevOps APIs, Azure Storage (Table and Queue), optional Azure OpenAI, Python package registry for `IntuneCD`, npm registry for `md-to-pdf`, and optionally OS package repositories for HTML/PDF generation. MCP server (optional): Azure DevOps REST API only (reads tenant-state from Git). |
+| Does the system send data to AI services? | Only if Azure OpenAI summary generation is explicitly configured. It is optional for the platform overall. The MCP server receives queries from AI assistants but does not send data to any AI service itself — it responds to queries with Git-stored configuration data. |
+| What AI service is intended? | A customer-controlled Azure OpenAI deployment configured through the Azure OpenAI endpoint and deployment variables, rather than an unrelated public AI service. The MCP server supports any MCP-capable AI assistant (Claude, Cursor, Copilot, etc.) and operates independently of Azure OpenAI. |
 | What data is sent to Azure OpenAI when enabled? | A reduced change-review payload containing changed paths, semantic summaries, deterministic summary text, and fingerprints derived from the repo diff. This is intended to support review summarization, not raw tenant-wide export ingestion. |
-| Why is AI included? | The AI summary is meant to translate technical Intune and Entra drift into manager-readable language so PMs, management, and other non-specialist reviewers can understand impact and review intent without parsing raw policy JSON. |
+| What data does the MCP server expose? | Git-stored tenant configuration snapshots and drift history from the `tenant-state/` directory in the ADO repository. It reads this data via ADO REST API using a scoped PAT. It does not have direct Microsoft Graph access. |
+| Why is AI included? | The AI summary is meant to translate technical Intune and Entra drift into manager-readable language so PMs, management, and other non-specialist reviewers can understand impact and review intent without parsing raw policy JSON. The MCP server extends this by enabling natural-language queries against the full tenant baseline and history. |
 | Recommended deployment posture? | Start with backup-only or review-package mode, enable Azure OpenAI only on a customer-controlled deployment when approved, keep auto-remediation disabled by default, and use separate read-only and write-enabled service principals if restore is enabled. |
 | What customer-specific controls still need to be defined? | Agent type and hardening, repo/build/artifact retention, exact access groups, branch policies, and whether restore or Azure OpenAI are enabled in the target deployment. |
