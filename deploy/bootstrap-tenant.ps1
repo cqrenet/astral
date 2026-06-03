@@ -275,8 +275,8 @@ Write-Host ""
 
 if ($modeAutomatic) {
     Write-Host "Next step:" -ForegroundColor Cyan
-    Write-Host "  Your ADO service connection already has the federated credential."
-    Write-Host "  Return to the ADO draft service connection, click 'Finish setup', then 'Verify and save'."
+    Write-Host "  Graph permissions and admin consent are now set."
+    Write-Host "  Your service connection is ready — proceed to Step 6 of the onboarding runbook (import pipelines)."
 }
 else {
     Write-Host "Next steps:" -ForegroundColor Cyan

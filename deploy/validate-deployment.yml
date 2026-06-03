@@ -81,7 +81,7 @@ jobs:
           script: |
             set -euo pipefail
             TOKEN="$(GRAPH_TOKEN)"
-            URL="https://graph.microsoft.com/v1.0/organization?$select=id,displayName"
+            URL="https://graph.microsoft.com/v1.0/organization?\$select=id,displayName"
             RESPONSE=$(curl -sf -H "Authorization: Bearer $TOKEN" "$URL")
             echo "Graph read test response: $RESPONSE"
             echo "Graph connectivity confirmed."

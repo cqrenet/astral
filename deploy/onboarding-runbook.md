@@ -51,6 +51,7 @@ Do this for:
 - `azure-pipelines.yml`
 - `azure-pipelines-review-sync.yml`
 - `azure-pipelines-restore.yml`
+- `deploy/validate-deployment.yml`
 
 Commit and push the changes.
 
@@ -133,27 +134,35 @@ Then add the federated credential to the new app:
 
 ## Step 6: Import the pipelines
 
-1. Go to **Pipelines > Create pipeline > Azure Repos Git**.
-2. Select your repository.
-3. Choose **Existing Azure Pipelines YAML file**.
-4. Import each of the three YAMLs one by one:
-   - `azure-pipelines.yml` (main backup)
-   - `azure-pipelines-review-sync.yml` (review sync)
-   - `azure-pipelines-restore.yml` (restore)
+For each pipeline: **Pipelines → New pipeline → Azure Repos Git → select your repository → Existing Azure Pipelines YAML file → select the file → Save** (do not run yet). After saving, immediately rename the pipeline via **⋮ → Rename/move** — ADO defaults to the filename which is not descriptive.
+
+| YAML file | Suggested pipeline name |
+| --- | --- |
+| `azure-pipelines.yml` | `ASTRAL — Backup` |
+| `azure-pipelines-review-sync.yml` | `ASTRAL — Review Sync` |
+| `azure-pipelines-restore.yml` | `ASTRAL — Restore` |
 
 ## Step 7: Grant repository permissions to the build identity
 
 1. Go to **Project settings > Repositories**.
 2. Select your repository.
-3. Under **Security**, grant the **Build Service** account:
+3. Under **Security**, find **ASTRAL-[project] Build Service** and grant:
    - Contribute
    - Create branch
-   - Force push
-   - Create pull request
-   - Edit pull request
-   - Tag creation (if you enable tagging)
+   - Force push (rewrite history, delete branches and tags)
+   - Contribute to pull requests
+   - Create tag (only if you enable snapshot tagging)
 
-4. Under **Pipelines**, grant the build service **Queue builds** permission on `azure-pipelines-restore.yml` if you plan to use auto-remediation.
+4. On the same **Security** page, scroll down to the **Pipeline permissions** section.
+   Click **+** and add all three pipelines:
+   - `ASTRAL — Main Backup`
+   - `ASTRAL — Review Sync`
+   - `ASTRAL — Restore`
+
+   This is required because you did not tick "Grant access to all pipelines" when creating the service connection.
+
+5. If you plan to use auto-remediation, also grant the build service **Queue builds** permission on the `ASTRAL — Restore` pipeline:
+   Go to **Pipelines → ASTRAL — Restore → ⋮ → Manage security**, find the Build Service account and set **Queue builds** to Allow.
 
 ## Step 8: Set the restore pipeline definition ID
 
@@ -166,13 +175,16 @@ After importing `azure-pipelines-restore.yml`, find its definition ID:
 
 ## Step 9: Validate the deployment
 
-1. Import `deploy/validate-deployment.yml` as a one-time pipeline.
+1. Import `deploy/validate-deployment.yml` as a one-time pipeline. Rename it to `ASTRAL — Validate`.
 2. Run it.
-3. Verify that all checks pass:
+3. The run will appear to hang in the pipeline list. Open the run by clicking on it, then look for the yellow banner **"This pipeline needs permission to access N resources before this run can continue"**. Click **View**, then **Permit** for each resource (typically the service connection and the variable group). The run will then proceed automatically.
+4. Verify that all checks pass:
    - Graph token acquisition
    - Required roles present
    - Test read from Graph
    - Test PR creation and abandonment
+
+> This permission prompt appears once per pipeline per resource. The three main pipelines will show the same prompt on their first run — approve them the same way.
 
 ## Step 10: Run the first backup
 
