@@ -11,10 +11,13 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import asyncio
 import json
 import logging
 import os
 import sys
+import threading
+import time
 from typing import Any
 
 # ---------------------------------------------------------------------------
@@ -41,39 +44,133 @@ logger = logging.getLogger(__name__)
 mcp = FastMCP("astral")
 
 # ---------------------------------------------------------------------------
-# Optional API key authentication (lightweight alternative to Entra ID)
+# Auth configuration
 # ---------------------------------------------------------------------------
-_api_key = os.environ.get("MCP_API_KEY", "").strip()
-if _api_key:
+_api_key         = os.environ.get("MCP_API_KEY", "").strip()
+_entra_tenant_id = os.environ.get("ENTRA_TENANT_ID", "").strip()
+_mcp_client_id   = os.environ.get("MCP_CLIENT_ID", "").strip()
+
+# ---------------------------------------------------------------------------
+# Entra JWT validation (JWKS-based, in-process)
+#
+# Validates Bearer tokens issued by Entra ID — the same tokens Claude Desktop
+# obtains via the OAuth PKCE flow using the discovery endpoint.
+#
+# Doing this in-process (rather than delegating to ACA EasyAuth) means:
+#  - The /.well-known/oauth-authorization-server discovery endpoint is reachable
+#    by unauthenticated clients (ACA is set to AllowAnonymous).
+#  - Auth behaviour is identical whether deployed to ACA or run locally.
+# ---------------------------------------------------------------------------
+_jwks_cache: dict = {"keys": [], "exp": 0.0}
+_jwks_lock = threading.Lock()
+
+
+def _fetch_jwks() -> list:
+    """Fetch JWKS from Microsoft — blocking, run via asyncio.to_thread."""
+    import json as _json
+    import urllib.request
+    oidc_url = f"https://login.microsoftonline.com/{_entra_tenant_id}/v2.0/.well-known/openid-configuration"
+    with urllib.request.urlopen(oidc_url, timeout=10) as resp:  # noqa: S310
+        oidc = _json.loads(resp.read())
+    with urllib.request.urlopen(oidc["jwks_uri"], timeout=10) as resp:  # noqa: S310
+        return _json.loads(resp.read())["keys"]
+
+
+def _get_jwks() -> list:
+    now = time.monotonic()
+    with _jwks_lock:
+        if _jwks_cache["keys"] and _jwks_cache["exp"] > now:
+            return _jwks_cache["keys"]
+        keys = _fetch_jwks()
+        _jwks_cache["keys"] = keys
+        _jwks_cache["exp"] = now + 3600  # cache 1 hour
+        return keys
+
+
+def _validate_entra_token(token: str) -> bool:
+    """Return True if token is a valid Entra JWT for this tenant and client. Blocking."""
     try:
-        from starlette.middleware.base import BaseHTTPMiddleware
-        from starlette.responses import PlainTextResponse
+        import json as _json
+        from jwt import decode, get_unverified_header
+        from jwt.algorithms import RSAAlgorithm
 
-        class _ApiKeyMiddleware(BaseHTTPMiddleware):
-            async def dispatch(self, request, call_next):
-                # Allow health probes without a key.
-                if request.url.path in ("/health", "/"):
-                    return await call_next(request)
-                header = request.headers.get("x-api-key", "")
-                auth = request.headers.get("authorization", "")
-                provided = header
-                if auth.lower().startswith("bearer "):
-                    provided = auth[7:]
-                if provided != _api_key:
-                    return PlainTextResponse("Unauthorized", status_code=401)
-                return await call_next(request)
-
-        _orig_sse_app = mcp.sse_app
-
-        def _wrapped_sse_app(*args, **kwargs):
-            app = _orig_sse_app(*args, **kwargs)
-            app.add_middleware(_ApiKeyMiddleware)
-            return app
-
-        mcp.sse_app = _wrapped_sse_app
-        logger.info("API key authentication enabled.")
+        header = get_unverified_header(token)
+        kid = header.get("kid")
+        keys = _get_jwks()
+        key_dict = next((k for k in keys if k.get("kid") == kid), None)
+        if not key_dict:
+            logger.warning("Entra JWT: signing key not found (kid=%s)", kid)
+            return False
+        pub_key = RSAAlgorithm.from_jwk(_json.dumps(key_dict))
+        bare = _mcp_client_id.removeprefix("api://")
+        claims = decode(token, pub_key, algorithms=["RS256"], audience=[bare, f"api://{bare}"])
+        tid = claims.get("tid", "")
+        iss = claims.get("iss", "")
+        if _entra_tenant_id and tid != _entra_tenant_id:
+            logger.warning("Entra JWT: wrong tenant (tid=%s)", tid)
+            return False
+        if _entra_tenant_id and _entra_tenant_id not in iss:
+            logger.warning("Entra JWT: wrong issuer (iss=%s)", iss)
+            return False
+        return True
     except Exception as exc:
-        logger.warning(f"Could not enable API key middleware: {exc}")
+        logger.warning("Entra JWT validation failed: %s", exc)
+        return False
+
+
+# ---------------------------------------------------------------------------
+# MCP auth middleware — pure ASGI (never BaseHTTPMiddleware)
+#
+# Accepts requests that satisfy at least one of:
+#   API key  — Bearer <MCP_API_KEY> or x-api-key: <MCP_API_KEY>
+#   Entra JWT — valid token for ENTRA_TENANT_ID / MCP_CLIENT_ID
+#
+# Certain paths are exempt (health probe, OAuth discovery).
+# If neither MCP_API_KEY nor ENTRA_TENANT_ID+MCP_CLIENT_ID are configured,
+# the server runs open (useful for local stdio / dev).
+# ---------------------------------------------------------------------------
+class _McpAuthMiddleware:
+    _EXEMPT_PATHS = frozenset({"/health", "/", "/.well-known/oauth-authorization-server"})
+
+    def __init__(self, app) -> None:
+        self.app = app
+
+    async def __call__(self, scope, receive, send) -> None:
+        if scope["type"] == "http" and scope.get("path") not in self._EXEMPT_PATHS:
+            headers = {k.lower(): v for k, v in scope.get("headers", [])}
+            auth = headers.get(b"authorization", b"").decode()
+            key_header = headers.get(b"x-api-key", b"").decode()
+            token = key_header or (auth[7:] if auth.lower().startswith("bearer ") else "")
+
+            # Fast path: API key
+            if _api_key and token == _api_key:
+                await self.app(scope, receive, send)
+                return
+
+            # Entra JWT path (blocking JWKS fetch offloaded to thread pool)
+            if _entra_tenant_id and _mcp_client_id and token:
+                if await asyncio.to_thread(_validate_entra_token, token):
+                    await self.app(scope, receive, send)
+                    return
+
+            # No auth configured — open access
+            if not _api_key and not (_entra_tenant_id and _mcp_client_id):
+                await self.app(scope, receive, send)
+                return
+
+            body = b"Unauthorized"
+            await send({
+                "type": "http.response.start",
+                "status": 401,
+                "headers": [
+                    [b"content-type", b"text/plain; charset=utf-8"],
+                    [b"content-length", str(len(body)).encode()],
+                ],
+            })
+            await send({"type": "http.response.body", "body": body})
+            return
+
+        await self.app(scope, receive, send)
 
 _client: AstralMcpClient | None = None
 
@@ -300,7 +397,16 @@ def main() -> int:
         async def health(request):
             return JSONResponse({"status": "ok"})
 
-        sse_app = mcp.sse_app()
+        sse_app = _McpAuthMiddleware(mcp.sse_app())
+
+        if _api_key and (_entra_tenant_id and _mcp_client_id):
+            logger.info("Auth: API key + Entra JWT (tenant=%s, client=%s)", _entra_tenant_id, _mcp_client_id)
+        elif _api_key:
+            logger.info("Auth: API key only.")
+        elif _entra_tenant_id and _mcp_client_id:
+            logger.info("Auth: Entra JWT only (tenant=%s, client=%s)", _entra_tenant_id, _mcp_client_id)
+        else:
+            logger.warning("Auth: DISABLED — set MCP_API_KEY or ENTRA_TENANT_ID+MCP_CLIENT_ID.")
 
         routes = []
         if oauth_meta:

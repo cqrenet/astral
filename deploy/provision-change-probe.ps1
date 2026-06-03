@@ -329,14 +329,22 @@ if ($needGraph) {
         $mcpAuthAppId  = $mcpAuthApp.AppId
         $mcpAuthSecret = $mcpAuthSecretObj.SecretText
 
-        # Expose a scope so OAuth clients can request user_impersonation
-        $existingScopes = $mcpAuthApp.Api.Oauth2PermissionScopes
-        $scopeId = [System.Guid]::NewGuid().ToString()
+        # Set the Application ID URI — required so api://<clientId>/user_impersonation
+        # is discoverable and the issued JWT carries aud = api://<clientId>.
+        $mcpAppIdUri = "api://$($mcpAuthApp.AppId)"
+        Write-Host "Setting Application ID URI to $mcpAppIdUri..." -ForegroundColor Cyan
+        Update-MgApplication -ApplicationId $mcpAuthApp.Id -IdentifierUris @($mcpAppIdUri)
+        Write-Host "Application ID URI set." -ForegroundColor Green
+
+        # Expose a scope so OAuth clients can request user_impersonation.
+        # Re-fetch after the IdentifierUris update to get the current Api definition.
+        $mcpAuthAppFull  = Get-MgApplication -ApplicationId $mcpAuthApp.Id
+        $existingScopes  = $mcpAuthAppFull.Api.Oauth2PermissionScopes
         $userImpersonationScope = $existingScopes | Where-Object { $_.Value -eq "user_impersonation" } | Select-Object -First 1
         if (-not $userImpersonationScope) {
             Write-Host "Adding user_impersonation scope to MCP auth app..." -ForegroundColor Cyan
             $newScope = @{
-                Id                      = $scopeId
+                Id                      = [System.Guid]::NewGuid().ToString()
                 Value                   = "user_impersonation"
                 AdminConsentDisplayName = "Access ASTRAL MCP Server"
                 AdminConsentDescription = "Allows the application to query tenant state and drift history via the ASTRAL MCP Server."
@@ -349,14 +357,20 @@ if ($needGraph) {
             if ($existingScopes) { $updatedScopes += $existingScopes }
             Update-MgApplication -ApplicationId $mcpAuthApp.Id -Api @{ oauth2PermissionScopes = $updatedScopes }
             Write-Host "Scope added." -ForegroundColor Green
+        } else {
+            Write-Host "user_impersonation scope already exists — skipping." -ForegroundColor Yellow
         }
 
-        # Configure as a public client with localhost redirect URI for OAuth PKCE flow
-        Write-Host "Configuring MCP auth app as public client for OAuth..." -ForegroundColor Cyan
+        # Redirect URIs:
+        #   http://localhost                         — loopback, covers any port (RFC 8252 §8.3), used by Cursor etc.
+        #   https://claude.ai/api/mcp/auth_callback — Claude Desktop completes its OAuth flow via claude.ai (web URI).
+        Write-Host "Configuring MCP auth app redirect URIs..." -ForegroundColor Cyan
+        $claudeCallback = "https://claude.ai/api/mcp/auth_callback"
         Update-MgApplication -ApplicationId $mcpAuthApp.Id `
-            -IsFallbackPublicClient $true `
-            -PublicClient @{ redirectUris = @("http://localhost") }
-        Write-Host "Public client configured." -ForegroundColor Green
+            -IsFallbackPublicClient:$true `
+            -PublicClient @{ redirectUris = @("http://localhost") } `
+            -Web @{ redirectUris = @($claudeCallback) }
+        Write-Host "Public client and Claude Desktop redirect URI configured." -ForegroundColor Green
     }
 
     # ---------------------------------------------------------------------------
@@ -888,6 +902,7 @@ if ($mcpDeploy) {
         "ADO_TOKEN=$AdoToken",
         "ENTRA_TENANT_ID=$tenantId",
         "MCP_CLIENT_ID=$mcpAuthAppId",
+        "MCP_API_KEY=$McpApiKey",
         "--output", "none"
     )
 
@@ -917,12 +932,17 @@ if ($mcpDeploy) {
             "--output", "none"
         )
 
+        # AllowAnonymous — ASTRAL validates tokens in-process (JWKS-based).
+        # ACA EasyAuth is kept enabled so it injects X-MS-CLIENT-PRINCIPAL headers
+        # for audit purposes, but it does not block unauthenticated requests.
+        # This allows the OAuth discovery endpoint to be reached without a token,
+        # which is required for Claude Desktop's OAuth PKCE flow to work.
         Invoke-AzCli -ArgumentList @(
             "containerapp", "auth", "update",
             "--name", $McpContainerAppName,
             "--resource-group", $McpResourceGroup,
             "--enabled", "true",
-            "--unauthenticated-client-action", "Return401",
+            "--unauthenticated-client-action", "AllowAnonymous",
             "--output", "none"
         )
 

@@ -138,12 +138,14 @@ python3 mcp_server.py --transport sse --host 127.0.0.1 --port 8080
 
 ### Configure Claude Desktop
 
-Add to your Claude Desktop config (`~/Library/Application Support/Claude/claude_desktop_config.json` on macOS):
+Claude Desktop config file: `~/Library/Application Support/Claude/claude_desktop_config.json` on macOS.
+
+**Option A — stdio (local repo, no auth needed)**
 
 ```json
 {
   "mcpServers": {
-    "astral-local": {
+    "astral": {
       "command": "python3",
       "args": [
         "/path/to/astral/infra/mcp-server/mcp_server.py",
@@ -151,6 +153,28 @@ Add to your Claude Desktop config (`~/Library/Application Support/Claude/claude_
       ],
       "env": {
         "ASTRAL_REPO_ROOT": "/path/to/astral-clone"
+      }
+    }
+  }
+}
+```
+
+**Option B — SSE with API key (local or remote server)**
+
+```bash
+# Start the server
+export ASTRAL_REPO_ROOT=/path/to/astral-clone
+export MCP_API_KEY=$(python3 -c "import secrets; print(secrets.token_urlsafe(32))")
+python3 mcp_server.py --transport sse --host 127.0.0.1 --port 8080
+```
+
+```json
+{
+  "mcpServers": {
+    "astral": {
+      "url": "http://127.0.0.1:8080/sse",
+      "headers": {
+        "Authorization": "Bearer <your-MCP_API_KEY-value>"
       }
     }
   }
@@ -205,43 +229,49 @@ az containerapp auth update \
 
 ### Authentication
 
-The MCP server supports two authentication modes:
+The MCP server supports two authentication modes, which can be active simultaneously.
 
-**1. API key (default, no Entra ID required)**
+**1. API key — recommended for Claude Desktop and AURORA**
 
-The provisioning script generates a random 32-character API key and injects it as the `MCP_API_KEY` environment variable. Pass the key via the `x-api-key` header:
+Set `MCP_API_KEY` to a random secret (the provisioning script does this automatically; you can also set it manually). Pass the key as a Bearer token or via `x-api-key`:
 
 ```json
 {
   "mcpServers": {
-    "astral-azure": {
-      "transport": "sse",
+    "astral": {
       "url": "https://astral-mcp.<region>.azurecontainerapps.io/sse",
       "headers": {
-        "x-api-key": "<api-key-from-script-output>"
+        "Authorization": "Bearer <your-mcp-api-key>"
       }
     }
   }
 }
 ```
 
-**2. Microsoft Entra ID (enterprise)**
+The `x-api-key: <key>` header is accepted as an alternative.
 
-Configure via the Azure Portal under **Container App → Authentication → Identity Provider → Microsoft**. Once enabled, pass the Entra bearer token:
+To generate a key manually:
+```bash
+python -c "import secrets; print(secrets.token_urlsafe(32))"
+```
+
+**2. Microsoft Entra ID (enterprise / human users)**
+
+The server can publish an OAuth 2.0 discovery document (`/.well-known/oauth-authorization-server`, RFC 8414) so that MCP clients discover the Entra auth endpoints automatically. Set `ENTRA_TENANT_ID` and `MCP_CLIENT_ID` to activate it. Actual token enforcement is handled by Azure Container Apps built-in authentication (`az containerapp auth update ...`).
+
+With discovery active, Claude Desktop initiates the OAuth flow on its own — no `headers` entry needed in the config:
 
 ```json
 {
   "mcpServers": {
-    "astral-azure": {
-      "transport": "sse",
-      "url": "https://astral-mcp.<region>.azurecontainerapps.io/sse",
-      "headers": {
-        "Authorization": "Bearer <entra-token>"
-      }
+    "astral": {
+      "url": "https://astral-mcp.<region>.azurecontainerapps.io/sse"
     }
   }
 }
 ```
+
+Both modes can be active at the same time — service clients use the key, human users go through Entra.
 
 ## Security Notes
 
