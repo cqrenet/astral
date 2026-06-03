@@ -10,7 +10,7 @@ This document describes the security posture of ASTRAL, an Intune / Entra drift 
 
 ASTRAL stands for:
 
-- Admin Security Through Review, Automation & Least-privilege
+- Admin Security: Tenant Review, Automation & Lifecycle
 
 The goal of the platform is to:
 

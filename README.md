@@ -1,8 +1,8 @@
-# Intune / Entra Drift Backup
+<img src="docs/assets/astral-logo.svg" alt="ASTRAL — Admin Security: Tenant Review, Automation &amp; Lifecycle" width="600"/>
 
-This repository keeps Git-tracked snapshots of Microsoft Intune and selected Entra ID configuration, generates review reports, and drives a rolling pull-request workflow for post-change review and remediation.
+> Part of the [CQRE](https://cqre.net) M365 governance suite alongside [PULSAR](https://github.com/cqrenet/pulsar).
 
-> **Product name:** ASTRAL (Admin Security Through Review, Automation & Least-privilege)
+ASTRAL keeps Git-tracked snapshots of Microsoft Intune and Entra ID configuration, surfaces configuration drift through pull requests, and provides a review and rollback path. It answers the question: *"what changed in my tenant, was it authorised, and can we revert it?"*
 
 ## Getting Started
 
@@ -13,7 +13,7 @@ Quick start:
 1. Fork or import this repository into an Azure DevOps project.
 2. Review `templates/variables-tenant.yml` and create a matching Azure DevOps Variable Group in your project (e.g. `vg-astral-tenant`).
 3. Uncomment the variable group reference in the three pipeline YAMLs.
-4. Run `deploy/provision-change-probe.ps1` to create the Azure AD app registration, assign Graph permissions, configure the federated credential, and optionally provision the event-driven change probe (Azure Function App).
+4. Run `deploy/provision-change-probe.ps1` to create the Azure AD app registration, assign Graph permissions, configure the federated credential, and provision the event-driven change probe (Azure Function App) and optionally the MCP server (Azure Container Apps).
 5. Create the Azure DevOps service connection using the app registration details from the bootstrap script.
 6. Import the three pipelines (`azure-pipelines.yml`, `azure-pipelines-review-sync.yml`, `azure-pipelines-restore.yml`) into Azure DevOps.
 7. Run `deploy/validate-deployment.yml` to verify connectivity and permissions.
@@ -21,13 +21,20 @@ Quick start:
 
 See [`deploy/onboarding-runbook.md`](deploy/onboarding-runbook.md) for the full step-by-step guide.
 
+## Updates
+
+Import `deploy/update-from-upstream.yml` as a pipeline once after initial setup. Queue it to pull the latest `main` from GitHub, or specify a release tag (e.g. `v1.2.0`) to do a pinned version upgrade. The pipeline shows incoming changes, merges cleanly if there are no conflicts, and pushes — or stops and reports conflicting files if manual resolution is needed.
+
+Watch [GitHub releases](https://github.com/cqrenet/astral/releases) for new versions and changelogs.
+
 ## What The Repository Does
 
-The implementation is centered on three Azure DevOps pipelines:
+The implementation is centered on three Azure DevOps pipelines and an MCP server:
 
 - `azure-pipelines.yml`: backup/export pipeline with rolling PR management. Runs daily at 02:00 to generate a full tenant snapshot, reports, and documentation artifacts, and is also triggered on-demand by the event-driven change probe.
 - `azure-pipelines-review-sync.yml`: 20-minute reviewer-decision sync and post-merge remediation queue.
 - `azure-pipelines-restore.yml`: manual or auto-queued restore pipeline for approved baseline rollback.
+- `infra/mcp-server/`: Azure Container Apps-hosted MCP server exposing tenant state and drift history to AI assistants via natural-language queries.
 
 The main workflow is:
 
@@ -38,6 +45,7 @@ The main workflow is:
 5. Create or update one rolling PR per workload into `main`.
 6. Refresh the PR description with deterministic change/risk summary and optional Azure OpenAI narrative.
 7. Apply reviewer `/reject` or `/accept` decisions and queue restore when needed.
+8. Query tenant state and drift history via the ASTRAL MCP Server.
 
 An **event-driven change probe** monitors Intune and Entra audit logs and triggers the backup pipeline when actual changes are detected, replacing the previous hourly polling model with a responsive event-driven approach.
 
@@ -83,11 +91,12 @@ Current scope behavior:
 - `azure-pipelines-review-sync.yml`: reviewer decision sync and post-merge remediation helper.
 - `azure-pipelines-restore.yml`: baseline restore pipeline with full or selective scope.
 - `infra/change-probe/`: Azure Function App for event-driven change detection.
-- `deploy/provision-change-probe.ps1`: unified provisioning script for the change probe infrastructure.
+- `infra/mcp-server/`: MCP server (Azure Container Apps) for AI assistant integration — policy lookup, search, drift history, and assignment reports.
+- `deploy/provision-change-probe.ps1`: unified provisioning script for the change probe and MCP server infrastructure.
 - `docs/m365-baseline-roadmap.md`: expansion roadmap beyond current workload scope.
 - `docs/security-review-package.md`: implementation-focused security review package.
 - `docs/security-review-questionnaire.md`: short-form security review answers.
-- `scripts/`: export, reporting, PR automation, validation, remediation helpers, and change probe logic.
+- `scripts/`: export, reporting, PR automation, validation, remediation helpers, change probe logic, and MCP query layer.
 - `tests/`: focused unit coverage for the Python helpers.
 - `tenant-state/intune`: committed Intune JSON export.
 - `tenant-state/entra`: committed Entra JSON export.
@@ -285,6 +294,13 @@ Azure OpenAI integration:
 - `PR_AI_MAX_TOKENS`
 - `PR_AI_COMPACT_MAX_CHARS`
 
+MCP server settings:
+
+- `ASTRAL_REPO_ROOT` — local Git repo path (overrides ADO source; used for local dev)
+- `ADO_ORGANIZATION` / `ADO_PROJECT` / `ADO_REPO_NAME` / `ADO_BRANCH` / `ADO_TOKEN`
+
+See `infra/mcp-server/README.md` for the full MCP server configuration reference.
+
 ## Required Azure DevOps Permissions
 
 The pipeline build identity should have repository permissions to:
@@ -465,3 +481,4 @@ The repository includes focused unit tests for:
 - post-merge restore queueing
 - Intune partial-export noise filtering
 - Entra enrichment-noise filtering
+- MCP server query layer and data source behavior

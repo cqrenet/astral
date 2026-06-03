@@ -197,6 +197,37 @@ If you prefer manual setup:
 | Full package | Also enable restore and set `AUTO_REMEDIATE_AFTER_MERGE=true` if desired |
 | AI summaries | `ENABLE_PR_AI_SUMMARY=true` plus Azure OpenAI variables |
 
+## Staying up to date
+
+ASTRAL releases are published to [https://github.com/cqrenet/astral/releases](https://github.com/cqrenet/astral/releases). Watch the repository on GitHub to receive release notifications.
+
+### Import the update pipeline (one-time setup)
+
+Import `deploy/update-from-upstream.yml` into your ADO project as a pipeline. You only need to do this once — the pipeline is then available to run whenever you want to apply an update.
+
+In Azure DevOps: **Pipelines → Create pipeline → Azure Repos Git → Existing YAML file** → select `deploy/update-from-upstream.yml`.
+
+Grant the build service **Contribute** and **Force push** permissions on the repository if not already granted (same permissions used by the backup pipeline).
+
+### Applying an update
+
+1. Check the [release notes](https://github.com/cqrenet/astral/releases) for breaking changes or required variable group changes.
+2. Queue the `update-from-upstream.yml` pipeline:
+   - Leave **Upstream ref** blank to pull the latest `main`.
+   - Or enter a specific tag (e.g. `v1.2.0`) to pin to a release.
+   - Run with **Dry run** checked first to see what will change before committing.
+3. If the merge completes cleanly, the pipeline pushes directly to your `main` branch.
+4. If there are conflicts (typically in pipeline YAML files where your variable group name differs from upstream defaults), the pipeline stops and lists the conflicting files. Resolve them locally and push manually.
+
+### Pinned version upgrades
+
+If you prefer explicit version control over tracking `main`, always specify a tag in the **Upstream ref** parameter. This means updates only happen when you decide to upgrade, and you can review the full changelog between your current version and the target tag before applying.
+
+To see what tag you are currently on:
+```bash
+git describe --tags --abbrev=0
+```
+
 ## Troubleshooting
 
 | Symptom | Likely cause | Fix |

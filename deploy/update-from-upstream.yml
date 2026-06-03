@@ -1,0 +1,185 @@
+trigger: none
+pr: none
+
+# Update pipeline: pulls a new version of ASTRAL from the public GitHub repository
+# into this ADO repo, merges it onto your local main, and pushes if the merge is clean.
+#
+# Usage:
+#   Queue this pipeline manually from Azure DevOps.
+#   Leave upstreamRef blank to pull the latest main, or specify a release tag (e.g. v1.2.0)
+#   to do a pinned version upgrade.
+#
+# What it does:
+#   1. Fetches the specified ref from https://github.com/cqrenet/astral
+#   2. Shows a summary of incoming changes (commits + changed files)
+#   3. Attempts a --no-ff merge onto your local main
+#   4. Pushes if the merge is clean; aborts and reports conflicts if not
+#
+# Your local customisations (variable group name, pipeline YAML edits) will be preserved
+# as long as they do not conflict with upstream changes to the same lines.
+# If conflicts occur, the pipeline stops without pushing — resolve them locally and push manually.
+
+parameters:
+  - name: upstreamRef
+    displayName: "Upstream ref to pull (leave blank for latest main, or enter a tag e.g. v1.2.0)"
+    type: string
+    default: ""
+  - name: dryRun
+    displayName: "Dry run (show incoming changes without merging)"
+    type: boolean
+    default: false
+
+variables:
+  - template: ../templates/variables-common.yml
+
+jobs:
+  - job: update_from_upstream
+    displayName: Pull upstream ASTRAL update
+    pool:
+      name: $(AGENT_POOL_NAME)
+    steps:
+      - checkout: self
+        persistCredentials: true
+        fetchDepth: 0
+
+      - task: Bash@3
+        displayName: Configure git identity
+        inputs:
+          targetType: inline
+          script: |
+            git config user.email "astral-update@local"
+            git config user.name "ASTRAL Updater"
+
+      - task: Bash@3
+        displayName: Fetch upstream
+        inputs:
+          targetType: inline
+          script: |
+            set -euo pipefail
+
+            UPSTREAM_URL="https://github.com/cqrenet/astral"
+            UPSTREAM_REF="${{ parameters.upstreamRef }}"
+
+            git remote remove upstream 2>/dev/null || true
+            git remote add upstream "$UPSTREAM_URL"
+
+            echo "Fetching from $UPSTREAM_URL ..."
+            git fetch upstream --tags
+
+            if [ -n "$UPSTREAM_REF" ]; then
+              FETCH_REF="$UPSTREAM_REF"
+              echo "Pinned ref: $FETCH_REF"
+            else
+              FETCH_REF="upstream/main"
+              echo "Using latest upstream main."
+            fi
+
+            # Resolve to a commit SHA for display
+            UPSTREAM_SHA="$(git rev-parse "$FETCH_REF")"
+            LOCAL_SHA="$(git rev-parse HEAD)"
+
+            echo "Local HEAD:    $LOCAL_SHA"
+            echo "Upstream HEAD: $UPSTREAM_SHA"
+            echo ""
+
+            if [ "$UPSTREAM_SHA" = "$LOCAL_SHA" ]; then
+              echo "Already up to date. Nothing to do."
+              echo "##vso[task.setvariable variable=ALREADY_UP_TO_DATE]true"
+              exit 0
+            fi
+
+            echo "##vso[task.setvariable variable=ALREADY_UP_TO_DATE]false"
+            echo "##vso[task.setvariable variable=UPSTREAM_SHA]$UPSTREAM_SHA"
+            echo "##vso[task.setvariable variable=FETCH_REF]$FETCH_REF"
+          workingDirectory: "$(Build.SourcesDirectory)"
+
+      - task: Bash@3
+        displayName: Show incoming changes
+        condition: ne(variables['ALREADY_UP_TO_DATE'], 'true')
+        inputs:
+          targetType: inline
+          script: |
+            set -euo pipefail
+
+            FETCH_REF="$(FETCH_REF)"
+
+            echo "=== Incoming commits ==="
+            git log HEAD.."$FETCH_REF" --oneline --no-merges | grep -v "^.*Sync from dev" || true
+            echo ""
+
+            CHANGED_FILES="$(git diff --name-only HEAD "$FETCH_REF" || true)"
+            echo "=== Changed files ==="
+            echo "$CHANGED_FILES"
+            echo ""
+
+            # Warn about files customers commonly customise
+            SENSITIVE_FILES="azure-pipelines.yml azure-pipelines-review-sync.yml azure-pipelines-restore.yml"
+            for f in $SENSITIVE_FILES; do
+              if echo "$CHANGED_FILES" | grep -q "^${f}$"; then
+                echo "##[warning]Upstream changes include $f — review for conflicts with your variable group configuration."
+              fi
+            done
+          workingDirectory: "$(Build.SourcesDirectory)"
+
+      - task: Bash@3
+        displayName: Merge upstream changes
+        condition: and(ne(variables['ALREADY_UP_TO_DATE'], 'true'), eq('${{ parameters.dryRun }}', 'false'))
+        inputs:
+          targetType: inline
+          script: |
+            set -euo pipefail
+
+            FETCH_REF="$(FETCH_REF)"
+            UPSTREAM_SHA="$(UPSTREAM_SHA)"
+            UPSTREAM_REF_LABEL="${{ parameters.upstreamRef }}"
+            if [ -z "$UPSTREAM_REF_LABEL" ]; then
+              UPSTREAM_REF_LABEL="main @ ${UPSTREAM_SHA:0:7}"
+            fi
+
+            git checkout main
+
+            # Attempt merge
+            if git merge --no-ff "$FETCH_REF" -m "Update from upstream ASTRAL ${UPSTREAM_REF_LABEL}
+
+Upstream: https://github.com/cqrenet/astral
+Ref: $UPSTREAM_REF_LABEL ($UPSTREAM_SHA)"; then
+              echo "Merge succeeded."
+            else
+              echo ""
+              echo "##[error]Merge conflicts detected. The pipeline has stopped without pushing."
+              echo ""
+              echo "Conflicting files:"
+              git diff --name-only --diff-filter=U
+              echo ""
+              echo "To resolve:"
+              echo "  1. Clone this ADO repo locally."
+              echo "  2. git remote add upstream https://github.com/cqrenet/astral"
+              echo "  3. git fetch upstream"
+              echo "  4. git merge $FETCH_REF"
+              echo "  5. Resolve conflicts, commit, and push."
+              git merge --abort || true
+              exit 1
+            fi
+          workingDirectory: "$(Build.SourcesDirectory)"
+
+      - task: Bash@3
+        displayName: Push merged changes
+        condition: and(ne(variables['ALREADY_UP_TO_DATE'], 'true'), eq('${{ parameters.dryRun }}', 'false'))
+        inputs:
+          targetType: inline
+          script: |
+            set -euo pipefail
+            git push origin main
+            echo "Update pushed successfully."
+        env:
+          SYSTEM_ACCESSTOKEN: $(System.AccessToken)
+        workingDirectory: "$(Build.SourcesDirectory)"
+
+      - task: Bash@3
+        displayName: Dry run summary
+        condition: and(ne(variables['ALREADY_UP_TO_DATE'], 'true'), eq('${{ parameters.dryRun }}', 'true'))
+        inputs:
+          targetType: inline
+          script: |
+            echo "Dry run complete — no changes pushed."
+            echo "Re-run with 'Dry run' unchecked to apply the update."

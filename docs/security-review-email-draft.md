@@ -10,7 +10,7 @@ Hello,
 
 As discussed, I am sending the security review package for ASTRAL.
 
-ASTRAL stands for Admin Security Through Review, Automation & Least-privilege.
+ASTRAL stands for Admin Security: Tenant Review, Automation & Lifecycle.
 
 Attached are:
 

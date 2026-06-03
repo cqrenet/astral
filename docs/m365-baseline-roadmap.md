@@ -11,7 +11,7 @@ The repository already operates as a two-workload baseline system:
 
 The surrounding control loop is also implemented:
 
-- hourly backup pipeline plus midnight Prague full run
+- event-driven change probe (Azure Function App) plus daily full run at 02:00
 - rolling PR per workload
 - deterministic reviewer summary with optional Azure OpenAI narrative
 - optional per-file change-ticket threads
@@ -20,6 +20,7 @@ The surrounding control loop is also implemented:
 - post-merge restore queue for partial-accept / partial-reject review flows
 - selective historical restore from branch, tag, or commit
 - output validation and drift-noise filtering before commit
+- MCP server (Azure Container Apps) for AI assistant integration — policy lookup, search, drift history, and assignment reports
 
 ## What Is Stable Today
 
@@ -32,6 +33,8 @@ Stable and part of the normal operating model:
 - object inventory and assignment reporting for both workloads
 - Entra app inventory reporting
 - drift-branch commit and rolling PR update workflow
+- event-driven change probe with debouncer state machine
+- MCP server exposing tenant state and drift history to AI assistants
 
 Implemented, but intentionally constrained:
 
@@ -47,7 +50,7 @@ Not yet implemented:
 ## Current Gaps And Stabilization Backlog
 
 1. Fix App Registrations light-run stability.
-   The current pipeline still disables hourly App Registrations export because some runs produce resolver-only churn. Re-enabling hourly export requires a deterministic light-run result.
+   The current pipeline still restricts App Registrations export to full runs because some runs produce resolver-only churn. Re-enabling light-run export requires a deterministic result across repeated probe-triggered runs.
 
 2. Keep Enterprise Applications scoped as a heavy module unless runtime proves otherwise.
    Enterprise Applications are already exported, but only on full runs. The current design assumes this category should remain bounded to the daily/full path unless runtime and diff quality support widening scope.
