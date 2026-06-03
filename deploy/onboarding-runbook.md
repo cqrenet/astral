@@ -54,32 +54,82 @@ Do this for:
 
 Commit and push the changes.
 
-## Step 4: Run the tenant bootstrap script
+## Steps 4 & 5: Bootstrap and service connection
 
-Run `deploy/bootstrap-tenant.ps1` in a PowerShell session authenticated to your target tenant.
+There are two paths. **Path A (automatic)** is simpler — ADO creates the app registration for you. **Path B (manual)** gives you full control and works if you don't have Azure subscription Owner role.
+
+---
+
+### Path A: Automatic service connection (recommended)
+
+**Step 4A — Create the service connection**
+
+1. In Azure DevOps, go to **Project settings → Service connections**.
+2. Click **New service connection → Azure Resource Manager → Next**.
+3. Select **App registration (automatic)** with **Workload identity federation**. Click **Next**.
+4. Select **Scope level: Subscription** and choose any subscription in your tenant (ASTRAL uses Microsoft Graph, not ARM resources — the subscription is required by the form only).
+5. Enter the **Service connection name** matching `SERVICE_CONNECTION_NAME` (e.g. `sc-astral-backup`).
+6. **Do not tick "Grant access permission to all pipelines"** — leave it unchecked. You will authorize only the three ASTRAL pipelines individually in Step 7.
+7. Click **Save**. ADO creates the app registration and federated credential automatically.
+8. On the service connection overview page, click **Manage App registration** — this opens the Entra app registration. Copy the **Application (client) ID** from there.
+
+**Step 5A — Assign Graph permissions**
+
+Run `deploy/bootstrap-tenant.ps1` with `-ExistingAppId` pointing to the ADO-created app:
 
 ```powershell
-# Example
-.\deploy\bootstrap-tenant.ps1 -TenantName "contoso.onmicrosoft.com" -ServiceConnectionName "sc-astral-backup"
+.\deploy\bootstrap-tenant.ps1 `
+  -TenantName "contoso.onmicrosoft.com" `
+  -ExistingAppId "<app-id-from-service-connection>"
 ```
 
-The script will:
-1. Create a single-tenant app registration.
-2. Add required Microsoft Graph application permissions.
-3. Grant admin consent.
-4. Create a workload federated credential for Azure DevOps.
-5. Print the App ID and instructions for creating the Azure DevOps service connection.
+The script assigns all required Microsoft Graph application permissions and grants admin consent. No app registration or federated credential is created — those already exist.
 
-## Step 5: Create the Azure DevOps service connection
+---
 
-1. In Azure DevOps, go to **Project settings > Service connections**.
-2. Click **New service connection > Azure Resource Manager > Workload identity federation (manual)**.
-3. Fill in:
-   - **Subscription**: leave blank or select if you also want ARM access (not required).
-   - **Tenant ID**: your Microsoft 365 tenant ID.
-   - **Service Connection Name**: the same value you set in `SERVICE_CONNECTION_NAME` (e.g. `sc-astral-backup`).
-   - **App ID**: from the bootstrap script output.
-4. Save the service connection.
+### Path B: Manual service connection
+
+**Step 4B — Create the service connection draft**
+
+1. In Azure DevOps, go to **Project settings → Service connections**.
+2. Click **New service connection → Azure Resource Manager → Next**.
+3. Select **App registration or Managed identity (manual)** with **Workload identity federation**. Click **Next**.
+4. Enter the **Service connection name** matching `SERVICE_CONNECTION_NAME` (e.g. `sc-astral-backup`). Click **Next**.
+5. In Step 2 (App registration details):
+   - **Environment**: Azure Cloud
+   - **Scope level**: Subscription — enter any valid subscription in your tenant
+   - Leave **Application (client) ID** and **Directory (tenant) ID** blank for now
+   - **Do not tick "Grant access permission to all pipelines"** — leave it unchecked. You will authorize only the three ASTRAL pipelines individually in Step 7.
+6. **Copy the generated Issuer and Subject identifier** values shown by ADO.
+7. Click **Keep as draft**.
+
+**Step 5B — Bootstrap and add the federated credential**
+
+Run `deploy/bootstrap-tenant.ps1` to create the app registration, assign permissions, and grant admin consent:
+
+```powershell
+.\deploy\bootstrap-tenant.ps1 `
+  -TenantName "contoso.onmicrosoft.com" `
+  -ServiceConnectionName "sc-astral-backup"
+```
+
+Note the **App ID** and **Tenant ID** from the output.
+
+Then add the federated credential to the new app:
+
+1. In the [Azure portal](https://portal.azure.com), open **Entra ID → App registrations** and find the app created by the script.
+2. Go to **Certificates & secrets → Federated credentials → Add credential**.
+3. Select scenario **Other issuer**.
+4. Paste the **Issuer** and **Subject identifier** copied from ADO in Step 4B.
+5. Set **Type** to **Explicit subject identifier**, give it a name (e.g. `astral-ado-federation`), and click **Add**.
+
+**Complete the service connection**
+
+1. Return to the ADO draft service connection.
+2. Fill in **Application (client) ID** and **Directory (tenant) ID** from the bootstrap output.
+3. Click **Finish setup → Verify and save**.
+
+---
 
 ## Step 6: Import the pipelines
 

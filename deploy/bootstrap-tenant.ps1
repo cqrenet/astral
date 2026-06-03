@@ -4,35 +4,70 @@
     Bootstraps an Azure AD app registration for ASTRAL with required Microsoft Graph permissions.
 
 .DESCRIPTION
-    Creates a single-tenant app registration, assigns read (and optional write) Graph application permissions,
-    grants admin consent, and configures a workload federated credential for Azure DevOps.
+    Two usage modes:
+
+    Mode A — automatic service connection (recommended):
+        Create the ADO service connection using the "App registration (automatic)" option first.
+        ADO creates the app registration and federated credential for you. Then run this script
+        with -ExistingAppId to assign the required Graph permissions and grant admin consent to
+        that auto-created app.
+
+        .\bootstrap-tenant.ps1 -TenantName "contoso.onmicrosoft.com" -ExistingAppId "<app-id-from-ado>"
+
+    Mode B — manual service connection:
+        Run this script first. It creates the app registration, assigns Graph permissions, grants
+        admin consent, and optionally creates the federated credential. Then create the ADO service
+        connection manually using the Issuer and Subject Identifier from the ADO draft.
+
+        .\bootstrap-tenant.ps1 -TenantName "contoso.onmicrosoft.com" -ServiceConnectionName "sc-astral-backup"
 
 .PARAMETER TenantName
     The Microsoft 365 tenant domain, e.g. contoso.onmicrosoft.com.
 
+.PARAMETER ExistingAppId
+    App ID of an existing app registration (e.g. one auto-created by ADO).
+    When provided, the script skips app registration and federated credential creation
+    and only assigns Graph permissions and grants admin consent.
+    ServiceConnectionName is not required in this mode.
+
 .PARAMETER ServiceConnectionName
-    The intended Azure DevOps service connection name (used for the federated credential subject).
+    The intended Azure DevOps service connection name. Used as the display name suffix
+    and federated credential subject when creating a new app registration (Mode B).
+    Not required when -ExistingAppId is provided.
 
 .PARAMETER AppDisplayName
-    Optional display name for the app registration. Default: "ASTRAL Backup Service".
+    Display name for a newly created app registration. Default: "ASTRAL Backup Service".
+    Ignored when -ExistingAppId is provided.
 
 .PARAMETER AdoOrganizationUrl
     Optional Azure DevOps organization URL, e.g. https://dev.azure.com/contoso.
-    If provided, the script prints a one-liner to create the service connection via REST API.
+    Used only in Mode B to print a REST API helper command.
 
 .PARAMETER AddRestorePermissions
     If specified, also adds write permissions for the restore pipeline.
 
 .EXAMPLE
+    # Mode A: assign permissions to an ADO auto-created app
+    .\bootstrap-tenant.ps1 -TenantName "contoso.onmicrosoft.com" -ExistingAppId "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
+
+.EXAMPLE
+    # Mode B: create everything from scratch
     .\bootstrap-tenant.ps1 -TenantName "contoso.onmicrosoft.com" -ServiceConnectionName "sc-astral-backup"
+
+.EXAMPLE
+    # Mode B with restore permissions
+    .\bootstrap-tenant.ps1 -TenantName "contoso.onmicrosoft.com" -ServiceConnectionName "sc-astral-backup" -AddRestorePermissions
 #>
 [CmdletBinding()]
 param (
     [Parameter(Mandatory = $true)]
     [string]$TenantName,
 
-    [Parameter(Mandatory = $true)]
-    [string]$ServiceConnectionName,
+    [Parameter(Mandatory = $false)]
+    [string]$ExistingAppId = "",
+
+    [Parameter(Mandatory = $false)]
+    [string]$ServiceConnectionName = "",
 
     [string]$AppDisplayName = "ASTRAL Backup Service",
 
@@ -42,6 +77,16 @@ param (
 )
 
 $ErrorActionPreference = "Stop"
+
+# Validate parameter combinations
+$modeAutomatic = -not [string]::IsNullOrWhiteSpace($ExistingAppId)
+$modeManual    = -not $modeAutomatic
+
+if ($modeManual -and [string]::IsNullOrWhiteSpace($ServiceConnectionName)) {
+    throw "ServiceConnectionName is required when ExistingAppId is not provided. " +
+          "Either supply -ExistingAppId (automatic service connection mode) or " +
+          "-ServiceConnectionName (manual service connection mode)."
+}
 
 function Test-ModuleInstalled {
     param ([string]$Name)
@@ -67,6 +112,14 @@ if (-not $tenant) {
 }
 
 Write-Host "Tenant: $($tenant.DisplayName) ($($tenant.Id))" -ForegroundColor Green
+
+if ($modeAutomatic) {
+    Write-Host ""
+    Write-Host "Mode: automatic service connection — targeting existing app registration $ExistingAppId" -ForegroundColor Cyan
+} else {
+    Write-Host ""
+    Write-Host "Mode: manual service connection — creating or updating app registration" -ForegroundColor Cyan
+}
 
 # Required read permissions
 $readPermissions = @(
@@ -113,7 +166,6 @@ if (-not $graphSp) {
     throw "Microsoft Graph service principal not found in tenant."
 }
 
-$requiredResourceAccess = @()
 $appRoles = @()
 foreach ($permName in ($allPermissions | Select-Object -Unique)) {
     $appRole = $graphSp.AppRoles | Where-Object { $_.Value -eq $permName } | Select-Object -First 1
@@ -143,18 +195,34 @@ $requiredResourceAccess = @(
     }
 )
 
-# Create or update app registration
-$existingApp = Get-MgApplication -Filter "displayName eq '$AppDisplayName'" | Select-Object -First 1
-if ($existingApp) {
-    Write-Host "Found existing app registration: $($existingApp.AppId)" -ForegroundColor Yellow
-    $app = $existingApp
+# ---------------------------------------------------------------------------
+# Resolve or create the app registration
+# ---------------------------------------------------------------------------
+if ($modeAutomatic) {
+    # Target the existing app created by ADO
+    $app = Get-MgApplication -Filter "appId eq '$ExistingAppId'" | Select-Object -First 1
+    if (-not $app) {
+        throw "No app registration found with App ID '$ExistingAppId'. " +
+              "Ensure you are authenticated to the correct tenant and the App ID is correct."
+    }
+    Write-Host "Found app registration: $($app.DisplayName) ($($app.AppId))" -ForegroundColor Green
     Update-MgApplication -ApplicationId $app.Id -RequiredResourceAccess $requiredResourceAccess
-    Write-Host "Updated required resource access." -ForegroundColor Green
+    Write-Host "Graph permissions assigned." -ForegroundColor Green
 }
 else {
-    Write-Host "Creating app registration: $AppDisplayName" -ForegroundColor Cyan
-    $app = New-MgApplication -DisplayName $AppDisplayName -SignInAudience "AzureADMyOrg" -RequiredResourceAccess $requiredResourceAccess
-    Write-Host "Created app registration. AppId: $($app.AppId)" -ForegroundColor Green
+    # Create or update by display name
+    $existingApp = Get-MgApplication -Filter "displayName eq '$AppDisplayName'" | Select-Object -First 1
+    if ($existingApp) {
+        Write-Host "Found existing app registration: $($existingApp.AppId)" -ForegroundColor Yellow
+        $app = $existingApp
+        Update-MgApplication -ApplicationId $app.Id -RequiredResourceAccess $requiredResourceAccess
+        Write-Host "Updated required resource access." -ForegroundColor Green
+    }
+    else {
+        Write-Host "Creating app registration: $AppDisplayName" -ForegroundColor Cyan
+        $app = New-MgApplication -DisplayName $AppDisplayName -SignInAudience "AzureADMyOrg" -RequiredResourceAccess $requiredResourceAccess
+        Write-Host "Created app registration. AppId: $($app.AppId)" -ForegroundColor Green
+    }
 }
 
 # Ensure service principal exists
@@ -174,55 +242,50 @@ foreach ($ar in $appRoles) {
 }
 Write-Host "Admin consent granted." -ForegroundColor Green
 
-# Federated credential for Azure DevOps
-$federatedCredentialName = "AstralAzureDevOps-$ServiceConnectionName"
-$existingFedCred = Get-MgApplicationFederatedIdentityCredential -ApplicationId $app.Id | Where-Object { $_.Name -eq $federatedCredentialName }
-if (-not $existingFedCred) {
-    Write-Host "Creating federated credential for Azure DevOps..." -ForegroundColor Cyan
-    # Subject identifier for Azure DevOps workload identity federation
-    # Format: sc://<ado-org>/<project>/<service-connection-name>
-    # We require the user to fill in org/project manually or via parameters.
-    $adoOrg = Read-Host "Enter your Azure DevOps organization name (e.g. 'contoso')"
-    $adoProject = Read-Host "Enter your Azure DevOps project name (e.g. 'ASTRAL')"
-    $subject = "sc://$adoOrg/$adoProject/$ServiceConnectionName"
-
-    $params = @{
-        Name      = $federatedCredentialName
-        Issuer    = "https://vstoken.dev.azure.com"
-        Subject   = $subject
-        Audiences = @("api://AzureADTokenExchange")
+# ---------------------------------------------------------------------------
+# Federated credential (Mode B only — Mode A uses the one ADO created)
+# ---------------------------------------------------------------------------
+if ($modeManual) {
+    $federatedCredentialName = "AstralAzureDevOps-$ServiceConnectionName"
+    $existingFedCred = Get-MgApplicationFederatedIdentityCredential -ApplicationId $app.Id | Where-Object { $_.Name -eq $federatedCredentialName }
+    if ($existingFedCred) {
+        Write-Host "Federated credential '$federatedCredentialName' already exists — skipping." -ForegroundColor Yellow
+        Write-Host "The existing credential will be used when you complete the ADO service connection draft." -ForegroundColor Yellow
     }
-    New-MgApplicationFederatedIdentityCredential -ApplicationId $app.Id -BodyParameter $params | Out-Null
-    Write-Host "Federated credential created. Subject: $subject" -ForegroundColor Green
-}
-else {
-    Write-Host "Federated credential already exists." -ForegroundColor Yellow
+    else {
+        Write-Host ""
+        Write-Host "No federated credential found for '$federatedCredentialName'." -ForegroundColor Yellow
+        Write-Host "You have two options:" -ForegroundColor Cyan
+        Write-Host "  1. Create the ADO service connection draft first, then re-run this script to let ADO generate the correct Issuer/Subject."
+        Write-Host "  2. Create the federated credential manually in Entra after creating the ADO service connection draft."
+        Write-Host ""
+        Write-Host "Skipping federated credential creation. Complete the ADO service connection setup and grant admin consent before running pipelines." -ForegroundColor Yellow
+    }
 }
 
+# ---------------------------------------------------------------------------
+# Summary
+# ---------------------------------------------------------------------------
 Write-Host ""
 Write-Host "=== Bootstrap complete ===" -ForegroundColor Green
-Write-Host "Tenant Name:        $TenantName"
-Write-Host "Tenant ID:          $($tenant.Id)"
-Write-Host "App Display Name:   $AppDisplayName"
-Write-Host "App ID:             $($app.AppId)"
-Write-Host "Service Connection: $ServiceConnectionName"
-Write-Host ""
-Write-Host "Next steps:" -ForegroundColor Cyan
-Write-Host "1. In Azure DevOps, create a Workload Identity Federation service connection."
-Write-Host "   - Tenant ID: $($tenant.Id)"
-Write-Host "   - App ID:    $($app.AppId)"
-Write-Host "   - Name:      $ServiceConnectionName"
+Write-Host "Tenant:      $($tenant.DisplayName) ($($tenant.Id))"
+Write-Host "App Name:    $($app.DisplayName)"
+Write-Host "App ID:      $($app.AppId)"
 Write-Host ""
 
-if ($AdoOrganizationUrl) {
-    $project = if ($AdoOrganizationUrl -match "/([^/]+)$") { $matches[1] } else { "YOUR_PROJECT" }
-    $pat = Read-Host "Enter an Azure DevOps PAT with 'ServiceConnections: Read & manage' scope (input is hidden)" -AsSecureString
-    $patPlain = [System.Net.NetworkCredential]::new("", $pat).Password
-    Write-Host ""
-    Write-Host "You can create the service connection via REST API using:"
-    Write-Host "  curl -u :$patPlain -X POST -H 'Content-Type: application/json' "
-    Write-Host "    -d '{ ... }' "
-    Write-Host "    '$AdoOrganizationUrl/_apis/serviceendpoint/endpoints?api-version=7.1'"
+if ($modeAutomatic) {
+    Write-Host "Next step:" -ForegroundColor Cyan
+    Write-Host "  Your ADO service connection already has the federated credential."
+    Write-Host "  Return to the ADO draft service connection, click 'Finish setup', then 'Verify and save'."
+}
+else {
+    Write-Host "Next steps:" -ForegroundColor Cyan
+    Write-Host "  1. Create the ADO service connection (manual) using:"
+    Write-Host "     - App ID:    $($app.AppId)"
+    Write-Host "     - Tenant ID: $($tenant.Id)"
+    Write-Host "  2. Save as draft, copy the Issuer and Subject Identifier from ADO."
+    Write-Host "  3. In Entra, add a federated credential to this app using those values."
+    Write-Host "  4. Return to ADO, click 'Finish setup', then 'Verify and save'."
 }
 
 Disconnect-MgGraph | Out-Null
