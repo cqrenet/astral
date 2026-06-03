@@ -138,11 +138,10 @@ jobs:
 
             git checkout main
 
-            # Attempt merge
-            if git merge --no-ff "$FETCH_REF" -m "Update from upstream ASTRAL ${UPSTREAM_REF_LABEL}
-
-Upstream: https://github.com/cqrenet/astral
-Ref: $UPSTREAM_REF_LABEL ($UPSTREAM_SHA)"; then
+            # Attempt merge — commit message stored in variable to avoid YAML parsing issues
+            COMMIT_MSG=$(printf 'Update from upstream ASTRAL %s\n\nSource: https://github.com/cqrenet/astral\nRef: %s (%s)' \
+              "$UPSTREAM_REF_LABEL" "$UPSTREAM_REF_LABEL" "$UPSTREAM_SHA")
+            if git merge --no-ff "$FETCH_REF" -m "$COMMIT_MSG"; then
               echo "Merge succeeded."
             else
               echo ""

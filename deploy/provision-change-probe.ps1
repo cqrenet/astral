@@ -32,7 +32,7 @@
     Azure DevOps project name.
 
 .PARAMETER AdoPipelineId
-    Azure DevOps pipeline ID (numeric).
+    Azure DevOps pipeline ID of the main backup pipeline (azure-pipelines.yml), numeric. Find it in the pipeline URL as definitionId=XX.
 
 .PARAMETER AdoToken
     Azure DevOps Personal Access Token with Build (Read & Execute) scope.
@@ -217,7 +217,7 @@ Import-Module Microsoft.Graph.Applications
 Write-Host "`n--- Azure DevOps Settings ---" -ForegroundColor Cyan
 $AdoOrganization = Get-OrPrompt -Value $AdoOrganization -Prompt "Azure DevOps Organization (e.g. 'cqre')"
 $AdoProject      = Get-OrPrompt -Value $AdoProject      -Prompt "Azure DevOps Project"
-$AdoPipelineId   = Get-OrPrompt -Value $AdoPipelineId   -Prompt "Azure DevOps Pipeline ID (numeric)"
+$AdoPipelineId   = Get-OrPrompt -Value $AdoPipelineId   -Prompt "Azure DevOps Pipeline ID of the main backup pipeline (azure-pipelines.yml) — find it as definitionId=XX in the pipeline URL"
 $AdoToken        = Get-OrPrompt -Value $AdoToken        -Prompt "Azure DevOps PAT (Build Read & Execute)" -Sensitive
 
 # ---------------------------------------------------------------------------
@@ -283,6 +283,8 @@ $probeAppSecret = ""
 $tenantId       = ""
 $mcpAuthAppId   = ""
 $mcpAuthSecret  = ""
+$FunctionAppName = ""
+$StorageName     = ""
 
 $needGraph = (-not $DeployMcpOnly) -or ($mcpDeploy -and $mcpEnableEntraIdAuth)
 
@@ -567,7 +569,13 @@ try {
 # ---------------------------------------------------------------------------
 
 Write-Host "Ensuring resource group '$ResourceGroup'..." -ForegroundColor Cyan
-Invoke-AzCli -ArgumentList @("group", "create", "--name", $ResourceGroup, "--location", $Location, "--output", "none")
+Invoke-AzCli -ArgumentList @(
+    "group", "create",
+    "--name", $ResourceGroup,
+    "--location", $Location,
+    "--tags", "astral=true", "astral-ado-org=$AdoOrganization", "astral-ado-project=$AdoProject",
+    "--output", "none"
+)
 
 # Quick diagnostic: confirm ARM can read back the RG in this subscription.
 try {
@@ -608,6 +616,7 @@ Invoke-AzCli -ArgumentList @(
     "--location", $Location,
     "--sku", "Standard_LRS",
     "--kind", "StorageV2",
+    "--tags", "astral=true", "astral-ado-org=$AdoOrganization", "astral-ado-project=$AdoProject", "astral-component=change-probe",
     "--output", "none"
 )
 
@@ -651,6 +660,7 @@ Invoke-AzCli -ArgumentList @(
     "--runtime", "python",
     "--runtime-version", "3.11",
     "--functions-version", "4",
+    "--tags", "astral=true", "astral-ado-org=$AdoOrganization", "astral-ado-project=$AdoProject", "astral-component=change-probe",
     "--output", "none"
 )
 
@@ -737,6 +747,7 @@ if ($mcpDeploy) {
             "--location", $McpLocation,
             "--sku", "Basic",
             "--admin-enabled", "true",
+            "--tags", "astral=true", "astral-ado-org=$AdoOrganization", "astral-ado-project=$AdoProject", "astral-component=mcp-server",
             "--output", "none"
         )
     } else {
@@ -793,6 +804,7 @@ if ($mcpDeploy) {
         "--name", $caEnvName,
         "--resource-group", $McpResourceGroup,
         "--location", $McpLocation,
+        "--tags", "astral=true", "astral-ado-org=$AdoOrganization", "astral-ado-project=$AdoProject", "astral-component=mcp-server",
         "--output", "none"
     )
 
@@ -830,6 +842,7 @@ if ($mcpDeploy) {
         "--registry-server", $acrLoginServer,
         "--registry-username", $acrUsername,
         "--registry-password", $acrPassword,
+        "--tags", "astral=true", "astral-ado-org=$AdoOrganization", "astral-ado-project=$AdoProject", "astral-component=mcp-server",
         "--output", "none"
     )
 
@@ -1053,12 +1066,19 @@ $configToSave = [PSCustomObject]@{
     AdoProject           = $AdoProject
     AdoPipelineId        = $AdoPipelineId
     AdoBranch            = $AdoBranch
+    SubscriptionId       = $SubscriptionId
+    TenantId             = $tenantId
     ResourceGroup        = $ResourceGroup
     Location             = $Location
+    ProbeAppId           = $probeAppId
+    ProbeAppDisplayName  = if (-not $DeployMcpOnly) { $AppDisplayName } else { "" }
+    FunctionAppName      = if (-not $DeployMcpOnly -and $FunctionAppName) { $FunctionAppName } else { "" }
+    StorageName          = if (-not $DeployMcpOnly -and $StorageName) { $StorageName } else { "" }
     McpContainerAppName  = $McpContainerAppName
     McpAcrName           = $McpAcrName
     McpResourceGroup     = $McpResourceGroup
     McpLocation          = $McpLocation
+    McpAuthAppId         = $mcpAuthAppId
     EnableMcpEntraIdAuth = [bool]$mcpEnableEntraIdAuth
 }
 

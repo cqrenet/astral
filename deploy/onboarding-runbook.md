@@ -186,29 +186,66 @@ After importing `azure-pipelines-restore.yml`, find its definition ID:
 
 > This permission prompt appears once per pipeline per resource. The three main pipelines will show the same prompt on their first run — approve them the same way.
 
-## Step 10: Run the first backup
+## Step 10: Configure branch policies on main
+
+Without branch policies, rolling PRs can be merged without any review, which defeats the purpose of the platform. This step protects `main` so that drift can only land after a human approves it.
+
+1. Go to **Project settings → Repositories → ASTRAL-CQRE → Policies**.
+2. Under **Branch policies**, click **main**.
+3. Enable and configure the following:
+
+   **Require a minimum number of reviewers**
+   - Minimum reviewers: `1` (or more depending on your team)
+   - Check **Allow requestors to approve their own changes**: leave off — the pipeline creates the PR, reviewers should be humans
+   - Check **Reset all approval votes when there are new changes**: on — ensures a re-review if drift is updated
+
+   **Limit merge types**
+   - Enable **Rebase and fast-forward** only (or whichever strategy matches `ROLLING_PR_MERGE_STRATEGY` in your variable group — default is `rebase`)
+   - Disabling squash and basic merge keeps the Git history clean and preserves individual drift commits
+
+4. Optionally, add **Required reviewers** to automatically add specific people or groups to every drift PR.
+
+> The build service identity creates the rolling PRs. It is not a human reviewer — do not add it to any required reviewer group.
+
+## Step 10b: Configure branch policies on drift branches (optional)
+
+The drift branches (`drift/intune`, `drift/entra`) are written to directly by the pipeline. They should **not** have reviewer policies — the pipeline needs to force-push to them. No action needed here; this is just a reminder not to accidentally apply `main` policies to the drift branches.
+
+## Step 11: Run the first backup
 
 1. Queue a manual run of `azure-pipelines.yml`.
 2. Set `forceFullRun=true` to get a complete initial snapshot.
 3. Verify that `tenant-state/` is populated and a rolling PR is created.
 
-## Step 11: Provision the event-driven change probe (optional but recommended)
+## Step 12: Provision the event-driven change probe (optional but recommended)
 
 The change probe replaces the previous hourly polling model with responsive, event-driven backup triggers.
 
 ### Option A: Automated provisioning
 
-Run the unified provisioning script:
+Run the unified provisioning script. It provisions the change probe (Azure Function App) and optionally the MCP server (Azure Container Apps) in the same run:
 
 ```powershell
+# Deploy change probe + MCP server (recommended)
 .\deploy\provision-change-probe.ps1 `
-  -TenantName "contoso.onmicrosoft.com" `
-  -ResourceGroupName "rg-astral-probe" `
+  -ResourceGroup "rg-astral-probe" `
   -Location "westeurope" `
-  -DeployFunctionApp
+  -DeployMcpServer
+
+# Deploy change probe only (skip MCP server)
+.\deploy\provision-change-probe.ps1 `
+  -ResourceGroup "rg-astral-probe" `
+  -Location "westeurope" `
+  -SkipMcpServer
+
+# Deploy MCP server only (change probe already exists)
+.\deploy\provision-change-probe.ps1 `
+  -ResourceGroup "rg-astral-probe" `
+  -Location "westeurope" `
+  -DeployMcpOnly
 ```
 
-The script will create an Entra app, grant admin consent, provision Azure resources, and deploy the Function App.
+If you run the script without `-DeployMcpServer` or `-SkipMcpServer` it will prompt interactively. The script creates an Entra app, grants admin consent, provisions Azure resources, and deploys the selected components.
 
 ### Option B: Manual provisioning
 
