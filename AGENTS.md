@@ -126,7 +126,7 @@ An Azure Container Apps-hosted MCP server exposes ASTRAL tenant state to AI assi
 - **Tools**: policy lookup, search, drift history, assignment reports, object inventory.
 - **Prompts**: audit briefing and policy deep-dive templates.
 - **Auth**: Microsoft Entra ID via Container Apps built-in authentication (recommended for production).
-- **Deployment**: Integrated into `deploy/provision-change-probe.ps1` (optional, prompted interactively or controlled via `-DeployMcpServer` / `-SkipMcpServer` / `-DeployMcpOnly` flags). Container image built from `infra/mcp-server/Dockerfile` via Azure Container Registry Tasks.
+- **Deployment**: Integrated into `deploy/provision.ps1` (optional, prompted interactively or controlled via `-DeployMcpServer` / `-SkipMcpServer` / `-DeployMcpOnly` flags). Container image built from `infra/mcp-server/Dockerfile` via Azure Container Registry Tasks.
 
 ### Change Probe (Event-Driven Backup Trigger)
 
@@ -137,7 +137,7 @@ Because Microsoft Graph change notifications and delta queries do not support In
   - `queue_consumer`: queue trigger. Dequeues messages and calls `trigger_backup_pipeline.py` to queue the ADO backup pipeline.
 - **Debouncer**: 15-minute quiet window (idle → armed) + 30-minute cooldown. Prevents backup storms during bulk changes.
 - **State**: stored in Azure Table Storage (`ProbeState` table).
-- **Provisioning**: `deploy/provision-change-probe.ps1` creates the Entra app, grants admin consent, provisions Resource Group / Storage Account / Function App, and configures app settings.
+- **Provisioning**: `deploy/provision.ps1` creates the Entra app, grants admin consent, provisions Resource Group / Storage Account / Function App, and configures app settings.
 
 ### Pipeline Jobs
 
@@ -213,7 +213,7 @@ export ASTRAL_REPO_ROOT=/path/to/astral-clone
 python3 ./infra/mcp-server/mcp_server.py --transport stdio
 ```
 
-For production deployment, use the integrated provisioning script (`deploy/provision-change-probe.ps1`).
+For production deployment, use the integrated provisioning script (`deploy/provision.ps1`).
 
 ### Validate backup outputs locally
 

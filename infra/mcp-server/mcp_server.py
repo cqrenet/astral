@@ -37,11 +37,28 @@ except ImportError as exc:  # pragma: no cover
     ) from exc
 
 from mcp.server.fastmcp import FastMCP
+from mcp.server.transport_security import TransportSecuritySettings
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger(__name__)
 
-mcp = FastMCP("astral")
+# DNS rebinding protection — keep enabled but allow the configured public hostname.
+# Without this, FastMCP defaults to loopback-only and rejects requests arriving
+# via a reverse proxy or ACA ingress with the real public hostname in the Host header.
+#
+# MCP_ALLOWED_HOSTS: comma-separated host[:port] values to allow in addition to
+# loopback. Set to your Container Apps FQDN, e.g.:
+#   ca-astral-mcp.greencliff-ce967056.swedencentral.azurecontainerapps.io
+_extra_hosts = [h.strip() for h in os.environ.get("MCP_ALLOWED_HOSTS", "").split(",") if h.strip()]
+_allowed_hosts = ["127.0.0.1:*", "localhost:*", "[::1]:*"] + _extra_hosts
+
+mcp = FastMCP(
+    "astral",
+    transport_security=TransportSecuritySettings(
+        enable_dns_rebinding_protection=True,
+        allowed_hosts=_allowed_hosts,
+    ),
+)
 
 # ---------------------------------------------------------------------------
 # Auth configuration

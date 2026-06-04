@@ -1,17 +1,17 @@
 #requires -Version 5.1
 <#
 .SYNOPSIS
-    Removes ASTRAL change probe and/or MCP server resources from Azure and Entra ID.
+    Removes ASTRAL resources from Azure and Entra ID.
 
 .DESCRIPTION
-    Reads deployment state from .astral-deploy.json (written by provision-change-probe.ps1)
+    Reads deployment state from .astral-deploy.json (written by provision.ps1)
     and removes all identified resources. Can also discover resources by Azure tags when
     the config file is missing or partial.
 
     Resources removed:
     - Azure: resource group(s) containing the Function App, Storage Account, ACR,
              Container Apps Environment, and Container App
-    - Entra ID: change probe app registration, MCP auth app registration (if used)
+    - Entra ID: ASTRAL app registration
 
     Deprovisioning is confirmed interactively before any deletion occurs.
 
@@ -34,15 +34,15 @@
 
 .EXAMPLE
     # Standard cleanup using saved config
-    .\deploy\deprovision-change-probe.ps1
+    .\deploy\deprovision.ps1
 
 .EXAMPLE
     # Discover leftover resources by tag when config is missing
-    .\deploy\deprovision-change-probe.ps1 -DiscoverByTags
+    .\deploy\deprovision.ps1 -DiscoverByTags
 
 .EXAMPLE
     # Preview what would be removed
-    .\deploy\deprovision-change-probe.ps1 -WhatIf
+    .\deploy\deprovision.ps1 -WhatIf
 #>
 [CmdletBinding()]
 param (

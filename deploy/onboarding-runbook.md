@@ -228,19 +228,19 @@ Run the unified provisioning script. It provisions the change probe (Azure Funct
 
 ```powershell
 # Deploy change probe + MCP server (recommended)
-.\deploy\provision-change-probe.ps1 `
+.\deploy\provision.ps1 `
   -ResourceGroup "rg-astral-probe" `
   -Location "westeurope" `
   -DeployMcpServer
 
 # Deploy change probe only (skip MCP server)
-.\deploy\provision-change-probe.ps1 `
+.\deploy\provision.ps1 `
   -ResourceGroup "rg-astral-probe" `
   -Location "westeurope" `
   -SkipMcpServer
 
 # Deploy MCP server only (change probe already exists)
-.\deploy\provision-change-probe.ps1 `
+.\deploy\provision.ps1 `
   -ResourceGroup "rg-astral-probe" `
   -Location "westeurope" `
   -DeployMcpOnly

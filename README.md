@@ -13,7 +13,7 @@ Quick start:
 1. Fork or import this repository into an Azure DevOps project.
 2. Review `templates/variables-tenant.yml` and create a matching Azure DevOps Variable Group in your project (e.g. `vg-astral`).
 3. Uncomment the variable group reference in the three pipeline YAMLs.
-4. Run `deploy/provision-change-probe.ps1` to create the Azure AD app registration, assign Graph permissions, configure the federated credential, and provision the event-driven change probe (Azure Function App) and optionally the MCP server (Azure Container Apps).
+4. Run `deploy/provision.ps1` to create the Azure AD app registration, assign Graph permissions, configure the federated credential, and provision the event-driven change probe (Azure Function App) and optionally the MCP server (Azure Container Apps).
 5. Create the Azure DevOps service connection using the app registration details from the bootstrap script.
 6. Import the three pipelines (`azure-pipelines.yml`, `azure-pipelines-review-sync.yml`, `azure-pipelines-restore.yml`) into Azure DevOps.
 7. Run `deploy/validate-deployment.yml` to verify connectivity and permissions.
@@ -92,7 +92,7 @@ Current scope behavior:
 - `azure-pipelines-restore.yml`: baseline restore pipeline with full or selective scope.
 - `infra/change-probe/`: Azure Function App for event-driven change detection.
 - `infra/mcp-server/`: MCP server (Azure Container Apps) for AI assistant integration — policy lookup, search, drift history, and assignment reports.
-- `deploy/provision-change-probe.ps1`: unified provisioning script for the change probe and MCP server infrastructure.
+- `deploy/provision.ps1`: unified provisioning script for the change probe and MCP server infrastructure.
 - `docs/m365-baseline-roadmap.md`: expansion roadmap beyond current workload scope.
 - `docs/security-review-package.md`: implementation-focused security review package.
 - `docs/security-review-questionnaire.md`: short-form security review answers.
@@ -170,7 +170,7 @@ Because Microsoft Graph change notifications and delta queries do not support In
 - **`queue_consumer`** (queue trigger): dequeues messages and calls the Azure DevOps REST API to queue the backup pipeline.
 - **Debouncer**: 15-minute quiet window + 30-minute cooldown prevents backup storms during bulk changes.
 - **State**: stored in Azure Table Storage (`ProbeState` table).
-- **Provisioning**: `deploy/provision-change-probe.ps1` creates the Entra app, grants admin consent, provisions Resource Group / Storage Account / Function App, and configures app settings.
+- **Provisioning**: `deploy/provision.ps1` creates the Entra app, grants admin consent, provisions Resource Group / Storage Account / Function App, and configures app settings.
 
 Full mode adds:
 
