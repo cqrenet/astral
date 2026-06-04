@@ -11,7 +11,7 @@ This repository is designed to be forked or downloaded into your own Azure DevOp
 Quick start:
 
 1. Fork or import this repository into an Azure DevOps project.
-2. Review `templates/variables-tenant.yml` and create a matching Azure DevOps Variable Group in your project (e.g. `vg-astral-tenant`).
+2. Review `templates/variables-tenant.yml` and create a matching Azure DevOps Variable Group in your project (e.g. `vg-astral`).
 3. Uncomment the variable group reference in the three pipeline YAMLs.
 4. Run `deploy/provision-change-probe.ps1` to create the Azure AD app registration, assign Graph permissions, configure the federated credential, and provision the event-driven change probe (Azure Function App) and optionally the MCP server (Azure Container Apps).
 5. Create the Azure DevOps service connection using the app registration details from the bootstrap script.
@@ -482,3 +482,9 @@ The repository includes focused unit tests for:
 - Intune partial-export noise filtering
 - Entra enrichment-noise filtering
 - MCP server query layer and data source behavior
+
+## Acknowledgements
+
+ASTRAL's Intune export is built on [IntuneCD](https://github.com/almenscorner/IntuneCD) by [Tobias Almén](https://github.com/almenscorner). IntuneCD handles the export of Intune configuration — device configurations, compliance policies, applications, scripts, and more — directly from the Microsoft Graph API. Without it, ASTRAL would need to reimplement a large surface area of the Intune export layer from scratch. If you find ASTRAL useful, IntuneCD is where the Intune export work actually happens — it deserves your support, or at least a star.
+
+The Entra export (Conditional Access, named locations, app registrations, and related policies) is implemented directly in ASTRAL using the Microsoft Graph API.

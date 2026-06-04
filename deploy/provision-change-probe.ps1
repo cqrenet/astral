@@ -50,7 +50,7 @@
     .\provision-change-probe.ps1
 
 .EXAMPLE
-    .\provision-change-probe.ps1 -AdoOrganization "cqre" -AdoProject "ASTRAL" -AdoPipelineId "42"
+    .\provision-change-probe.ps1 -AdoOrganization "contoso" -AdoProject "ASTRAL" -AdoPipelineId "42"
 #>
 [CmdletBinding()]
 param (
@@ -215,7 +215,7 @@ Import-Module Microsoft.Graph.Applications
 # ---------------------------------------------------------------------------
 
 Write-Host "`n--- Azure DevOps Settings ---" -ForegroundColor Cyan
-$AdoOrganization = Get-OrPrompt -Value $AdoOrganization -Prompt "Azure DevOps Organization (e.g. 'cqre')"
+$AdoOrganization = Get-OrPrompt -Value $AdoOrganization -Prompt "Azure DevOps Organization (e.g. 'contoso')"
 $AdoProject      = Get-OrPrompt -Value $AdoProject      -Prompt "Azure DevOps Project"
 $AdoPipelineId   = Get-OrPrompt -Value $AdoPipelineId   -Prompt "Azure DevOps Pipeline ID of the main backup pipeline (azure-pipelines.yml) — find it as definitionId=XX in the pipeline URL"
 $AdoToken        = Get-OrPrompt -Value $AdoToken        -Prompt "Azure DevOps PAT (Build Read & Execute)" -Sensitive

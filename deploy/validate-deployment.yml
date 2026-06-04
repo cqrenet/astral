@@ -6,7 +6,7 @@ pr: none
 
 variables:
   # Uncomment after creating your tenant variable group.
-  # - group: vg-astral-tenant
+  # - group: vg-astral
   - template: ../templates/variables-common.yml
 
 jobs:

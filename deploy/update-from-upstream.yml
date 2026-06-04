@@ -31,7 +31,7 @@ parameters:
 
 variables:
   # Uncomment after creating your tenant variable group (see onboarding runbook Step 3).
-  # - group: vg-astral-tenant
+  # - group: vg-astral
   - template: ../templates/variables-common.yml
 
 jobs:
@@ -146,20 +146,40 @@ jobs:
             if git merge --no-ff "$FETCH_REF" -m "$COMMIT_MSG"; then
               echo "Merge succeeded."
             else
-              echo ""
-              echo "##[error]Merge conflicts detected. The pipeline has stopped without pushing."
-              echo ""
-              echo "Conflicting files:"
-              git diff --name-only --diff-filter=U
-              echo ""
-              echo "To resolve:"
-              echo "  1. Clone this ADO repo locally."
-              echo "  2. git remote add upstream https://github.com/cqrenet/astral"
-              echo "  3. git fetch upstream"
-              echo "  4. git merge $FETCH_REF"
-              echo "  5. Resolve conflicts, commit, and push."
-              git merge --abort || true
-              exit 1
+              # Auto-resolve conflicts in files that should always keep the local version.
+              # These are files that contain deployment-specific configuration and must
+              # never be overwritten by upstream changes.
+              LOCAL_ALWAYS_OURS=(
+                "deploy/update-from-upstream.yml"
+              )
+              REMAINING_CONFLICTS=()
+              for f in "${LOCAL_ALWAYS_OURS[@]}"; do
+                if git diff --name-only --diff-filter=U | grep -qxF "$f"; then
+                  git checkout --ours "$f"
+                  git add "$f"
+                  echo "Auto-resolved conflict in $f (kept local version)."
+                fi
+              done
+
+              # Check whether all conflicts are now resolved
+              REMAINING_CONFLICTS=( $(git diff --name-only --diff-filter=U) )
+              if [ "${#REMAINING_CONFLICTS[@]}" -eq 0 ]; then
+                git commit --no-edit
+                echo "All conflicts auto-resolved. Merge complete."
+              else
+                echo ""
+                echo "##[error]Merge conflicts in files that require manual resolution:"
+                printf '  %s\n' "${REMAINING_CONFLICTS[@]}"
+                echo ""
+                echo "To resolve:"
+                echo "  1. Clone this ADO repo locally."
+                echo "  2. git remote add upstream https://github.com/cqrenet/astral"
+                echo "  3. git fetch upstream"
+                echo "  4. git merge $FETCH_REF"
+                echo "  5. Resolve conflicts, commit, and push."
+                git merge --abort || true
+                exit 1
+              fi
             fi
           workingDirectory: "$(Build.SourcesDirectory)"
 

@@ -599,8 +599,8 @@ class UpdatePrReviewSummaryTests(unittest.TestCase):
                     "intent": "apply",
                     "target": {
                         "@odata.type": "#microsoft.graph.groupAssignmentTarget",
-                        "groupId": "9d7195ed-f42e-4cbe-9659-2c3c9f55cdd9",
-                        "groupDisplayName": "Intune_U_TK_Test",
+                        "groupId": "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+                        "groupDisplayName": "TestGroup_Compliance",
                     },
                 }
             ]
@@ -608,20 +608,20 @@ class UpdatePrReviewSummaryTests(unittest.TestCase):
         entries = self.module._assignment_entries(payload)
         self.assertEqual(len(entries), 1)
         signature = self.module._assignment_signature(entries[0])
-        self.assertIn("group=Intune_U_TK_Test (9d7195ed-f42e-4cbe-9659-2c3c9f55cdd9)", signature)
+        self.assertIn("group=TestGroup_Compliance (aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee)", signature)
 
     def test_has_matching_detected_change_comment_true_when_change_and_risk_match(self) -> None:
         comments = [
             {
                 "content": (
-                    "Detected change (auto): Modified: assignment targets added: group=Intune_U_TK_Test\n\n"
+                    "Detected change (auto): Modified: assignment targets added: group=TestGroup_Compliance\n\n"
                     "Risk context: MEDIUM (device_configuration): Workload configuration area"
                 )
             }
         ]
         matched = self.module._has_matching_detected_change_comment(
             comments=comments,
-            change_summary="Modified: assignment targets added: group=Intune_U_TK_Test",
+            change_summary="Modified: assignment targets added: group=TestGroup_Compliance",
             risk_summary="MEDIUM (device_configuration): Workload configuration area",
         )
         self.assertTrue(matched)
@@ -630,14 +630,14 @@ class UpdatePrReviewSummaryTests(unittest.TestCase):
         comments = [
             {
                 "content": (
-                    "Detected change (auto): Modified: assignment targets added: group=9d7195ed-f42e\n\n"
+                    "Detected change (auto): Modified: assignment targets added: group=aaaaaaaa-bbbb\n\n"
                     "Risk context: MEDIUM (device_configuration): Workload configuration area"
                 )
             }
         ]
         matched = self.module._has_matching_detected_change_comment(
             comments=comments,
-            change_summary="Modified: assignment targets added: group=Intune_U_TK_Test (9d7195ed-f42e)\n",
+            change_summary="Modified: assignment targets added: group=TestGroup_Compliance (aaaaaaaa-bbbb)\n",
             risk_summary="MEDIUM (device_configuration): Workload configuration area",
         )
         self.assertFalse(matched)

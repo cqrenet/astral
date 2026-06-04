@@ -1,11 +1,11 @@
 # Tenant-specific variables for ASTRAL
 #
-# Copy these variables into an Azure DevOps Variable Group (e.g. vg-astral-tenant)
+# Copy these variables into an Azure DevOps Variable Group (e.g. vg-astral)
 # and reference that group in your pipeline YAMLs. Do not commit secrets to Git.
 #
 # Example pipeline reference:
 #   variables:
-#     - group: vg-astral-tenant
+#     - group: vg-astral
 #     - template: templates/variables-common.yml
 
 variables:

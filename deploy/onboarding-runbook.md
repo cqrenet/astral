@@ -17,7 +17,7 @@ This guide walks through deploying ASTRAL into a new Azure DevOps organization a
 ## Step 2: Create the tenant variable group
 
 1. In Azure DevOps, go to **Pipelines > Library** and create a new Variable Group.
-2. Recommended name: `vg-astral-tenant` (you can choose any name).
+2. Recommended name: `vg-astral` (you can choose any name).
 3. Add the variables from `templates/variables-tenant.yml`. Use your real tenant values:
 
    | Variable | Example value | Notes |
@@ -43,7 +43,7 @@ Open each pipeline YAML and uncomment the variable group line near the top:
 
 ```yaml
 variables:
-  - group: vg-astral-tenant   # <-- uncomment this line
+  - group: vg-astral   # <-- uncomment this line
   - template: templates/variables-common.yml
 ```
 
@@ -171,7 +171,7 @@ After importing `azure-pipelines-restore.yml`, find its definition ID:
 
 1. Open the restore pipeline in Azure DevOps.
 2. The URL contains `definitionId=XX`. Note the number.
-3. Go back to your variable group (`vg-astral-tenant`) and set:
+3. Go back to your variable group (`vg-astral`) and set:
    - `AUTO_REMEDIATE_RESTORE_PIPELINE_ID` = `XX`
 
 ## Step 9: Validate the deployment
@@ -191,7 +191,7 @@ After importing `azure-pipelines-restore.yml`, find its definition ID:
 
 Without branch policies, rolling PRs can be merged without any review, which defeats the purpose of the platform. This step protects `main` so that drift can only land after a human approves it.
 
-1. Go to **Project settings → Repositories → ASTRAL-CQRE → Policies**.
+1. Go to **Project settings → Repositories → ASTRAL → Policies**.
 2. Under **Branch policies**, click **main**.
 3. Enable and configure the following:
 
