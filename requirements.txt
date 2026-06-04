@@ -1,1 +1,1 @@
-IntuneCD==2.5.0
+IntuneCD==2.6.0

@@ -25,7 +25,7 @@ Workflow at a high level:
 - **Python 3**: primary language for all automation scripts.
 - **Azure DevOps Pipelines**: YAML-based CI/CD (`azure-pipelines.yml`, `azure-pipelines-review-sync.yml`, `azure-pipelines-restore.yml`).
 - **PowerShell & Bash**: inline pipeline steps for Git operations, token retrieval, and conditional logic.
-- **IntuneCD** (Python package, pinned to `2.5.0`): exports Intune configuration and restores baseline state.
+- **IntuneCD** (Python package, pinned to `2.6.0`): exports Intune configuration and restores baseline state.
 - **Microsoft Graph API**: reads/writes tenant configuration and resolves references.
 - **Node.js / md-to-pdf** (v5.2.5): generates HTML and PDF documentation artifacts from Markdown on full runs.
 - **Azure OpenAI**: optional PR narrative generation.
@@ -111,7 +111,7 @@ python3 -m unittest discover -s tests -v
 There is no traditional build step for the Python code. The pipelines install runtime dependencies on each run:
 
 ```bash
-pip3 install "IntuneCD==2.5.0"
+pip3 install "IntuneCD==2.6.0"
 ```
 
 For local development, only a Python 3 interpreter is required; scripts use the standard library except for the optional IntuneCD package.
