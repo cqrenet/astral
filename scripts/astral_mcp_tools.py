@@ -251,7 +251,7 @@ class AstralMcpClient:
         result = self._ado_get(
             "items",
             {
-                "path": path,
+                "scopePath": path,
                 "recursionLevel": "OneLevel",
                 "versionDescriptor.versionType": "Branch",
                 "versionDescriptor.version": self.branch,
@@ -272,7 +272,7 @@ class AstralMcpClient:
         result = self._ado_get(
             "items",
             {
-                "path": path,
+                "scopePath": path,
                 "recursionLevel": "Full",
                 "versionDescriptor.versionType": "Branch",
                 "versionDescriptor.version": self.branch,

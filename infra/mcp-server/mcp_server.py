@@ -23,11 +23,12 @@ from typing import Any
 # ---------------------------------------------------------------------------
 # Resolve script imports (bundled scripts/ directory or repo-root scripts/)
 # ---------------------------------------------------------------------------
-_script_dir = os.path.join(os.path.dirname(__file__), "scripts")
+_here = os.path.dirname(os.path.abspath(__file__))
+_script_dir = os.path.join(_here, "scripts")
 if os.path.isfile(os.path.join(_script_dir, "astral_mcp_tools.py")):
     sys.path.insert(0, _script_dir)
 else:
-    sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", "scripts"))
+    sys.path.insert(0, os.path.join(_here, "..", "..", "scripts"))
 
 try:
     from astral_mcp_tools import AstralMcpClient, client_from_env
