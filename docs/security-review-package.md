@@ -2,7 +2,7 @@
 
 # ASTRAL Security Review Package
 
-Prepared: 2026-06-03
+Prepared: 2026-06-07
 
 ## Purpose
 
@@ -294,6 +294,7 @@ Read-oriented Graph application permissions documented in the repository:
 - `User.Read.All`
 - `Application.Read.All` for Entra app exports
 - `RoleManagement.Read.Directory` or `Directory.Read.All` for richer enrichment
+- `RoleEligibilitySchedule.Read.Directory` for PIM-eligible role assignment export (optional; permanent-only data is exported if missing)
 - `AuditLog.Read.All` if commit author attribution is desired
 
 #### Restore Mode
@@ -506,6 +507,7 @@ The statements in this document are based on the implementation in:
 - `scripts/apply_reviewer_rejections.py`
 - `scripts/queue_post_merge_restore.py`
 - `scripts/export_entra_baseline.py`
+- `scripts/export_entra_identity.py`
 - `scripts/astral_mcp_tools.py`
 - `scripts/probe_tenant_changes.py`
 - `scripts/trigger_backup_pipeline.py`

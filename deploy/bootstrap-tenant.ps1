@@ -140,6 +140,7 @@ $readPermissions = @(
 
 $optionalReadPermissions = @(
     "RoleManagement.Read.Directory",
+    "RoleEligibilitySchedule.Read.Directory",
     "Directory.Read.All",
     "AuditLog.Read.All"
 )

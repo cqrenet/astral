@@ -71,6 +71,20 @@ jobs:
             }
             Write-Host "All required read roles are present." -ForegroundColor Green
 
+            $optionalReadRoles = @(
+              "RoleManagement.Read.Directory",
+              "RoleEligibilitySchedule.Read.Directory",
+              "Directory.Read.All",
+              "AuditLog.Read.All"
+            )
+
+            $missingOptional = $optionalReadRoles | Where-Object { $_ -notin $sortedRoles }
+            if ($missingOptional) {
+              Write-Host "Optional Graph roles not present (feature subsets will be skipped): $($missingOptional -join ', ')" -ForegroundColor Yellow
+            } else {
+              Write-Host "All optional read roles are present." -ForegroundColor Green
+            }
+
             # Export token for subsequent steps
             Write-Host "##vso[task.setvariable variable=GRAPH_TOKEN;issecret=true]$accessToken"
 

@@ -2,7 +2,7 @@
 
 # ASTRAL Security Review Questionnaire
 
-Prepared: 2026-06-03
+Prepared: 2026-06-07
 
 This appendix is a shorter, copy/paste-friendly companion to the full ASTRAL security review package.
 

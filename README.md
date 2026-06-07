@@ -340,6 +340,7 @@ Additional read permissions used by the current Entra scope:
 
 - `Application.Read.All`
 - `RoleManagement.Read.Directory` or `Directory.Read.All` for richer name resolution
+- `RoleEligibilitySchedule.Read.Directory` for PIM-eligible role assignment export (optional; export falls back to permanent-only data if missing)
 - `AuditLog.Read.All` for best-effort Entra drift author attribution
 
 Restore pipeline write permissions:
