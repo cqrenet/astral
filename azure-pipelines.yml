@@ -1175,6 +1175,33 @@ jobs:
               echo "##vso[task.setVariable variable=ROLLING_PR_SYNC_REQUIRED;isOutput=true]0"
             }
 
+      # Commit Intune reports on every full run, even when no config changed.
+      # The main PowerShell commit step explicitly excludes tenant-state/reports/ from
+      # change detection and staging. This step handles reports independently so they
+      # are always up to date in git after a full run.
+      - task: Bash@3
+        displayName: Commit Intune reports (full run)
+        condition: eq(variables['FULL_RUN'], '1')
+        inputs:
+          targetType: inline
+          script: |
+            set -euo pipefail
+            REPORTS_PATH="$(BACKUP_FOLDER)/$(REPORTS_SUBDIR)/$(INTUNE_BACKUP_SUBDIR)"
+
+            git add --all -- "$REPORTS_PATH"
+
+            if git diff --cached --quiet; then
+              echo "Intune reports unchanged since last commit — nothing to commit."
+              exit 0
+            fi
+
+            git -c user.name="$(USER_NAME)" -c user.email="$(USER_EMAIL)" \
+              commit -m "$(BACKUP_START) -- Intune reports (full run)"
+            git push --force-with-lease origin "HEAD:$(DRIFT_BRANCH_INTUNE)"
+            echo "Intune reports committed and pushed to $(DRIFT_BRANCH_INTUNE)."
+          workingDirectory: "$(Build.SourcesDirectory)"
+          failOnStderr: false
+
       # Create markdown documentation (non-drift output)
       - task: Bash@3
         displayName: Generate markdown document
