@@ -300,6 +300,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--repo-root", required=True)
     parser.add_argument("--workload-root", required=True)
+    parser.add_argument("--reports-root", default="", help="Optional reports directory to stage alongside workload changes.")
     parser.add_argument("--baseline-branch", required=True)
     parser.add_argument("--drift-branch", required=True)
     parser.add_argument("--access-token", required=True)
@@ -313,6 +314,7 @@ def main() -> int:
 
     repo_root = pathlib.Path(args.repo_root).resolve()
     workload_root = args.workload_root.strip().strip("/")
+    reports_root = args.reports_root.strip().strip("/")
     fallback = _effective_fallback_identity(
         build_reason=args.build_reason,
         requested_for=args.requested_for,
@@ -324,12 +326,16 @@ def main() -> int:
     _git_run(repo_root, ["config", "user.name", fallback.name])
     _git_run(repo_root, ["config", "user.email", fallback.value])
     _git_run(repo_root, ["add", "--all", "--", workload_root])
+    if reports_root:
+        _git_run(repo_root, ["add", "--all", "--", reports_root])
 
     changed_files = _changed_files(repo_root, workload_root)
     if not changed_files:
         print("No Entra change detected")
         _set_output_var("CHANGE_DETECTED", "0")
         _set_output_var("ROLLING_PR_SYNC_REQUIRED", "0")
+        if reports_root:
+            _git_run(repo_root, ["reset", "--quiet", "--", reports_root])
         return 0
 
     if _remote_diff_is_empty(repo_root, args.drift_branch, workload_root):
@@ -362,6 +368,8 @@ def main() -> int:
             f"Unable to resolve author from Entra audit logs for {unresolved_count} of {len(changed_files)} changed files. Fallback identity used where needed."
         )
 
+    # Reset only the workload so per-author commits can re-stage individual files.
+    # Reports stay staged and land in the first commit (they have no user attribution).
     _git_run(repo_root, ["reset", "--quiet", "--", workload_root])
     print("\nCommit changes")
     for group in groups.values():

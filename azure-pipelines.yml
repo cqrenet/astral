@@ -1711,6 +1711,7 @@ jobs:
             python3 "$(Build.SourcesDirectory)/scripts/commit_entra_drift.py" \
               --repo-root "$(Build.SourcesDirectory)" \
               --workload-root "$(BACKUP_FOLDER)/$(ENTRA_BACKUP_SUBDIR)" \
+              --reports-root "$(BACKUP_FOLDER)/$(REPORTS_SUBDIR)/$(ENTRA_BACKUP_SUBDIR)" \
               --baseline-branch "$(BASELINE_BRANCH)" \
               --drift-branch "$(DRIFT_BRANCH_ENTRA)" \
               --access-token "$(accessToken)" \
