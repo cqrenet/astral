@@ -1,0 +1,17 @@
+# Local report and documentation definitions.
+#
+# This file is YOURS — it is never modified by upstream ASTRAL updates.
+# Add custom reports here rather than editing reports/definitions.yml,
+# which is upstream-owned and will be overwritten on update.
+#
+# Entries here are merged on top of definitions.yml at runtime:
+#   - Same name as a builtin entry  →  overrides that entry (change args, condition, etc.)
+#   - New name                      →  added as an extra report
+#
+# See reports/definitions.yml for the full field reference and examples.
+
+version: 1
+
+reports: []
+
+documentation: []

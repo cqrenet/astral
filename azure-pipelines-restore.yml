@@ -55,7 +55,7 @@ variables:
   - name: INTUNE_BACKUP_SUBDIR
     value: intune
   - name: INTUNECD_VERSION
-    value: 2.5.0
+    value: 2.6.0
 
 jobs:
   - job: restore_from_baseline

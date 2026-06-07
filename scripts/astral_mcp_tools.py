@@ -9,10 +9,19 @@ import os
 import urllib.parse
 from typing import Any
 
+import re
+
 try:
     from scripts.common import request_json, run_git
 except ImportError:
     from common import request_json, run_git  # type: ignore[no-redef]
+
+
+def _slugify(value: str) -> str:
+    text = value.lower().strip()
+    text = re.sub(r"[^a-z0-9]+", "-", text).strip("-")
+    return text or "unknown"
+
 
 _WORKLOAD_CATEGORIES: dict[str, list[str]] = {
     "intune": [
@@ -38,6 +47,12 @@ _WORKLOAD_CATEGORIES: dict[str, list[str]] = {
         "Authentication Strengths",
         "App Registrations",
         "Enterprise Applications",
+        # Phase 1 — identity exports
+        "Groups",
+        "Role Assignments",
+        "Authentication Methods",
+        "Cross-Tenant Access",
+        "Identity Protection",
     ],
 }
 
@@ -424,16 +439,18 @@ class AstralMcpClient:
         ]
 
     def get_assignment_report(self, workload: str = "intune") -> str:
-        path = f"tenant-state/reports/{workload}/assignments.md"
+        path = f"tenant-state/reports/{workload}/policy-assignments.md"
         try:
             return self._read_file(path)
         except Exception:
             return ""
 
     def get_object_inventory(self, workload: str = "intune", category: str = "") -> list[dict[str, Any]]:
-        if not category:
-            return []
-        path = f"tenant-state/reports/{workload}/{category.replace(' ', '_')}_inventory.csv"
+        if category:
+            slug = _slugify(category)
+            path = f"tenant-state/reports/{workload}/Object Inventory/{slug}-inventory.csv"
+        else:
+            path = f"tenant-state/reports/{workload}/object-inventory-all.csv"
         try:
             raw = self._read_file(path)
         except Exception:
@@ -444,6 +461,195 @@ class AstralMcpClient:
         import csv
         reader = csv.DictReader(lines)
         return list(reader)
+
+    def list_report_definitions(self, workload: str | None = None) -> list[dict[str, Any]]:
+        """Return merged report/documentation definitions (builtin + local)."""
+        try:
+            import yaml  # type: ignore[import-untyped]
+        except ImportError:
+            return []
+
+        def _safe_load(path: str) -> dict[str, Any]:
+            try:
+                return yaml.safe_load(self._read_file(path)) or {}
+            except Exception:
+                return {}
+
+        base = _safe_load("reports/definitions.yml")
+        local = _safe_load("reports/definitions.local.yml")
+
+        results: list[dict[str, Any]] = []
+        for section, entry_type in (("reports", "report"), ("documentation", "documentation")):
+            combined: dict[str, Any] = {}
+            for entry in base.get(section, []):
+                if "name" in entry:
+                    combined[entry["name"]] = {**entry, "source": "builtin"}
+            for entry in local.get(section, []):
+                if "name" in entry:
+                    combined[entry["name"]] = {**entry, "source": "local"}
+            for defn in combined.values():
+                if workload and workload not in defn.get("workloads", []):
+                    continue
+                results.append({"type": entry_type, **defn})
+        return results
+
+    def list_generated_reports(self, workload: str) -> list[dict[str, Any]]:
+        """List files present in tenant-state/reports/{workload}/."""
+        path = f"tenant-state/reports/{workload}"
+        try:
+            entries = self._list_dir(path)
+        except Exception:
+            return []
+        return [e for e in entries if not e.get("isFolder")]
+
+    def get_report(self, workload: str, name: str) -> str:
+        """Retrieve a report by its definition name (reads its primary output file)."""
+        defns = self.list_report_definitions(workload)
+        defn = next((d for d in defns if d.get("name") == name), None)
+        if not defn:
+            return ""
+        outputs = defn.get("outputs", [])
+        if not outputs:
+            return ""
+        path = f"tenant-state/reports/{workload}/{outputs[0]}"
+        try:
+            return self._read_file(path)
+        except Exception:
+            return ""
+
+    def get_settings_report(
+        self,
+        workload: str = "intune",
+        policy: str = "",
+        category: str = "",
+        os_filter: str = "",
+        max_rows: int = 500,
+    ) -> list[dict[str, Any]]:
+        """Read policy-settings.csv and return rows, optionally filtered.
+
+        Args:
+            workload:   Workload name (default: intune).
+            policy:     Case-insensitive substring filter on the Policy column.
+            category:   Exact match on the Category column (e.g. "Settings Catalog").
+            os_filter:  Case-insensitive substring filter on the OS column (e.g. "Win").
+            max_rows:   Maximum rows to return (default 500).
+        """
+        import csv, io
+        path = f"tenant-state/reports/{workload}/policy-settings.csv"
+        try:
+            raw = self._read_file(path)
+        except Exception:
+            return []
+        reader = csv.DictReader(io.StringIO(raw))
+        rows: list[dict[str, Any]] = []
+        for row in reader:
+            if policy and policy.lower() not in row.get("Policy", "").lower():
+                continue
+            if category and row.get("Category", "") != category:
+                continue
+            if os_filter and os_filter.lower() not in row.get("OS", "").lower():
+                continue
+            rows.append(dict(row))
+            if len(rows) >= max_rows:
+                break
+        return rows
+
+    def find_policies_for_setting(
+        self,
+        setting: str,
+        workload: str = "intune",
+    ) -> list[dict[str, Any]]:
+        """Return all policies that contain a given setting (case-insensitive substring match).
+
+        Matches against both the Setting display name and the Setting ID column.
+        Returns deduplicated rows grouped by policy, showing the matched setting and value.
+        """
+        import csv, io
+        path = f"tenant-state/reports/{workload}/policy-settings.csv"
+        try:
+            raw = self._read_file(path)
+        except Exception:
+            return []
+        reader = csv.DictReader(io.StringIO(raw))
+        needle = setting.lower()
+        seen: dict[str, list[dict[str, Any]]] = {}
+        for row in reader:
+            if (
+                needle in row.get("Setting", "").lower()
+                or needle in row.get("Setting ID", "").lower()
+            ):
+                policy = row.get("Policy", "")
+                if policy not in seen:
+                    seen[policy] = []
+                seen[policy].append({
+                    "Setting": row.get("Setting", ""),
+                    "Setting ID": row.get("Setting ID", ""),
+                    "Value": row.get("Value", ""),
+                    "Category": row.get("Category", ""),
+                    "OS": row.get("OS", ""),
+                })
+        return [
+            {"Policy": p, "Matches": matches}
+            for p, matches in sorted(seen.items())
+        ]
+
+
+    def get_ca_groups(self) -> list[dict[str, Any]]:
+        """Return all CA-referenced groups with member counts.
+
+        Reads from tenant-state/entra/Groups/ — populated by export_entra_identity.py.
+        Each entry includes displayName, memberCount, and which CA policies reference the group.
+        """
+        path = "tenant-state/entra/Groups"
+        if self.local_root:
+            policies = self._list_local_json_recursive(path)
+        else:
+            policies = self._list_remote_json_recursive(path)
+        groups: list[dict[str, Any]] = []
+        for item in policies:
+            try:
+                if self.local_root:
+                    raw = self._read_local_file(item["path"])
+                else:
+                    raw = self._read_remote_file(item["path"])
+                data = json.loads(raw)
+                if isinstance(data, dict):
+                    groups.append(data)
+            except Exception:  # noqa: BLE001
+                continue
+        return sorted(groups, key=lambda g: str(g.get("displayName") or "").casefold())
+
+    def get_privileged_role_assignments(self, role_name: str = "") -> list[dict[str, Any]]:
+        """Return directory role assignments (permanent + PIM-eligible) optionally filtered by role name.
+
+        Reads from tenant-state/entra/Role Assignments/ — populated by export_entra_identity.py.
+        Each entry includes the role definition, a list of permanent assignments, and PIM-eligible assignments.
+
+        Args:
+            role_name: Optional case-insensitive substring to filter by role display name.
+        """
+        path = "tenant-state/entra/Role Assignments"
+        if self.local_root:
+            policies = self._list_local_json_recursive(path)
+        else:
+            policies = self._list_remote_json_recursive(path)
+        roles: list[dict[str, Any]] = []
+        name_filter = (role_name or "").lower()
+        for item in policies:
+            try:
+                if self.local_root:
+                    raw = self._read_local_file(item["path"])
+                else:
+                    raw = self._read_remote_file(item["path"])
+                data = json.loads(raw)
+                if not isinstance(data, dict):
+                    continue
+                if name_filter and name_filter not in str(data.get("displayName") or "").lower():
+                    continue
+                roles.append(data)
+            except Exception:  # noqa: BLE001
+                continue
+        return sorted(roles, key=lambda r: str(r.get("displayName") or "").casefold())
 
 
 def client_from_env() -> AstralMcpClient:

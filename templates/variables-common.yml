@@ -46,3 +46,5 @@ variables:
     value: 10
   - name: AUTO_REMEDIATE_EXCLUDE_CSV
     value: ""
+  - name: PR_SUMMARY_LANGUAGE
+    value: en

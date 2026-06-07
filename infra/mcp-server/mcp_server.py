@@ -297,6 +297,107 @@ def get_recent_drift(workload: str, hours: int = 24) -> str:
 
 
 @mcp.tool()
+def list_report_definitions(workload: str = "") -> str:
+    """List report and documentation definitions from reports/definitions.yml.
+
+    Args:
+        workload: Filter by workload ("intune" or "entra"). Omit to list all.
+    """
+    try:
+        result = _get_client().list_report_definitions(workload or None)
+        if not result:
+            return "No report definitions found (reports/definitions.yml may be missing or empty)."
+        return _jsonify(result)
+    except Exception as exc:
+        return f"Error: {exc}"
+
+
+@mcp.tool()
+def list_generated_reports(workload: str) -> str:
+    """List report files that have been generated for a workload.
+
+    Args:
+        workload: Either "intune" or "entra".
+    """
+    try:
+        result = _get_client().list_generated_reports(workload)
+        if not result:
+            return f"No generated reports found for workload '{workload}'."
+        return _jsonify(result)
+    except Exception as exc:
+        return f"Error: {exc}"
+
+
+@mcp.tool()
+def get_report(workload: str, name: str) -> str:
+    """Retrieve a named report by its definition name.
+
+    Use list_report_definitions to discover available report names.
+
+    Args:
+        workload: Either "intune" or "entra".
+        name: Report definition name (e.g. "assignment-report", "object-inventory", "apps-inventory").
+    """
+    try:
+        result = _get_client().get_report(workload, name)
+        if not result:
+            return f"Report '{name}' not found or not yet generated for workload '{workload}'."
+        return result
+    except Exception as exc:
+        return f"Error: {exc}"
+
+
+@mcp.tool()
+def get_settings_report(
+    workload: str = "intune",
+    policy: str = "",
+    category: str = "",
+    os_filter: str = "",
+    max_rows: int = 500,
+) -> str:
+    """Retrieve the per-setting policy inventory as JSON rows.
+
+    Returns a flat list of every configured setting across all policies.
+    Use the filter arguments to narrow the results.
+
+    Args:
+        workload:   Either "intune" or "entra" (default "intune").
+        policy:     Case-insensitive substring to filter by policy name.
+        category:   Exact category match: "Settings Catalog", "Device Configurations",
+                    or "Compliance Policies".
+        os_filter:  Case-insensitive substring to filter by OS column (e.g. "Win", "macOS").
+        max_rows:   Maximum rows to return (default 500).
+    """
+    try:
+        rows = _get_client().get_settings_report(workload, policy, category, os_filter, max_rows)
+        if not rows:
+            return "No settings report found or no rows matched the filters."
+        return _jsonify(rows)
+    except Exception as exc:
+        return f"Error: {exc}"
+
+
+@mcp.tool()
+def find_policies_for_setting(setting: str, workload: str = "intune") -> str:
+    """Find all policies that configure a given setting.
+
+    Use this to answer questions like "which policies control browser sign-in?" or
+    "which policies set the maximum log file size?".
+
+    Args:
+        setting:  Case-insensitive substring to match against Setting name or Setting ID.
+        workload: Either "intune" or "entra" (default "intune").
+    """
+    try:
+        results = _get_client().find_policies_for_setting(setting, workload)
+        if not results:
+            return f"No policies found that configure a setting matching '{setting}'."
+        return _jsonify(results)
+    except Exception as exc:
+        return f"Error: {exc}"
+
+
+@mcp.tool()
 def get_assignment_report(workload: str = "intune") -> str:
     """Retrieve the latest assignment report Markdown for a workload.
 
@@ -329,6 +430,63 @@ def get_object_inventory(workload: str, category: str) -> str:
         return f"Error: {exc}"
 
 
+@mcp.tool()
+def get_ca_groups() -> str:
+    """List all security groups referenced in Conditional Access policies, with member counts.
+
+    Returns groups from the ASTRAL Groups snapshot (tenant-state/entra/Groups/).
+    Each group shows its displayName, memberCount, and which CA policies reference it
+    as an include or exclude target.
+
+    Use this to answer questions like:
+    - "How many users are excluded from CA policy X?"
+    - "Which CA policies reference large groups (>500 members)?"
+    - "Is any break-glass group used in a CA include condition?"
+    """
+    try:
+        result = _get_client().get_ca_groups()
+        if not result:
+            return (
+                "No CA-referenced groups found. The Groups snapshot may not have been exported yet "
+                "(requires export_entra_identity.py to have run with --include-groups true)."
+            )
+        return _jsonify(result)
+    except Exception as exc:
+        return f"Error: {exc}"
+
+
+@mcp.tool()
+def get_privileged_role_assignments(role_name: str = "") -> str:
+    """List directory role assignments — permanent and PIM-eligible — optionally filtered by role name.
+
+    Returns data from the ASTRAL Role Assignments snapshot (tenant-state/entra/Role Assignments/).
+    Each role entry includes its definition, all permanent (direct) assignments, and all
+    PIM-eligible assignments with principal names resolved.
+
+    Args:
+        role_name: Optional case-insensitive substring to filter by role name (e.g. "Global Administrator",
+                   "User Administrator"). Omit to return all roles with at least one assignment.
+
+    Use this to answer questions like:
+    - "Who has permanent Global Administrator access?"
+    - "How many users have PIM-eligible privileged roles?"
+    - "Are there any permanent assignments that should be PIM-only?"
+    """
+    try:
+        result = _get_client().get_privileged_role_assignments(role_name)
+        if not result:
+            msg = f"No role assignments found"
+            if role_name:
+                msg += f" matching '{role_name}'"
+            return (
+                msg + ". The Role Assignments snapshot may not have been exported yet "
+                "(requires export_entra_identity.py to have run with --include-role-assignments true)."
+            )
+        return _jsonify(result)
+    except Exception as exc:
+        return f"Error: {exc}"
+
+
 @mcp.prompt()
 def audit_briefing(workload: str = "intune") -> str:
     """Generate a natural-language audit briefing for recent drift."""
@@ -339,6 +497,26 @@ def audit_briefing(workload: str = "intune") -> str:
         f"then summarize what changed, who changed it, and highlight any risky or "
         f"unusual modifications (e.g., Conditional Access rule relaxations, new app "
         f"registrations with broad permissions, compliance policy downgrades)."
+    )
+
+
+@mcp.prompt()
+def security_posture_briefing() -> str:
+    """Generate a security posture briefing covering identity, access, and policy controls."""
+    return (
+        "You are an ASTRAL tenant security analyst. Generate a security posture briefing covering:\n\n"
+        "1. PRIVILEGED ACCESS: Call get_privileged_role_assignments() to list all role assignments. "
+        "Flag any permanent Global Administrator or Exchange Administrator assignments, roles with >3 "
+        "permanent members, and roles where PIM-eligible assignments outnumber permanent ones (good hygiene).\n\n"
+        "2. CONDITIONAL ACCESS GROUPS: Call get_ca_groups() to review groups referenced in CA policies. "
+        "Flag any exclusion groups with >50 members, any group named with terms like 'all', 'everyone', "
+        "or 'users', and any groups with unexpectedly high member counts.\n\n"
+        "3. AUTHENTICATION METHODS: Call get_policy('entra', 'Authentication Methods', "
+        "'Authentication Methods Policy') to check which authentication methods are enabled. "
+        "Flag if SMS or voice call are enabled (lower assurance) or if FIDO2 is disabled.\n\n"
+        "4. RECENT DRIFT: Call get_recent_drift(workload='entra', hours=168) to review the last 7 days "
+        "of configuration changes. Highlight any CA policy changes, new role assignments, or auth method changes.\n\n"
+        "Summarize findings with a risk rating (Low/Medium/High) per section and a list of recommended actions."
     )
 
 

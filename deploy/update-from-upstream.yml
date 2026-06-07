@@ -7,17 +7,18 @@ pr: none
 # Usage:
 #   Queue this pipeline manually from Azure DevOps.
 #   Leave upstreamRef blank to pull the latest main, or specify a release tag (e.g. v1.2.0)
-#   to do a pinned version upgrade.
+#   for a pinned version upgrade.
 #
 # What it does:
 #   1. Fetches the specified ref from https://github.com/cqrenet/astral
-#   2. Shows a summary of incoming changes (commits + changed files)
+#   2. Shows a summary of incoming changes (commits, changed files, semantic highlights)
 #   3. Attempts a --no-ff merge onto your local main
-#   4. Pushes if the merge is clean; aborts and reports conflicts if not
+#   4. Validates the merged result (syntax + unit tests)
+#   5. Pushes to main; if branch protection blocks direct push, creates a PR instead
 #
-# Your local customisations (variable group name, pipeline YAML edits) will be preserved
-# as long as they do not conflict with upstream changes to the same lines.
-# If conflicts occur, the pipeline stops without pushing — resolve them locally and push manually.
+# Customer-owned files (.gitattributes merge=ours) are never overwritten:
+#   deploy/update-from-upstream.yml, reports/definitions.local.yml
+# If other conflicts occur the pipeline stops — resolve them locally and push manually.
 
 parameters:
   - name: upstreamRef
@@ -76,7 +77,6 @@ jobs:
               echo "Pinned ref: $FETCH_REF"
             fi
 
-            # Resolve to a commit SHA for display
             UPSTREAM_SHA="$(git rev-parse "$FETCH_REF")"
             LOCAL_SHA="$(git rev-parse HEAD)"
 
@@ -84,8 +84,10 @@ jobs:
             echo "Upstream HEAD: $UPSTREAM_SHA"
             echo ""
 
-            if [ "$UPSTREAM_SHA" = "$LOCAL_SHA" ]; then
-              echo "Already up to date. Nothing to do."
+            # Use merge-base to detect "already up to date" correctly even when local
+            # has commits ahead of upstream (e.g. definitions.local.yml edits).
+            if git merge-base --is-ancestor "$FETCH_REF" HEAD; then
+              echo "Already up to date (all upstream commits are present in local branch)."
               echo "##vso[task.setvariable variable=ALREADY_UP_TO_DATE]true"
               exit 0
             fi
@@ -105,6 +107,13 @@ jobs:
 
             FETCH_REF="$(FETCH_REF)"
 
+            # Show current ASTRAL version from tracking file
+            if [ -f ".astral-upstream-ref" ]; then
+              echo "=== Current ASTRAL version ==="
+              cat .astral-upstream-ref
+              echo ""
+            fi
+
             echo "=== Incoming commits ==="
             git log HEAD.."$FETCH_REF" --oneline --no-merges | grep -v "^.*Sync from dev" || true
             echo ""
@@ -114,13 +123,90 @@ jobs:
             echo "$CHANGED_FILES"
             echo ""
 
-            # Warn about files customers commonly customise
-            SENSITIVE_FILES="azure-pipelines.yml azure-pipelines-review-sync.yml azure-pipelines-restore.yml"
-            for f in $SENSITIVE_FILES; do
+            # Warn about files that require attention after an upstream merge.
+            PIPELINE_FILES="azure-pipelines.yml azure-pipelines-review-sync.yml azure-pipelines-restore.yml"
+            for f in $PIPELINE_FILES; do
               if echo "$CHANGED_FILES" | grep -q "^${f}$"; then
                 echo "##[warning]Upstream changes include $f — review for conflicts with your variable group configuration."
               fi
             done
+            if echo "$CHANGED_FILES" | grep -q "^templates/variables-common.yml$"; then
+              echo "##[warning]Upstream changes include templates/variables-common.yml — check whether any default value changes affect your deployment."
+            fi
+            if echo "$CHANGED_FILES" | grep -q "^reports/definitions.yml$"; then
+              echo "##[warning]Upstream changes include reports/definitions.yml — review new or changed builtin reports; add local overrides to reports/definitions.local.yml if needed."
+            fi
+
+            # Semantic highlights: version bumps, new variables, new report definitions.
+            echo ""
+            echo "=== Semantic highlights ==="
+            python3 - "$FETCH_REF" <<'PY'
+            import re, subprocess, sys
+
+            fetch_ref = sys.argv[1]
+
+            def git_show(ref, path):
+                try:
+                    return subprocess.check_output(
+                        ["git", "show", f"{ref}:{path}"],
+                        text=True, stderr=subprocess.DEVNULL,
+                    )
+                except subprocess.CalledProcessError:
+                    return ""
+
+            def var_names(text):
+                return set(re.findall(r"^\s+-\s+name:\s*(\S+)", text, re.M))
+
+            def report_names(text):
+                return set(re.findall(r"^\s+-\s+name:\s*(\S+)", text, re.M))
+
+            changed = subprocess.check_output(
+                ["git", "diff", "--name-only", "HEAD", fetch_ref], text=True
+            ).splitlines()
+
+            found_any = False
+
+            # IntuneCD version bump
+            if "azure-pipelines.yml" in changed:
+                old = git_show("HEAD", "azure-pipelines.yml")
+                new = git_show(fetch_ref, "azure-pipelines.yml")
+                def _ver(t):
+                    m = re.search(r"INTUNECD_VERSION\b.*?(\d+\.\d+\.\d+)", t)
+                    return m.group(1) if m else None
+                ov, nv = _ver(old), _ver(new)
+                if ov and nv and ov != nv:
+                    print(f"  IntuneCD version: {ov} → {nv}")
+                    found_any = True
+
+            # New/removed pipeline variables
+            if "templates/variables-common.yml" in changed:
+                old = git_show("HEAD", "templates/variables-common.yml")
+                new = git_show(fetch_ref, "templates/variables-common.yml")
+                added   = var_names(new) - var_names(old)
+                removed = var_names(old) - var_names(new)
+                for v in sorted(added):
+                    print(f"  New variable:     {v}")
+                    found_any = True
+                for v in sorted(removed):
+                    print(f"  Removed variable: {v}")
+                    found_any = True
+
+            # New/removed builtin report definitions
+            if "reports/definitions.yml" in changed:
+                old = git_show("HEAD", "reports/definitions.yml")
+                new = git_show(fetch_ref, "reports/definitions.yml")
+                added   = report_names(new) - report_names(old)
+                removed = report_names(old) - report_names(new)
+                for n in sorted(added):
+                    print(f"  New builtin report:     {n}")
+                    found_any = True
+                for n in sorted(removed):
+                    print(f"  Removed builtin report: {n}")
+                    found_any = True
+
+            if not found_any:
+                print("  (no notable semantic changes detected)")
+            PY
           workingDirectory: "$(Build.SourcesDirectory)"
 
       - task: Bash@3
@@ -140,19 +226,19 @@ jobs:
 
             git checkout -B main origin/main
 
-            # Attempt merge — commit message stored in variable to avoid YAML parsing issues
             COMMIT_MSG=$(printf 'Update from upstream ASTRAL %s\n\nSource: https://github.com/cqrenet/astral\nRef: %s (%s)' \
               "$UPSTREAM_REF_LABEL" "$UPSTREAM_REF_LABEL" "$UPSTREAM_SHA")
+
             if git merge --no-ff "$FETCH_REF" -m "$COMMIT_MSG"; then
               echo "Merge succeeded."
             else
-              # Auto-resolve conflicts in files that should always keep the local version.
-              # These are files that contain deployment-specific configuration and must
-              # never be overwritten by upstream changes.
+              # Auto-resolve conflicts in files that must always keep the local version.
+              # .gitattributes merge=ours is the primary guard; this is the safety fallback
+              # for agents where the ours merge driver may not be active.
               LOCAL_ALWAYS_OURS=(
                 "deploy/update-from-upstream.yml"
+                "reports/definitions.local.yml"
               )
-              REMAINING_CONFLICTS=()
               for f in "${LOCAL_ALWAYS_OURS[@]}"; do
                 if git diff --name-only --diff-filter=U | grep -qxF "$f"; then
                   git checkout --ours "$f"
@@ -161,10 +247,10 @@ jobs:
                 fi
               done
 
-              # Check whether all conflicts are now resolved
-              REMAINING_CONFLICTS=( $(git diff --name-only --diff-filter=U) )
+              # readarray avoids word-splitting on filenames with spaces
+              readarray -t REMAINING_CONFLICTS < <(git diff --name-only --diff-filter=U)
               if [ "${#REMAINING_CONFLICTS[@]}" -eq 0 ]; then
-                git commit --no-edit
+                git commit -m "$COMMIT_MSG"
                 echo "All conflicts auto-resolved. Merge complete."
               else
                 echo ""
@@ -181,20 +267,133 @@ jobs:
                 exit 1
               fi
             fi
+
+            # Record the upstream ref so future runs can show the current version
+            # and operators can identify what is deployed at a glance.
+            cat > .astral-upstream-ref <<EOF
+            ref: $UPSTREAM_REF_LABEL
+            sha: $UPSTREAM_SHA
+            date: $(date -u +%Y-%m-%dT%H:%M:%SZ)
+            EOF
+            git add .astral-upstream-ref
+            git commit -m "chore: track upstream ref $UPSTREAM_REF_LABEL"
+
+            echo "##vso[task.setvariable variable=UPSTREAM_REF_LABEL]$UPSTREAM_REF_LABEL"
           workingDirectory: "$(Build.SourcesDirectory)"
 
       - task: Bash@3
-        displayName: Push merged changes
+        displayName: Validate merged result
         condition: and(ne(variables['ALREADY_UP_TO_DATE'], 'true'), eq('${{ parameters.dryRun }}', 'false'))
         inputs:
           targetType: inline
           script: |
             set -euo pipefail
-            git push origin main
-            echo "Update pushed successfully."
+
+            # PyYAML is needed by the YAML syntax check and some test helpers.
+            pip3 install PyYAML --quiet 2>&1 | tail -1
+
+            echo "=== Python syntax check ==="
+            find scripts -name "*.py" | xargs python3 -m py_compile && echo "All scripts compile OK."
+
+            echo ""
+            echo "=== Pipeline YAML syntax check ==="
+            for f in azure-pipelines.yml azure-pipelines-review-sync.yml azure-pipelines-restore.yml; do
+              python3 -c "import yaml; yaml.safe_load(open('$f'))" && echo "$f — OK"
+            done
+
+            echo ""
+            echo "=== Unit tests ==="
+            python3 -m unittest discover -s tests -v
+          workingDirectory: "$(Build.SourcesDirectory)"
+          failOnStderr: false
+
+      - task: Bash@3
+        displayName: Push or create PR
+        condition: and(ne(variables['ALREADY_UP_TO_DATE'], 'true'), eq('${{ parameters.dryRun }}', 'false'))
+        inputs:
+          targetType: inline
+          script: |
+            set -euo pipefail
+
+            UPSTREAM_SHA="$(UPSTREAM_SHA)"
+            UPSTREAM_REF_LABEL="$(UPSTREAM_REF_LABEL)"
+
+            # Attempt direct push first.  This succeeds when main has no branch
+            # protection policies requiring PR reviews.
+            if git push origin main 2>&1; then
+              echo "Update pushed successfully to main."
+              exit 0
+            fi
+
+            # Direct push was blocked — likely a branch protection policy.
+            # Push to a staging branch and open a PR instead.
+            echo ""
+            echo "##[warning]Direct push to main was rejected (branch protection policy). Creating a PR instead..."
+            echo ""
+
+            STAGING_BRANCH="upstream-update/$(date -u +%Y%m%d-%H%M%S)"
+            git push origin "HEAD:refs/heads/$STAGING_BRANCH"
+            echo "Pushed merge to staging branch: $STAGING_BRANCH"
+
+            python3 - "$STAGING_BRANCH" "$UPSTREAM_SHA" "$UPSTREAM_REF_LABEL" <<'PY'
+            import json, os, sys, urllib.request, urllib.error
+
+            staging_branch    = sys.argv[1]
+            upstream_sha      = sys.argv[2]
+            upstream_ref_label = sys.argv[3]
+
+            collection_uri = os.environ.get("SYSTEM_COLLECTIONURI", "").rstrip("/")
+            team_project   = os.environ.get("SYSTEM_TEAMPROJECT", "")
+            repo_id        = os.environ.get("BUILD_REPOSITORY_ID", "")
+            access_token   = os.environ.get("SYSTEM_ACCESSTOKEN", "")
+
+            if not all([collection_uri, team_project, repo_id, access_token]):
+                print("ERROR: Missing ADO environment variables for PR creation.", file=sys.stderr)
+                sys.exit(1)
+
+            url = (
+                f"{collection_uri}/{team_project}"
+                f"/_apis/git/repositories/{repo_id}/pullrequests?api-version=7.1"
+            )
+            payload = {
+                "title": f"Update from upstream ASTRAL {upstream_ref_label}",
+                "sourceRefName": f"refs/heads/{staging_branch}",
+                "targetRefName": "refs/heads/main",
+                "description": (
+                    f"Automated upstream update.\n\n"
+                    f"Upstream ref: `{upstream_ref_label}` ({upstream_sha})\n"
+                    f"Source: https://github.com/cqrenet/astral\n\n"
+                    f"Merge validated — syntax and unit tests passed. "
+                    f"Review the semantic highlights in the pipeline log, then complete this PR."
+                ),
+            }
+            req = urllib.request.Request(
+                url,
+                data=json.dumps(payload).encode("utf-8"),
+                headers={
+                    "Content-Type": "application/json",
+                    "Authorization": f"Bearer {access_token}",
+                },
+                method="POST",
+            )
+            try:
+                with urllib.request.urlopen(req, timeout=30) as resp:
+                    result = json.loads(resp.read())
+                pr_id  = result.get("pullRequestId", "?")
+                pr_url = result.get("_links", {}).get("web", {}).get("href", "")
+                print(f"PR #{pr_id} created: {pr_url}")
+                print(f"##[warning]Complete PR #{pr_id} in Azure DevOps to apply the update: {pr_url}")
+            except urllib.error.HTTPError as exc:
+                body = exc.read().decode("utf-8", errors="replace")
+                print(f"ERROR: PR creation failed ({exc.code}): {body}", file=sys.stderr)
+                sys.exit(1)
+            PY
           workingDirectory: "$(Build.SourcesDirectory)"
         env:
           SYSTEM_ACCESSTOKEN: $(System.AccessToken)
+          SYSTEM_COLLECTIONURI: $(System.CollectionUri)
+          SYSTEM_TEAMPROJECT: $(System.TeamProject)
+          BUILD_REPOSITORY_ID: $(Build.Repository.ID)
 
       - task: Bash@3
         displayName: Dry run summary

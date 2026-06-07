@@ -23,6 +23,15 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--root", required=True, help="Path to workload backup root (for Entra: tenant-state/entra).")
     parser.add_argument("--token", required=True, help="Microsoft Graph access token.")
+    parser.add_argument(
+        "--groups-root",
+        default="",
+        help=(
+            "Optional path to the exported Groups directory (tenant-state/entra/Groups). "
+            "When provided, group names are resolved from the local snapshot before falling "
+            "back to the Graph API, avoiding redundant API calls."
+        ),
+    )
     return parser.parse_args()
 
 
@@ -35,6 +44,29 @@ class GraphResolver:
         self.location_cache: dict[str, str | None] = {}
         self.auth_strength_cache: dict[str, str | None] = {}
         self._warned: set[str] = set()
+
+    def load_groups_from_snapshot(self, groups_root: pathlib.Path) -> int:
+        """Pre-populate group_cache from the Groups snapshot directory.
+
+        Returns the number of groups loaded. Groups found on disk are used as-is;
+        the Graph API is only called for group IDs not present in the snapshot.
+        """
+        if not groups_root.is_dir():
+            return 0
+        loaded = 0
+        for path in sorted(groups_root.glob("*.json")):
+            try:
+                data = json.loads(path.read_text(encoding="utf-8"))
+            except Exception:  # noqa: BLE001
+                continue
+            if not isinstance(data, dict):
+                continue
+            gid = str(data.get("id") or "").strip()
+            display_name = str(data.get("displayName") or "").strip() or None
+            if gid:
+                self.group_cache[gid] = display_name
+                loaded += 1
+        return loaded
 
     def _warn_once(self, key: str, message: str) -> None:
         if key in self._warned:
@@ -100,7 +132,7 @@ class GraphResolver:
             "https://graph.microsoft.com/v1.0/servicePrincipals"
             + "?$select=id,appId,displayName"
             + "&$top=1"
-            + "&$filter=appId eq '"
+            + "&$filter=appId%20eq%20'"
             + urllib.parse.quote(app_or_object_id)
             + "'"
         )
@@ -188,6 +220,19 @@ def main() -> int:
         return 0
 
     resolver = GraphResolver(token)
+
+    # Pre-populate group cache from the Groups snapshot (written by export_entra_identity.py)
+    # to avoid duplicate Graph API calls for groups already exported.
+    groups_root_raw = str(args.groups_root or "").strip()
+    if groups_root_raw:
+        groups_root = pathlib.Path(groups_root_raw).resolve()
+    else:
+        groups_root = root / "Groups"
+    if groups_root.is_dir():
+        loaded = resolver.load_groups_from_snapshot(groups_root)
+        if loaded:
+            print(f"Pre-populated group cache from snapshot: {loaded} group(s) loaded from {groups_root}")
+
     updated_files = 0
     processed_files = 0
 

@@ -100,18 +100,584 @@ ENTRA_ENRICHMENT_KEY_NAMES = {
 }
 
 
-def _reviewer_system_prompt() -> str:
-    return (
+
+_TRANSLATIONS: dict[str, dict[str, str]] = {
+    "Change Metrics": {
+        "cz": "Metriky změn",
+        "sk": "Metriky zmien",
+        "de": "Änderungsmetriken",
+        "fr": "Métriques de changement",
+        "it": "Metriche di modifica",
+        "es": "Métricas de cambio",
+        "pl": "Metryki zmian",
+        "nl": "Wijzigingsmetrieken",
+        "pt": "Métricas de alteração",
+    },
+    "Scope": {
+        "cz": "Rozsah",
+        "sk": "Rozsah",
+        "de": "Umfang",
+        "fr": "Périmètre",
+        "it": "Ambito",
+        "es": "Alcance",
+        "pl": "Zakres",
+        "nl": "Reikwijdte",
+        "pt": "Âmbito",
+    },
+    "Changed Files": {
+        "cz": "Změněné soubory",
+        "sk": "Zmenené súbory",
+        "de": "Geänderte Dateien",
+        "fr": "Fichiers modifiés",
+        "it": "File modificati",
+        "es": "Archivos modificados",
+        "pl": "Zmienione pliki",
+        "nl": "Gewijzigde bestanden",
+        "pt": "Ficheiros alterados",
+    },
+    "Operational-Only Changes Ignored": {
+        "cz": "Čistě provozní změny ignorovány",
+        "sk": "Čisto prevádzkové zmeny ignorované",
+        "de": "Rein operative Änderungen ignoriert",
+        "fr": "Changements purement opérationnels ignorés",
+        "it": "Modifiche solo operative ignorate",
+        "es": "Cambios solo operativos ignorados",
+        "pl": "Zmiany wyłącznie operacyjne pominięte",
+        "nl": "Alleen operationele wijzigingen genegeerd",
+        "pt": "Alterações puramente operacionais ignoradas",
+    },
+    "Change Fingerprint": {
+        "cz": "Otisk změny",
+        "sk": "Odtlačok zmeny",
+        "de": "Änderungs-Fingerprint",
+        "fr": "Empreinte de changement",
+        "it": "Impronta di modifica",
+        "es": "Huella de cambio",
+        "pl": "Odcisk zmiany",
+        "nl": "Wijzigingsvingerafdruk",
+        "pt": "Identificador de alteração",
+    },
+    "Operation": {
+        "cz": "Operace",
+        "sk": "Operácia",
+        "de": "Operation",
+        "fr": "Opération",
+        "it": "Operazione",
+        "es": "Operación",
+        "pl": "Operacja",
+        "nl": "Bewerking",
+        "pt": "Operação",
+    },
+    "Count": {
+        "cz": "Počet",
+        "sk": "Počet",
+        "de": "Anzahl",
+        "fr": "Nombre",
+        "it": "Conteggio",
+        "es": "Cantidad",
+        "pl": "Liczba",
+        "nl": "Aantal",
+        "pt": "Contagem",
+    },
+    "(none)": {
+        "cz": "(žádné)",
+        "sk": "(žiadne)",
+        "de": "(keine)",
+        "fr": "(aucun)",
+        "it": "(nessuno)",
+        "es": "(ninguno)",
+        "pl": "(brak)",
+        "nl": "(geen)",
+        "pt": "(nenhum)",
+    },
+    "Risk Level": {
+        "cz": "Úroveň rizika",
+        "sk": "Úroveň rizika",
+        "de": "Risikostufe",
+        "fr": "Niveau de risque",
+        "it": "Livello di rischio",
+        "es": "Nivel de riesgo",
+        "pl": "Poziom ryzyka",
+        "nl": "Risiconiveau",
+        "pt": "Nível de risco",
+    },
+    "Overall Risk": {
+        "cz": "Celkové riziko",
+        "sk": "Celkové riziko",
+        "de": "Gesamtrisiko",
+        "fr": "Risque global",
+        "it": "Rischio complessivo",
+        "es": "Riesgo general",
+        "pl": "Ogólne ryzyko",
+        "nl": "Totaalrisico",
+        "pt": "Risco geral",
+    },
+    "Top Risk Items": {
+        "cz": "Nejvýznamnější rizikové položky",
+        "sk": "Najvýznamnejšie rizikové položky",
+        "de": "Top-Risikoelemente",
+        "fr": "Éléments à risque majeurs",
+        "it": "Elementi a rischio principali",
+        "es": "Elementos de mayor riesgo",
+        "pl": "Najważniejsze elementy ryzyka",
+        "nl": "Belangrijkste risico's",
+        "pt": "Itens de maior risco",
+    },
+    "Severity": {
+        "cz": "Závažnost",
+        "sk": "Závažnosť",
+        "de": "Schweregrad",
+        "fr": "Gravité",
+        "it": "Gravità",
+        "es": "Severidad",
+        "pl": "Poziom zagrożenia",
+        "nl": "Ernst",
+        "pt": "Severidade",
+    },
+    "Area": {
+        "cz": "Oblast",
+        "sk": "Oblasť",
+        "de": "Bereich",
+        "fr": "Domaine",
+        "it": "Area",
+        "es": "Área",
+        "pl": "Obszar",
+        "nl": "Gebied",
+        "pt": "Área",
+    },
+    "File": {
+        "cz": "Soubor",
+        "sk": "Súbor",
+        "de": "Datei",
+        "fr": "Fichier",
+        "it": "File",
+        "es": "Archivo",
+        "pl": "Plik",
+        "nl": "Bestand",
+        "pt": "Ficheiro",
+    },
+    "Why It Matters": {
+        "cz": "Proč na tom záleží",
+        "sk": "Prečo na tom záleží",
+        "de": "Relevanz",
+        "fr": "Pourquoi c'est important",
+        "it": "Perché è importante",
+        "es": "Por qué importa",
+        "pl": "Dlaczego to ma znaczenie",
+        "nl": "Waarom het ertoe doet",
+        "pt": "Porque é importante",
+    },
+    "Added": {
+        "cz": "Přidáno",
+        "sk": "Pridané",
+        "de": "Hinzugefügt",
+        "fr": "Ajouté",
+        "it": "Aggiunto",
+        "es": "Añadido",
+        "pl": "Dodano",
+        "nl": "Toegevoegd",
+        "pt": "Adicionado",
+    },
+    "Modified": {
+        "cz": "Upraveno",
+        "sk": "Upravené",
+        "de": "Geändert",
+        "fr": "Modifié",
+        "it": "Modificato",
+        "es": "Modificado",
+        "pl": "Zmodyfikowano",
+        "nl": "Gewijzigd",
+        "pt": "Modificado",
+    },
+    "Deleted": {
+        "cz": "Smazáno",
+        "sk": "Zmazané",
+        "de": "Gelöscht",
+        "fr": "Supprimé",
+        "it": "Eliminato",
+        "es": "Eliminado",
+        "pl": "Usunięto",
+        "nl": "Verwijderd",
+        "pt": "Eliminado",
+    },
+    "Renamed": {
+        "cz": "Přejmenováno",
+        "sk": "Premenované",
+        "de": "Umbenannt",
+        "fr": "Renommé",
+        "it": "Rinominato",
+        "es": "Renombrado",
+        "pl": "Zmieniono nazwę",
+        "nl": "Hernoemd",
+        "pt": "Renomeado",
+    },
+    "Copied": {
+        "cz": "Zkopírováno",
+        "sk": "Skopírované",
+        "de": "Kopiert",
+        "fr": "Copié",
+        "it": "Copiato",
+        "es": "Copiado",
+        "pl": "Skopiowano",
+        "nl": "Gekopieerd",
+        "pt": "Copiado",
+    },
+    "TypeChanged": {
+        "cz": "Typ změněn",
+        "sk": "Typ zmenený",
+        "de": "Typ geändert",
+        "fr": "Type modifié",
+        "it": "Tipo modificato",
+        "es": "Tipo modificado",
+        "pl": "Zmieniono typ",
+        "nl": "Type gewijzigd",
+        "pt": "Tipo alterado",
+    },
+    "HIGH": {
+        "cz": "VYSOKÉ",
+        "sk": "VYSOKÉ",
+        "de": "HOCH",
+        "fr": "ÉLEVÉ",
+        "it": "ALTO",
+        "es": "ALTO",
+        "pl": "WYSOKIE",
+        "nl": "HOOG",
+        "pt": "ALTO",
+    },
+    "MEDIUM": {
+        "cz": "STŘEDNÍ",
+        "sk": "STREDNÉ",
+        "de": "MITTEL",
+        "fr": "MOYEN",
+        "it": "MEDIO",
+        "es": "MEDIO",
+        "pl": "ŚREDNIE",
+        "nl": "MIDDEL",
+        "pt": "MÉDIO",
+    },
+    "LOW": {
+        "cz": "NÍZKÉ",
+        "sk": "NÍZKE",
+        "de": "NIEDRIG",
+        "fr": "FAIBLE",
+        "it": "BASSO",
+        "es": "BAJO",
+        "pl": "NISKIE",
+        "nl": "LAAG",
+        "pt": "BAIXO",
+    },
+    "CRITICAL": {
+        "cz": "KRITICKÉ",
+        "sk": "KRITICKÉ",
+        "de": "KRITISCH",
+        "fr": "CRITIQUE",
+        "it": "CRITICO",
+        "es": "CRÍTICO",
+        "pl": "KRYTYCZNE",
+        "nl": "KRITIEK",
+        "pt": "CRÍTICO",
+    },
+    "Documentation/report artifact": {
+        "cz": "Dokumentace/report",
+        "sk": "Dokumentácia/report",
+        "de": "Dokumentation/Bericht",
+        "fr": "Documentation/rapport",
+        "it": "Documentazione/report",
+        "es": "Documentación/informe",
+        "pl": "Dokumentacja/raport",
+        "nl": "Documentatie/rapport",
+        "pt": "Documentação/relatório",
+    },
+    "Generated report/documentation output": {
+        "cz": "Vygenerovaný report/dokumentace",
+        "sk": "Vygenerovaný report/dokumentácia",
+        "de": "Generierter Bericht/Dokumentation",
+        "fr": "Rapport/documentation généré(e)",
+        "it": "Report/documentazione generato",
+        "es": "Informe/documentación generado",
+        "pl": "Wygenerowany raport/dokumentacja",
+        "nl": "Gegenereerd rapport/documentatie",
+        "pt": "Relatório/documentação gerado",
+    },
+    "Workload configuration area": {
+        "cz": "Oblast konfigurace úloh",
+        "sk": "Oblasť konfigurácie úloh",
+        "de": "Workload-Konfigurationsbereich",
+        "fr": "Domaine de configuration de la charge de travail",
+        "it": "Area di configurazione del carico di lavoro",
+        "es": "Área de configuración de carga de trabajo",
+        "pl": "Obszar konfiguracji obciążenia",
+        "nl": "Workload-configuratiegebied",
+        "pt": "Área de configuração da carga de trabalho",
+    },
+    "Security or broad policy area": {
+        "cz": "Bezpečnostní nebo obecná oblast politik",
+        "sk": "Bezpečnostná alebo široká oblasť politík",
+        "de": "Sicherheits- oder weit gefasster Richtlinienbereich",
+        "fr": "Domaine de sécurité ou de politique générale",
+        "it": "Area di sicurezza o policy ampia",
+        "es": "Área de seguridad o política general",
+        "pl": "Obszar bezpieczeństwa lub szerokiej polityki",
+        "nl": "Beveiligings- of breed beleidsgebied",
+        "pt": "Área de segurança ou política geral",
+    },
+    "Metadata or lower-impact configuration area": {
+        "cz": "Metadata nebo méně důležitá konfigurační oblast",
+        "sk": "Metadáta alebo menej dôležitá konfiguračná oblasť",
+        "de": "Metadaten oder Konfigurationsbereich mit geringerer Auswirkung",
+        "fr": "Métadonnées ou domaine de configuration à impact limité",
+        "it": "Metadati o area di configurazione a minore impatto",
+        "es": "Metadatos o área de configuración de menor impacto",
+        "pl": "Metadane lub obszar konfiguracji o niższym wpływie",
+        "nl": "Metadata of configuratiegebied met lager impact",
+        "pt": "Metadados ou área de configuração de menor impacto",
+    },
+    "Script/payload change can have immediate device impact": {
+        "cz": "Změna skriptu/payloadu může mít okamžitý dopad na zařízení",
+        "sk": "Zmena skriptu/payloadu môže mať okamžitý dopad na zariadenia",
+        "de": "Skript-/Payload-Änderung kann sofortige Geräteauswirkungen haben",
+        "fr": "La modification de script/payload peut avoir un impact immédiat sur les appareils",
+        "it": "La modifica di script/payload può avere un impatto immediato sui dispositivi",
+        "es": "El cambio de script/payload puede tener un impacto inmediato en los dispositivos",
+        "pl": "Zmiana skryptu/payloadu może mieć natychmiastowy wpływ na urządzenia",
+        "nl": "Script-/payload-wijziging kan onmiddellijke impact op apparaten hebben",
+        "pt": "A alteração de script/payload pode ter impacto imediato nos dispositivos",
+    },
+    "deletion increases impact": {
+        "cz": "smazání zvyšuje dopad",
+        "sk": "odstránenie zvyšuje dopad",
+        "de": "Löschung erhöht die Auswirkung",
+        "fr": "la suppression augmente l'impact",
+        "it": "l'eliminazione aumenta l'impatto",
+        "es": "la eliminación aumenta el impacto",
+        "pl": "usunięcie zwiększa wpływ",
+        "nl": "verwijdering verhoogt de impact",
+        "pt": "a eliminação aumenta o impacto",
+    },
+    "rename may hide semantic changes": {
+        "cz": "přejmenování může skrývat sémantické změny",
+        "sk": "premenovanie môže skrývať sémantické zmeny",
+        "de": "Umbenennung kann semantische Änderungen verschleiern",
+        "fr": "le renommage peut masquer des changements sémantiques",
+        "it": "la ridenominazione può nascondere modifiche semantiche",
+        "es": "el renombrado puede ocultar cambios semánticos",
+        "pl": "zmiana nazwy może ukrywać zmiany semantyczne",
+        "nl": "hernoeming kan semantische wijzigingen verbergen",
+        "pt": "a renomeação pode ocultar alterações semânticas",
+    },
+    "likely admin-driven": {
+        "cz": "pravděpodobně řízené administrátorem",
+        "sk": "pravdepodobne riadené administrátorom",
+        "de": "wahrscheinlich admin-gesteuert",
+        "fr": "probablement piloté par l'administrateur",
+        "it": "probabilmente guidato dall'amministratore",
+        "es": "probablemente impulsado por el administrador",
+        "pl": "prawdopodobnie sterowane przez administratora",
+        "nl": "waarschijnlijk beheerd door admin",
+        "pt": "provavelmente conduzido pelo administrador",
+    },
+    "likely infrastructure/platform-driven": {
+        "cz": "pravděpodobně řízené infrastrukturou/platformou",
+        "sk": "pravdepodobne riadené infraštruktúrou/platformou",
+        "de": "wahrscheinlich infrastruktur-/plattformgetrieben",
+        "fr": "probablement piloté par l'infrastructure/la plateforme",
+        "it": "probabilmente guidato dall'infrastruttura/dalla piattaforma",
+        "es": "probablemente impulsado por la infraestructura/plataforma",
+        "pl": "prawdopodobnie sterowane przez infrastrukturę/platformę",
+        "nl": "waarschijnlijk infrastructuur-/platform-gedreven",
+        "pt": "provavelmente conduzido pela infraestrutura/plataforma",
+    },
+    "primarily admin-driven": {
+        "cz": "převážně řízené administrátorem",
+        "sk": "prevažne riadené administrátorom",
+        "de": "überwiegend admin-gesteuert",
+        "fr": "principalement piloté par l'administrateur",
+        "it": "principalmente guidato dall'amministratore",
+        "es": "principalmente impulsado por el administrador",
+        "pl": "głównie sterowane przez administratora",
+        "nl": "voornamelijk beheerd door admin",
+        "pt": "principalmente conduzido pelo administrador",
+    },
+    "primarily infrastructure/platform-driven": {
+        "cz": "převážně řízené infrastrukturou/platformou",
+        "sk": "prevažne riadené infraštruktúrou/platformou",
+        "de": "überwiegend infrastruktur-/plattformgetrieben",
+        "fr": "principalement piloté par l'infrastructure/la plateforme",
+        "it": "principalmente guidato dall'infrastruttura/dalla piattaforma",
+        "es": "principalmente impulsado por la infraestructura/plataforma",
+        "pl": "głównie sterowane przez infrastrukturę/platformę",
+        "nl": "voornamelijk infrastructuur-/platform-gedreven",
+        "pt": "principalmente conduzido pela infraestrutura/plataforma",
+    },
+    "mixed or uncertain": {
+        "cz": "smíšené nebo nejisté",
+        "sk": "zmiešané alebo neisté",
+        "de": "gemischt oder unsicher",
+        "fr": "mixte ou incertain",
+        "it": "misto o incerto",
+        "es": "mixto o incierto",
+        "pl": "mieszane lub niepewne",
+        "nl": "gemengd of onzeker",
+        "pt": "misto ou incerto",
+    },
+    "SMALL": {
+        "cz": "MALÉ",
+        "sk": "MALÉ",
+        "de": "KLEIN",
+        "fr": "FAIBLE",
+        "it": "PICCOLO",
+        "es": "PEQUEÑO",
+        "pl": "MAŁE",
+        "nl": "KLEIN",
+        "pt": "PEQUENO",
+    },
+    "MODERATE": {
+        "cz": "STŘEDNÍ",
+        "sk": "STREDNÉ",
+        "de": "MODERAT",
+        "fr": "MODÉRÉ",
+        "it": "MODERATO",
+        "es": "MODERADO",
+        "pl": "UMIARKOWANE",
+        "nl": "MATIG",
+        "pt": "MODERADO",
+    },
+    "LARGE": {
+        "cz": "VELKÉ",
+        "sk": "VEĽKÉ",
+        "de": "GROSS",
+        "fr": "IMPORTANT",
+        "it": "AMPIO",
+        "es": "GRANDE",
+        "pl": "DUŻE",
+        "nl": "GROOT",
+        "pt": "GRANDE",
+    },
+    "Plain-Language Summary": {
+        "cz": "Shrnutí jednoduchým jazykem",
+        "sk": "Zhrnutie jednoduchým jazykom",
+        "de": "Zusammenfassung in einfacher Sprache",
+        "fr": "Résumé en langage clair",
+        "it": "Riassunto in linguaggio semplice",
+        "es": "Resumen en lenguaje sencillo",
+        "pl": "Podsumowanie prostym językiem",
+        "nl": "Samenvatting in begrijpelijke taal",
+        "pt": "Resumo em linguagem simples",
+    },
+    "Operational Impact": {
+        "cz": "Provozní dopad",
+        "sk": "Prevádzkový dopad",
+        "de": "Betriebliche Auswirkungen",
+        "fr": "Impact opérationnel",
+        "it": "Impatto operativo",
+        "es": "Impacto operativo",
+        "pl": "Wpływ operacyjny",
+        "nl": "Operationele impact",
+        "pt": "Impacto operacional",
+    },
+    "Risk Assessment Rationale": {
+        "cz": "Zdůvodnění hodnocení rizika",
+        "sk": "Zdôvodnenie hodnotenia rizika",
+        "de": "Begründung der Risikobewertung",
+        "fr": "Justification de l'évaluation des risques",
+        "it": "Rationale della valutazione del rischio",
+        "es": "Justificación de la evaluación de riesgos",
+        "pl": "Uzasadnienie oceny ryzyka",
+        "nl": "Rationale risicobeoordeling",
+        "pt": "Racional da avaliação de risco",
+    },
+    "Recommended Reviewer Checks": {
+        "cz": "Doporučené kontroly",
+        "sk": "Odporúčané kontroly",
+        "de": "Empfohlene Prüfungen",
+        "fr": "Vérifications recommandées",
+        "it": "Controlli consigliati",
+        "es": "Comprobaciones recomendadas",
+        "pl": "Zalecane weryfikacje",
+        "nl": "Aanbevolen controles",
+        "pt": "Verificações recomendadas",
+    },
+    "Rollback Considerations": {
+        "cz": "Úvahy o rollbacku",
+        "sk": "Úvahy o rollbacku",
+        "de": "Rollback-Überlegungen",
+        "fr": "Considérations de retour arrière",
+        "it": "Considerazioni sul rollback",
+        "es": "Consideraciones de reversión",
+        "pl": "Rozważenia dotyczące wycofania",
+        "nl": "Rollback-overwegingen",
+        "pt": "Considerações de reversão",
+    },
+    "security-relevant": {
+        "cz": "bezpečnostně relevantní",
+        "sk": "bezpečnostne relevantné",
+        "de": "sicherheitsrelevant",
+        "fr": "pertinent pour la sécurité",
+        "it": "rilevante per la sicurezza",
+        "es": "relevante para la seguridad",
+        "pl": "istotne dla bezpieczeństwa",
+        "nl": "veiligheidsrelevant",
+        "pt": "relevante para a segurança",
+    },
+    "configuration-impacting": {
+        "cz": "ovlivňující konfiguraci",
+        "sk": "ovplyvňujúce konfiguráciu",
+        "de": "konfigurationsrelevant",
+        "fr": "impactant la configuration",
+        "it": "rilevante per la configurazione",
+        "es": "que afecta la configuración",
+        "pl": "wpływające na konfigurację",
+        "nl": "configuratie-impact",
+        "pt": "que afeta a configuração",
+    },
+    "Validate changed policy intent against expected baseline behavior.": {
+        "cz": "Ověřte změněný záměr politiky oproti očekávanému chování baseline.",
+        "sk": "Overte zmenený zámer politiky oproti očakávanému správaniu baseline.",
+        "de": "Validieren Sie die geänderte Richtlinienabsicht gegen das erwartete Baseline-Verhalten.",
+        "fr": "Validez l'intention de la politique modifiée par rapport au comportement attendu de la référence.",
+        "it": "Convalidare l'intento della policy modificata rispetto al comportamento previsto della baseline.",
+        "es": "Valide la intención de la política modificada frente al comportamiento esperado de la línea base.",
+        "pl": "Zweryfikuj zmieniony zamiar polityki względem oczekiwanego zachowania linii bazowej.",
+        "nl": "Valideer het gewijzigde beleidsintentie tegen het verwachte basislijn gedrag.",
+        "pt": "Valide a intenção da política alterada em relação ao comportamento esperado da linha de base.",
+    },
+    "If behavior is not expected, revert the drift commit/PR to restore baseline state.": {
+        "cz": "Pokud je chování nečekané, vracejte drift commit/PR pro obnovení baseline stavu.",
+        "sk": "Ak je správanie neočakávané, vráťte drift commit/PR na obnovenie baseline stavu.",
+        "de": "Falls das Verhalten unerwartet ist, reverten Sie den Drift-Commit/PR, um den Baseline-Zustand wiederherzustellen.",
+        "fr": "Si le comportement n'est pas attendu, annulez le commit/PR de dérive pour restaurer l'état de référence.",
+        "it": "Se il comportamento non è quello previsto, ripristinare il commit/PR di drift per ripristinare lo stato della baseline.",
+        "es": "Si el comportamiento no es el esperado, revierta el commit/PR de drift para restaurar el estado de la línea base.",
+        "pl": "Jeśli zachowanie jest nieoczekiwane, przywróć commit/PR driftu, aby przywrócić stan linii bazowej.",
+        "nl": "Als het gedrag niet zoals verwacht is, revert de drift commit/PR om de basislijn status te herstellen.",
+        "pt": "Se o comportamento não for o esperado, reverta o commit/PR de drift para restaurar o estado da linha de base.",
+    },
+}
+
+
+def _t(text: str) -> str:
+    """Translate deterministic summary text when PR_SUMMARY_LANGUAGE is set."""
+    lang = os.environ.get("PR_SUMMARY_LANGUAGE", "en").strip().lower()
+    if lang in {"en", "english"}:
+        return text
+    return _TRANSLATIONS.get(text, {}).get(lang, text)
+
+
+def _reviewer_system_prompt(language: str = "en") -> str:
+    base = (
         "You analyze configuration drift pull requests for enterprise identity and endpoint "
         "management systems such as Microsoft Intune and Entra ID. Your job is to help "
         "reviewers quickly understand operational impact and security implications of "
         "configuration changes, including whether the evidence suggests platform-managed "
         "infrastructure drift, tenant-admin intent, or a mixed/uncertain source."
     )
+    if language and language.lower() not in {"en", "english"}:
+        base += f" Respond in {language}."
+    return base
 
 
-def _reviewer_instruction() -> str:
-    return (
+def _reviewer_instruction(language: str = "en") -> str:
+    base = (
         "Produce a concise PR reviewer summary for configuration changes. "
         "Assume the reviewer may not be a deep technical expert.\n\n"
         "Context signals are provided such as scope, posture change classification, "
@@ -143,10 +709,13 @@ def _reviewer_instruction() -> str:
         "- Only claim policy is unassigned/no devices when assignment targets are removed and none remain.\n"
         "- Keep the summary under 200 words."
     )
+    if language and language.lower() not in {"en", "english"}:
+        base += f"\n- Respond entirely in {language}."
+    return base
 
 
-def _minimal_reviewer_instruction() -> str:
-    return (
+def _minimal_reviewer_instruction(language: str = "en") -> str:
+    base = (
         "Write a concise reviewer narrative using only supplied data. "
         "Use sections: Plain-language summary, Operational impact, Risk assessment rationale, "
         "Recommended reviewer checks, Rollback considerations. "
@@ -154,6 +723,9 @@ def _minimal_reviewer_instruction() -> str:
         "primarily admin-driven, or mixed/uncertain based on the evidence. "
         "Keep under 170 words."
     )
+    if language and language.lower() not in {"en", "english"}:
+        base += f" Respond entirely in {language}."
+    return base
 
 
 @dataclass
@@ -699,31 +1271,31 @@ def _build_deterministic_summary(
     changes_fingerprint = _changes_fingerprint(changes)
 
     lines: list[str] = []
-    lines.append("### Change Metrics")
-    lines.append(f"- **Scope:** `{drift_branch}` -> `{baseline_branch}`")
-    lines.append(f"- **Changed Files:** **{len(changes)}**")
+    lines.append(f"### {_t('Change Metrics')}")
+    lines.append(f"- **{_t('Scope')}:** `{drift_branch}` -> `{baseline_branch}`")
+    lines.append(f"- **{_t('Changed Files')}:** **{len(changes)}**")
     if ignored_operational_count > 0:
-        lines.append(f"- **Operational-Only Changes Ignored:** **{ignored_operational_count}**")
-    lines.append(f"- **Change Fingerprint:** `{changes_fingerprint}`")
+        lines.append(f"- **{_t('Operational-Only Changes Ignored')}:** **{ignored_operational_count}**")
+    lines.append(f"- **{_t('Change Fingerprint')}:** `{changes_fingerprint}`")
     lines.append("")
-    lines.append("| **Operation** | **Count** |")
+    lines.append(f"| **{_t('Operation')}** | **{_t('Count')}** |")
     lines.append("|---|---:|")
     wrote_operation_row = False
     for op in ("Added", "Modified", "Deleted", "Renamed", "Copied", "TypeChanged"):
         count = op_counter.get(op, 0)
         if count:
-            lines.append(f"| {op} | {count} |")
+            lines.append(f"| {_t(op)} | {count} |")
             wrote_operation_row = True
     if not wrote_operation_row:
-        lines.append("| (none) | 0 |")
+        lines.append(f"| {_t('(none)')} | 0 |")
     lines.append("")
-    lines.append("| **Risk Level** | **Count** |")
+    lines.append(f"| **{_t('Risk Level')}** | **{_t('Count')}** |")
     lines.append("|---|---:|")
-    lines.append(f"| HIGH | {risk_counter.get('HIGH', 0)} |")
-    lines.append(f"| MEDIUM | {risk_counter.get('MEDIUM', 0)} |")
-    lines.append(f"| LOW | {risk_counter.get('LOW', 0)} |")
+    lines.append(f"| {_t('HIGH')} | {risk_counter.get('HIGH', 0)} |")
+    lines.append(f"| {_t('MEDIUM')} | {risk_counter.get('MEDIUM', 0)} |")
+    lines.append(f"| {_t('LOW')} | {risk_counter.get('LOW', 0)} |")
     lines.append("")
-    lines.append(f"> **Overall Risk:** **{overall_risk}**")
+    lines.append(f"> **{_t('Overall Risk')}:** **{_t(overall_risk)}**")
 
     highlights = sorted(
         [item for item in changes if item.risk_score >= 2 and not _is_doc_like(item.path)],
@@ -737,15 +1309,16 @@ def _build_deterministic_summary(
 
     if highlights:
         lines.append("")
-        lines.append("### Top Risk Items")
-        lines.append("| **Severity** | **Operation** | **Area** | **File** | **Why It Matters** |")
+        lines.append(f"### {_t('Top Risk Items')}")
+        lines.append(f"| **{_t('Severity')}** | **{_t('Operation')}** | **{_t('Area')}** | **{_t('File')}** | **{_t('Why It Matters')}** |")
         lines.append("|---|---|---|---|---|")
         for item in highlights:
-            severity = _md_cell(f"{item.severity} / {item.risk_label}")
-            operation = _md_cell(item.operation)
+            severity = _md_cell(f"{_t(item.severity)} / {_t(item.risk_label)}")
+            operation = _md_cell(_t(item.operation))
             area = _md_cell(item.policy_type)
             file_path = _md_cell(_ellipsize_path(item.path, 120))
-            reason = _md_cell(_ellipsize(item.reason, 80))
+            translated_reason = "; ".join(_t(part.strip()) for part in item.reason.split(";"))
+            reason = _md_cell(_ellipsize(translated_reason, 80))
             lines.append(
                 f"| {severity} | `{operation}` | `{area}` | `{file_path}` | {reason} |"
             )
@@ -1069,11 +1642,11 @@ def _build_change_source_assessment(compact_changes: list[dict[str, Any]]) -> di
 
 def _format_change_source_label(label: str) -> str:
     mapping = {
-        "likely_admin_driven": "likely admin-driven",
-        "likely_infrastructure_driven": "likely infrastructure/platform-driven",
-        "primarily_admin_driven": "primarily admin-driven",
-        "primarily_infrastructure_driven": "primarily infrastructure/platform-driven",
-        "mixed_or_uncertain": "mixed or uncertain",
+        "likely_admin_driven": _t("likely admin-driven"),
+        "likely_infrastructure_driven": _t("likely infrastructure/platform-driven"),
+        "primarily_admin_driven": _t("primarily admin-driven"),
+        "primarily_infrastructure_driven": _t("primarily infrastructure/platform-driven"),
+        "mixed_or_uncertain": _t("mixed or uncertain"),
     }
     return mapping.get(label, label.replace("_", " ").strip())
 
@@ -1378,27 +1951,27 @@ def _build_fallback_narrative(
     sensitivity_text = "security-relevant" if security_sensitive else "configuration-impacting"
 
     lines = [
-        "#### Plain-Language Summary",
+        f"#### {_t('Plain-Language Summary')}",
         (
-            f"{workload.upper()} drift includes {len(changes)} {change_scope.lower()} "
-            f"{sensitivity_text} change(s), with overall risk {highest_risk}. "
+            f"{workload.upper()} drift includes {len(changes)} {_t(change_scope)} "
+            f"{_t(sensitivity_text)} change(s), with overall risk {_t(highest_risk)}. "
             f"Deterministic source assessment: {source_text} ({source_confidence} confidence)."
         ),
         "",
-        "#### Operational Impact",
+        f"#### {_t('Operational Impact')}",
         f"Most affected areas: {areas_text}. Validate expected behavior for impacted policies after merge.",
         "",
-        "#### Risk Assessment Rationale",
+        f"#### {_t('Risk Assessment Rationale')}",
         f"Risk is driven by changed policy areas and operations (especially deletes/renames in security-critical paths).",
         "",
-        "#### Recommended Reviewer Checks",
+        f"#### {_t('Recommended Reviewer Checks')}",
     ]
-    lines.extend(bullet_lines if bullet_lines else ["- Validate changed policy intent against expected baseline behavior."])
+    lines.extend(bullet_lines if bullet_lines else [f"- {_t('Validate changed policy intent against expected baseline behavior.')}"])
     lines.extend(
         [
             "",
-            "#### Rollback Considerations",
-            "If behavior is not expected, revert the drift commit/PR to restore baseline state.",
+            f"#### {_t('Rollback Considerations')}",
+            _t("If behavior is not expected, revert the drift commit/PR to restore baseline state."),
             "",
             f"_AI fallback used: {fallback_reason}_",
         ]
@@ -1592,6 +2165,7 @@ def _call_azure_openai(
         _env_int("PR_AI_MINIMAL_TIMEOUT_SECONDS", max(120, compact_timeout_seconds)),
     )
     max_route_attempts = max(1, _env_int("PR_AI_REQUEST_MAX_ATTEMPTS", 3))
+    language = os.environ.get("PR_SUMMARY_LANGUAGE", "en").strip() or "en"
 
     if not endpoint or not deployment or not api_key:
         return (None, "Azure OpenAI is not configured (endpoint/deployment/api-key missing)")
@@ -1666,7 +2240,7 @@ def _call_azure_openai(
         "change_facts": change_facts,
         "change_source_assessment": change_source_assessment,
         "deterministic_summary": deterministic_summary,
-        "instruction": _reviewer_instruction(),
+        "instruction": _reviewer_instruction(language),
     }
     max_payload_bytes = max(16000, _env_int("PR_AI_PAYLOAD_MAX_BYTES", 120000))
     sampled_changes, payload_truncated = _fit_payload_budget(
@@ -1826,7 +2400,7 @@ def _call_azure_openai(
     base_messages = [
         {
             "role": "system",
-            "content": _reviewer_system_prompt(),
+            "content": _reviewer_system_prompt(language),
         },
         {"role": "user", "content": json.dumps(user_payload, ensure_ascii=True)},
     ]
@@ -1846,7 +2420,7 @@ def _call_azure_openai(
         compact_messages = [
             {
                 "role": "system",
-                "content": _reviewer_system_prompt(),
+                "content": _reviewer_system_prompt(language),
             },
             {"role": "user", "content": json.dumps(compact_payload, ensure_ascii=True)},
         ]
@@ -1885,12 +2459,12 @@ def _call_azure_openai(
             "change_source_assessment": change_source_assessment,
             "deterministic_summary": _compact_deterministic_summary(deterministic_summary),
             "changes": minimal_changes,
-            "instruction": _minimal_reviewer_instruction(),
+            "instruction": _minimal_reviewer_instruction(language),
         }
         minimal_messages = [
             {
                 "role": "system",
-                "content": _reviewer_system_prompt() + " Prioritize clarity, practical risk framing, and reviewer actionability.",
+                "content": _reviewer_system_prompt(language) + " Prioritize clarity, practical risk framing, and reviewer actionability.",
             },
             {"role": "user", "content": json.dumps(minimal_payload, ensure_ascii=True)},
         ]

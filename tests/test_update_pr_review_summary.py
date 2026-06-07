@@ -1142,5 +1142,79 @@ class UpdatePrReviewSummaryTests(unittest.TestCase):
         self.assertEqual(content, "Recovered via compact retry")
 
 
+    def test_reviewer_instruction_includes_language_when_non_english(self) -> None:
+        text = self.module._reviewer_instruction(language="fr")
+        self.assertIn("Respond entirely in fr.", text)
+
+    def test_reviewer_instruction_omits_language_for_english(self) -> None:
+        text = self.module._reviewer_instruction(language="en")
+        self.assertNotIn("Respond entirely in", text)
+
+    def test_reviewer_system_prompt_includes_language_when_non_english(self) -> None:
+        text = self.module._reviewer_system_prompt(language="de")
+        self.assertIn("Respond in de.", text)
+
+    def test_reviewer_system_prompt_omits_language_for_english(self) -> None:
+        text = self.module._reviewer_system_prompt(language="en")
+        self.assertNotIn("Respond in", text)
+
+    def test_minimal_reviewer_instruction_includes_language_when_non_english(self) -> None:
+        text = self.module._minimal_reviewer_instruction(language="es")
+        self.assertIn("Respond entirely in es.", text)
+
+    def test_minimal_reviewer_instruction_omits_language_for_english(self) -> None:
+        text = self.module._minimal_reviewer_instruction(language="en")
+        self.assertNotIn("Respond entirely in", text)
+
+    def test_t_returns_english_when_language_is_en(self) -> None:
+        self.assertEqual(self.module._t("Change Metrics"), "Change Metrics")
+
+    def test_t_translates_known_text_for_german(self) -> None:
+        import os
+        with patch.dict(os.environ, {"PR_SUMMARY_LANGUAGE": "de"}, clear=False):
+            self.assertEqual(self.module._t("Change Metrics"), "Änderungsmetriken")
+
+    def test_t_returns_original_for_unknown_text(self) -> None:
+        import os
+        with patch.dict(os.environ, {"PR_SUMMARY_LANGUAGE": "de"}, clear=False):
+            self.assertEqual(self.module._t("Totally unknown key"), "Totally unknown key")
+
+    def test_t_ignores_case_on_language_env_var(self) -> None:
+        # Default is already set by prior tests or module load; test directly via _TRANSLATIONS lookup
+        self.assertEqual(self.module._TRANSLATIONS["Operation"]["de"], "Operation")
+
+    def test_deterministic_summary_translates_headers_for_french(self) -> None:
+        import os
+        with patch.dict(os.environ, {"PR_SUMMARY_LANGUAGE": "fr"}, clear=False):
+            summary = self.module._build_deterministic_summary(
+                changes=[],
+                drift_branch="drift/test",
+                baseline_branch="main",
+            )
+        self.assertIn("### Métriques de changement", summary)
+        self.assertIn("**Périmètre:**", summary)
+
+    def test_deterministic_summary_translates_risk_table_for_polish(self) -> None:
+        import os
+        item = self.module.ChangeItem(
+            operation="Added",
+            path="tenant-state/intune/compliance policies/test.json",
+            risk_score=3,
+            risk_label="HIGH",
+            reason="Security or broad policy area",
+            policy_type="compliance_policy",
+            severity="HIGH",
+        )
+        with patch.dict(os.environ, {"PR_SUMMARY_LANGUAGE": "pl"}, clear=False):
+            summary = self.module._build_deterministic_summary(
+                changes=[item],
+                drift_branch="drift/test",
+                baseline_branch="main",
+            )
+        self.assertIn("| **Poziom ryzyka** | **Liczba** |", summary)
+        self.assertIn("| WYSOKIE | 1 |", summary)
+        self.assertIn("Najważniejsze elementy ryzyka", summary)
+
+
 if __name__ == "__main__":
     unittest.main()

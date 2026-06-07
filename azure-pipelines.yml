@@ -30,7 +30,7 @@ variables:
   - name: ENTRA_BACKUP_SUBDIR
     value: entra
   - name: INTUNECD_VERSION
-    value: 2.5.0
+    value: 2.6.0
   - name: MD_TO_PDF_VERSION
     value: 5.2.5
   - name: EXCLUDE_SCRIPT_BACKUP
@@ -51,6 +51,21 @@ variables:
     value: 8
   - name: ENTRA_INCLUDE_APP_REGISTRATIONS
     value: true
+  # Phase 1 identity exports
+  - name: ENTRA_INCLUDE_GROUPS
+    value: true
+  - name: ENTRA_INCLUDE_ROLE_ASSIGNMENTS
+    value: true
+  - name: ENTRA_INCLUDE_AUTH_METHODS_POLICY
+    value: true
+  - name: ENTRA_INCLUDE_CROSS_TENANT_ACCESS
+    value: true
+  - name: ENTRA_INCLUDE_IDENTITY_PROTECTION
+    value: true
+  # Comma-separated group IDs (GUIDs) for which the full member list is tracked in Git.
+  # All other groups receive count-only tracking. Leave empty to disable member tracking.
+  - name: ENTRA_WATCH_GROUPS_CSV
+    value: ""
   - name: SPLIT_DOCUMENTATION
     value: true
   - name: ENABLE_TAGGING
@@ -188,7 +203,7 @@ jobs:
           targetType: inline
           script: |
             set -euo pipefail
-            pip3 install "IntuneCD==$(INTUNECD_VERSION)"
+            pip3 install "IntuneCD==$(INTUNECD_VERSION)" PyYAML
           workingDirectory: "$(Build.SourcesDirectory)"
           failOnStderr: true
 
@@ -705,39 +720,18 @@ jobs:
           BUILD_SOURCESDIRECTORY: $(Build.SourcesDirectory)
 
       - task: Bash@3
-        displayName: Generate policy assignment report
+        displayName: Generate Intune reports
         inputs:
           targetType: inline
           script: |
             set -euo pipefail
-            python3 "$(Build.SourcesDirectory)/scripts/generate_assignment_report.py" \
-              --root "$(Build.SourcesDirectory)/$(BACKUP_FOLDER)/$(INTUNE_BACKUP_SUBDIR)" \
-              --output-dir "$(Build.SourcesDirectory)/$(BACKUP_FOLDER)/$(REPORTS_SUBDIR)/intune"
-          workingDirectory: "$(Build.SourcesDirectory)"
-          failOnStderr: true
-
-      - task: Bash@3
-        displayName: Generate apps inventory report
-        condition: and(eq(variables['ENABLE_WORKLOAD_ENTRA'], 'false'), or(eq(variables['ENTRA_INCLUDE_APP_REGISTRATIONS'], 'true'), eq(variables['ENTRA_INCLUDE_ENTERPRISE_APPS'], 'true')))
-        inputs:
-          targetType: inline
-          script: |
-            set -euo pipefail
-            python3 "$(Build.SourcesDirectory)/scripts/generate_app_inventory_report.py" \
-              --root "$(Build.SourcesDirectory)/$(BACKUP_FOLDER)/$(ENTRA_BACKUP_SUBDIR)" \
-              --output-dir "$(Build.SourcesDirectory)/$(BACKUP_FOLDER)/$(REPORTS_SUBDIR)/entra"
-          workingDirectory: "$(Build.SourcesDirectory)"
-          failOnStderr: true
-
-      - task: Bash@3
-        displayName: Generate object inventory reports
-        inputs:
-          targetType: inline
-          script: |
-            set -euo pipefail
-            python3 "$(Build.SourcesDirectory)/scripts/generate_object_inventory_reports.py" \
-              --root "$(Build.SourcesDirectory)/$(BACKUP_FOLDER)/$(INTUNE_BACKUP_SUBDIR)" \
-              --output-dir "$(Build.SourcesDirectory)/$(BACKUP_FOLDER)/$(REPORTS_SUBDIR)/intune"
+            python3 "$(Build.SourcesDirectory)/scripts/run_reports.py" \
+              --workload intune \
+              --backup-dir "$(Build.SourcesDirectory)/$(BACKUP_FOLDER)/$(INTUNE_BACKUP_SUBDIR)" \
+              --reports-dir "$(Build.SourcesDirectory)/$(BACKUP_FOLDER)/$(REPORTS_SUBDIR)/intune" \
+              --repo-root "$(Build.SourcesDirectory)" \
+              --mode "$(FULL_RUN)" \
+              --type reports
           workingDirectory: "$(Build.SourcesDirectory)"
           failOnStderr: true
 
@@ -1182,31 +1176,19 @@ jobs:
           targetType: inline
           script: |
             set -euo pipefail
-
-            INTRO="Intune backup and documentation generated at $(Build.Repository.Uri) <img align=\"right\" width=\"96\" height=\"96\" src=\"./logo.png\">"
-
-            if [ "$(SPLIT_DOCUMENTATION)" = "true" ]; then
-              IntuneCD-startdocumentation \
-                --path="$(Build.SourcesDirectory)/$(BACKUP_FOLDER)/$(INTUNE_BACKUP_SUBDIR)" \
-                --tenantname="$TENANT_NAME" \
-                --intro="$INTRO" \
-                --split \
-                --enrich-documentation
-              sed "s#](\\./#](./$(BACKUP_FOLDER)/$(INTUNE_BACKUP_SUBDIR)/#g" \
-                "$(Build.SourcesDirectory)/$(BACKUP_FOLDER)/$(INTUNE_BACKUP_SUBDIR)/index.md" \
-                > "$(Build.SourcesDirectory)/prod-as-built.md"
-            else
-              IntuneCD-startdocumentation \
-                --path="$(Build.SourcesDirectory)/$(BACKUP_FOLDER)/$(INTUNE_BACKUP_SUBDIR)" \
-                --outpath="$(Build.SourcesDirectory)/prod-as-built.md" \
-                --tenantname="$TENANT_NAME" \
-                --intro="$INTRO" \
-                --enrich-documentation
-            fi
+            python3 "$(Build.SourcesDirectory)/scripts/run_reports.py" \
+              --workload intune \
+              --backup-dir "$(Build.SourcesDirectory)/$(BACKUP_FOLDER)/$(INTUNE_BACKUP_SUBDIR)" \
+              --reports-dir "$(Build.SourcesDirectory)/$(BACKUP_FOLDER)/$(REPORTS_SUBDIR)/intune" \
+              --repo-root "$(Build.SourcesDirectory)" \
+              --mode "$(FULL_RUN)" \
+              --type documentation
           workingDirectory: "$(Build.SourcesDirectory)"
           failOnStderr: false
         env:
           TENANT_NAME: $(TENANT_NAME)
+          BUILD_REPOSITORY_URI: $(Build.Repository.Uri)
+          SPLIT_DOCUMENTATION: $(SPLIT_DOCUMENTATION)
 
   - job: create_or_update_intune_pr
     displayName: Create or update rolling Intune drift PR
@@ -1415,8 +1397,9 @@ jobs:
             rm -rf "$SCRIPT_ROOT"
             mkdir -p "$SCRIPT_ROOT"
             cp "$(Build.SourcesDirectory)/scripts/export_entra_baseline.py" "$SCRIPT_ROOT/export_entra_baseline.py"
+            cp "$(Build.SourcesDirectory)/scripts/export_entra_identity.py" "$SCRIPT_ROOT/export_entra_identity.py"
             cp "$(Build.SourcesDirectory)/scripts/validate_backup_outputs.py" "$SCRIPT_ROOT/validate_backup_outputs.py"
-            chmod +x "$SCRIPT_ROOT/export_entra_baseline.py" "$SCRIPT_ROOT/validate_backup_outputs.py"
+            chmod +x "$SCRIPT_ROOT/export_entra_baseline.py" "$SCRIPT_ROOT/export_entra_identity.py" "$SCRIPT_ROOT/validate_backup_outputs.py"
             echo "##vso[task.setvariable variable=PIPELINE_SCRIPT_ROOT]$SCRIPT_ROOT"
           workingDirectory: "$(Build.SourcesDirectory)"
           failOnStderr: true
@@ -1619,6 +1602,26 @@ jobs:
           failOnStderr: false
 
       - task: Bash@3
+        displayName: Export Entra identity objects (Phase 1)
+        inputs:
+          targetType: inline
+          script: |
+            set -euo pipefail
+            echo "Starting Entra identity export (groups, role assignments, auth methods, cross-tenant access, identity protection)..."
+            timeout 15m python3 -u "$(PIPELINE_SCRIPT_ROOT)/export_entra_identity.py" \
+              --root "$(Build.SourcesDirectory)/$(BACKUP_FOLDER)/$(ENTRA_BACKUP_SUBDIR)" \
+              --token "$(accessToken)" \
+              --include-groups "$(ENTRA_INCLUDE_GROUPS)" \
+              --include-role-assignments "$(ENTRA_INCLUDE_ROLE_ASSIGNMENTS)" \
+              --include-auth-methods-policy "$(ENTRA_INCLUDE_AUTH_METHODS_POLICY)" \
+              --include-cross-tenant-access "$(ENTRA_INCLUDE_CROSS_TENANT_ACCESS)" \
+              --include-identity-protection "$(ENTRA_INCLUDE_IDENTITY_PROTECTION)" \
+              --watch-groups-csv "$(ENTRA_WATCH_GROUPS_CSV)" \
+              --fail-on-export-error "true"
+          workingDirectory: "$(Build.SourcesDirectory)"
+          failOnStderr: false
+
+      - task: Bash@3
         displayName: Resolve Conditional Access reference names (Entra)
         condition: eq(variables['ENTRA_INCLUDE_CONDITIONAL_ACCESS'], 'true')
         inputs:
@@ -1627,47 +1630,30 @@ jobs:
             set -euo pipefail
             python3 "$(Build.SourcesDirectory)/scripts/resolve_ca_references.py" \
               --root "$(Build.SourcesDirectory)/$(BACKUP_FOLDER)/$(ENTRA_BACKUP_SUBDIR)" \
-              --token "$(accessToken)"
+              --token "$(accessToken)" \
+              --groups-root "$(Build.SourcesDirectory)/$(BACKUP_FOLDER)/$(ENTRA_BACKUP_SUBDIR)/Groups"
           workingDirectory: "$(Build.SourcesDirectory)"
           failOnStderr: false
 
       - task: Bash@3
-        displayName: Generate policy assignment report (Entra CA)
-        condition: eq(variables['ENTRA_INCLUDE_CONDITIONAL_ACCESS'], 'true')
+        displayName: Generate Entra reports
         inputs:
           targetType: inline
           script: |
             set -euo pipefail
-            python3 "$(Build.SourcesDirectory)/scripts/generate_assignment_report.py" \
-              --root "$(Build.SourcesDirectory)/$(BACKUP_FOLDER)/$(ENTRA_BACKUP_SUBDIR)" \
-              --output-dir "$(Build.SourcesDirectory)/$(BACKUP_FOLDER)/$(REPORTS_SUBDIR)/entra"
+            python3 "$(Build.SourcesDirectory)/scripts/run_reports.py" \
+              --workload entra \
+              --backup-dir "$(Build.SourcesDirectory)/$(BACKUP_FOLDER)/$(ENTRA_BACKUP_SUBDIR)" \
+              --reports-dir "$(Build.SourcesDirectory)/$(BACKUP_FOLDER)/$(REPORTS_SUBDIR)/entra" \
+              --repo-root "$(Build.SourcesDirectory)" \
+              --mode "$(ENTRA_RUN_MODE)" \
+              --type reports
           workingDirectory: "$(Build.SourcesDirectory)"
           failOnStderr: true
-
-      - task: Bash@3
-        displayName: Generate apps inventory report (Entra)
-        condition: or(eq(variables['ENTRA_INCLUDE_APP_REGISTRATIONS_EFFECTIVE'], 'true'), eq(variables['ENTRA_INCLUDE_ENTERPRISE_APPS_EFFECTIVE'], 'true'))
-        inputs:
-          targetType: inline
-          script: |
-            set -euo pipefail
-            python3 "$(Build.SourcesDirectory)/scripts/generate_app_inventory_report.py" \
-              --root "$(Build.SourcesDirectory)/$(BACKUP_FOLDER)/$(ENTRA_BACKUP_SUBDIR)" \
-              --output-dir "$(Build.SourcesDirectory)/$(BACKUP_FOLDER)/$(REPORTS_SUBDIR)/entra"
-          workingDirectory: "$(Build.SourcesDirectory)"
-          failOnStderr: true
-
-      - task: Bash@3
-        displayName: Generate object inventory reports (Entra)
-        inputs:
-          targetType: inline
-          script: |
-            set -euo pipefail
-            python3 "$(Build.SourcesDirectory)/scripts/generate_object_inventory_reports.py" \
-              --root "$(Build.SourcesDirectory)/$(BACKUP_FOLDER)/$(ENTRA_BACKUP_SUBDIR)" \
-              --output-dir "$(Build.SourcesDirectory)/$(BACKUP_FOLDER)/$(REPORTS_SUBDIR)/entra"
-          workingDirectory: "$(Build.SourcesDirectory)"
-          failOnStderr: true
+        env:
+          ENTRA_INCLUDE_CONDITIONAL_ACCESS: $(ENTRA_INCLUDE_CONDITIONAL_ACCESS)
+          ENTRA_INCLUDE_APP_REGISTRATIONS_EFFECTIVE: $(ENTRA_INCLUDE_APP_REGISTRATIONS_EFFECTIVE)
+          ENTRA_INCLUDE_ENTERPRISE_APPS_EFFECTIVE: $(ENTRA_INCLUDE_ENTERPRISE_APPS_EFFECTIVE)
 
       - task: Bash@3
         displayName: Validate Entra backup outputs

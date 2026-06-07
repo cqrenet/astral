@@ -441,7 +441,7 @@ def resolve_required_resource_access(
                 "https://graph.microsoft.com/v1.0/servicePrincipals"
                 + "?$top=1"
                 + "&$select=id,appId,displayName,appRoles,oauth2PermissionScopes"
-                + "&$filter=appId eq '"
+                + "&$filter=appId%20eq%20'"
                 + urllib.parse.quote(_quote_odata_literal(resource_app_id))
                 + "'"
             )
