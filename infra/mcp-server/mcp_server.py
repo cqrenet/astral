@@ -500,6 +500,55 @@ def audit_briefing(workload: str = "intune") -> str:
     )
 
 
+@mcp.tool()
+def get_pim_policies(role_name: str = "") -> str:
+    """Retrieve PIM role governance policies — activation duration, approval, MFA requirements.
+
+    Returns data from tenant-state/entra/PIM Role Policies/ (populated by export_entra_identity.py).
+    Each entry includes the role display name and a rules dict keyed by rule type.
+
+    Args:
+        role_name: Optional case-insensitive substring to filter by role name (e.g. "Global Administrator").
+                   Omit to return all roles with a PIM governance policy.
+
+    Use this to answer questions like:
+    - "Does Global Administrator require approval to activate?"
+    - "Which roles allow activation longer than 8 hours?"
+    - "Which roles don't require MFA for activation?"
+    """
+    try:
+        result = _get_client().get_pim_policies(role_name)
+        if not result:
+            msg = "No PIM policies found"
+            if role_name:
+                msg += f" matching '{role_name}'"
+            return msg + ". Requires RoleManagementPolicy.Read.Directory permission and export_entra_identity.py --include-pim-policies true."
+        return _jsonify(result)
+    except Exception as exc:
+        return f"Error: {exc}"
+
+
+@mcp.tool()
+def get_security_settings() -> str:
+    """Retrieve tenant security defaults and authorization policy.
+
+    Returns data from tenant-state/entra/Security/ (populated by export_entra_identity.py).
+    Covers: identitySecurityDefaultsEnforcementPolicy and authorizationPolicy.
+
+    Use this to answer questions like:
+    - "Are security defaults enabled?"
+    - "Can guests invite other guests?"
+    - "Is self-service password reset enabled for all users?"
+    """
+    try:
+        result = _get_client().get_security_settings()
+        if not result:
+            return "No security settings found. Requires export_entra_identity.py --include-security-settings true."
+        return _jsonify(result)
+    except Exception as exc:
+        return f"Error: {exc}"
+
+
 @mcp.prompt()
 def security_posture_briefing() -> str:
     """Generate a security posture briefing covering identity, access, and policy controls."""
@@ -507,16 +556,22 @@ def security_posture_briefing() -> str:
         "You are an ASTRAL tenant security analyst. Generate a security posture briefing covering:\n\n"
         "1. PRIVILEGED ACCESS: Call get_privileged_role_assignments() to list all role assignments. "
         "Flag any permanent Global Administrator or Exchange Administrator assignments, roles with >3 "
-        "permanent members, and roles where PIM-eligible assignments outnumber permanent ones (good hygiene).\n\n"
-        "2. CONDITIONAL ACCESS GROUPS: Call get_ca_groups() to review groups referenced in CA policies. "
-        "Flag any exclusion groups with >50 members, any group named with terms like 'all', 'everyone', "
-        "or 'users', and any groups with unexpectedly high member counts.\n\n"
-        "3. AUTHENTICATION METHODS: Call get_policy('entra', 'Authentication Methods', "
-        "'Authentication Methods Policy') to check which authentication methods are enabled. "
-        "Flag if SMS or voice call are enabled (lower assurance) or if FIDO2 is disabled.\n\n"
-        "4. RECENT DRIFT: Call get_recent_drift(workload='entra', hours=168) to review the last 7 days "
-        "of configuration changes. Highlight any CA policy changes, new role assignments, or auth method changes.\n\n"
-        "Summarize findings with a risk rating (Low/Medium/High) per section and a list of recommended actions."
+        "permanent members, and any AU-scoped assignments (check directoryScopeDisplayName ≠ '/').\n\n"
+        "2. PIM GOVERNANCE: Call get_pim_policies('Global Administrator') and spot-check other "
+        "sensitive roles. Flag roles where approval is not required, activation duration >8 hours, "
+        "or MFA is not enforced on activation.\n\n"
+        "3. CONDITIONAL ACCESS GROUPS: Call get_ca_groups() to review CA-referenced groups. "
+        "Flag exclusion groups with >50 members, groups marked privileged=true in exclusion position, "
+        "and any groups with a previousDisplayName (recently renamed).\n\n"
+        "4. AUTHENTICATION METHODS: Call get_policy('entra', 'Authentication Methods', "
+        "'Authentication Methods Policy') and check method states. "
+        "Flag if SMS or voice call are enabled (lower assurance) or FIDO2 is disabled.\n\n"
+        "5. SECURITY SETTINGS: Call get_security_settings(). Flag if security defaults are disabled "
+        "(expected when CA policies are in use — verify CA coverage compensates), and review "
+        "authorizationPolicy for overly permissive guest invite settings.\n\n"
+        "6. RECENT DRIFT: Call get_recent_drift(workload='entra', hours=168) for the last 7 days. "
+        "Highlight CA policy changes, role assignment changes, and auth method changes.\n\n"
+        "Summarize findings with a risk rating (Low/Medium/High) per section and recommended actions."
     )
 
 

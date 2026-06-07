@@ -53,6 +53,9 @@ _WORKLOAD_CATEGORIES: dict[str, list[str]] = {
         "Authentication Methods",
         "Cross-Tenant Access",
         "Identity Protection",
+        # v2
+        "PIM Role Policies",
+        "Security",
     ],
 }
 
@@ -618,6 +621,51 @@ class AstralMcpClient:
             except Exception:  # noqa: BLE001
                 continue
         return sorted(groups, key=lambda g: str(g.get("displayName") or "").casefold())
+
+    def get_pim_policies(self, role_name: str = "") -> list[dict[str, Any]]:
+        """Return PIM governance policies optionally filtered by role name.
+
+        Reads from tenant-state/entra/PIM Role Policies/ — populated by export_entra_identity.py.
+        Each entry includes the role name, policy ID, and a rules dict keyed by rule type
+        (expirationRule, approvalRule, authenticationContextRule, etc.).
+
+        Args:
+            role_name: Optional case-insensitive substring to filter by role display name.
+        """
+        path = "tenant-state/entra/PIM Role Policies"
+        if self.local_root:
+            policies = self._list_local_json_recursive(path)
+        else:
+            policies = self._list_remote_json_recursive(path)
+        results: list[dict[str, Any]] = []
+        name_filter = (role_name or "").lower()
+        for item in policies:
+            try:
+                raw = self._read_local_file(item["path"]) if self.local_root else self._read_remote_file(item["path"])
+                data = json.loads(raw)
+                if not isinstance(data, dict):
+                    continue
+                if name_filter and name_filter not in str(data.get("roleDisplayName") or "").lower():
+                    continue
+                results.append(data)
+            except Exception:  # noqa: BLE001
+                continue
+        return sorted(results, key=lambda r: str(r.get("roleDisplayName") or "").casefold())
+
+    def get_security_settings(self) -> dict[str, Any]:
+        """Return security defaults and authorization policy from tenant-state/entra/Security/."""
+        result: dict[str, Any] = {}
+        for filename, key in (
+            ("Security Defaults.json", "securityDefaults"),
+            ("Authorization Policy.json", "authorizationPolicy"),
+        ):
+            path = f"tenant-state/entra/Security/{filename}"
+            try:
+                raw = self._read_local_file(path) if self.local_root else self._read_remote_file(path)
+                result[key] = json.loads(raw)
+            except Exception:  # noqa: BLE001
+                pass
+        return result
 
     def get_privileged_role_assignments(self, role_name: str = "") -> list[dict[str, Any]]:
         """Return directory role assignments (permanent + PIM-eligible) optionally filtered by role name.

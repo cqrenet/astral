@@ -1,21 +1,28 @@
 #!/usr/bin/env python3
-"""Export Entra identity objects for ASTRAL Phase 1.
+"""Export Entra identity objects for ASTRAL Phase 1 and v2.
 
-Covers:
-  1.1  Security groups referenced in Conditional Access policies (with member counts)
-  1.2  Directory role assignments — permanent direct and PIM-eligible
-  1.3  Authentication methods policy (full configuration per method)
+Phase 1:
+  1.1  Security groups referenced in CA policies — member counts, ownership, name-change detection
+  1.2  Directory role assignments — permanent and PIM-eligible, with AU scope resolution
+  1.3  Authentication methods policy
   1.4  Cross-tenant access settings and external collaboration policy
-  1.5  Identity Protection risk policies (sign-in risk, user risk)
+  1.5  Identity Protection risk policies
+
+v2:
+  2.1  Role-assignable groups — auto-watched with full membership and owners
+  2.2  PIM role governance policies — per-role activation, approval, MFA settings
+  2.3  Security settings — security defaults, authorization policy
 """
 
 from __future__ import annotations
 
 import argparse
+import base64
 import json
 import os
 import pathlib
 import re
+import subprocess
 import time
 import urllib.error
 import urllib.parse
@@ -66,6 +73,38 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--include-privileged-groups",
+        default="true",
+        help="Auto-watch all role-assignable groups (isAssignableToRole=true) with full member tracking (true/false).",
+    )
+    parser.add_argument(
+        "--include-pim-policies",
+        default="true",
+        help="Export PIM role governance policies — activation duration, approval, MFA settings (true/false).",
+    )
+    parser.add_argument(
+        "--include-security-settings",
+        default="true",
+        help="Export security defaults and authorization policy (true/false).",
+    )
+    parser.add_argument(
+        "--reports-root",
+        default="",
+        help=(
+            "Directory where markdown summary reports are written. "
+            "Defaults to <root>/../reports/<root-name> (e.g. tenant-state/reports/entra). "
+            "Pass explicitly to match the pipeline reports path."
+        ),
+    )
+    parser.add_argument(
+        "--previous-snapshot-ref",
+        default="",
+        help=(
+            "Git branch or ref of the previous snapshot (e.g. origin/drift/entra). "
+            "Used to detect group renames and compute member deltas for watched groups."
+        ),
+    )
+    parser.add_argument(
         "--fail-on-export-error",
         default="true",
         help="Fail with non-zero exit code when any requested export category fails (true/false).",
@@ -94,6 +133,115 @@ def sanitize_filename(value: str) -> str:
 def write_json(path: pathlib.Path, data: Any) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(data, indent=5, ensure_ascii=False) + "\n", encoding="utf-8")
+
+
+# ---------------------------------------------------------------------------
+# Git helpers (for previous-snapshot lookups)
+# ---------------------------------------------------------------------------
+
+def _git(repo_root: pathlib.Path, args: list[str]) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        ["git", *args],
+        cwd=str(repo_root),
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+
+def _discover_repo_root(start: pathlib.Path) -> pathlib.Path | None:
+    proc = _git(start, ["rev-parse", "--show-toplevel"])
+    if proc.returncode != 0:
+        return None
+    top = (proc.stdout or "").strip()
+    return pathlib.Path(top).resolve() if top else None
+
+
+def _resolve_branch_ref(repo_root: pathlib.Path, raw: str) -> str:
+    """Return the first resolvable ref from *raw* (strips origin/ prefixes, tries remote then local)."""
+    branch = (raw or "").strip()
+    if not branch or (branch.startswith("$(") and branch.endswith(")")):
+        return ""
+    for prefix in ("refs/remotes/origin/", "refs/heads/", "origin/"):
+        if branch.startswith(prefix):
+            branch = branch[len(prefix):]
+    for ref in (f"refs/remotes/origin/{branch}", f"refs/heads/{branch}"):
+        if _git(repo_root, ["show-ref", "--verify", "--quiet", ref]).returncode == 0:
+            return f"origin/{branch}" if "remotes" in ref else branch
+    return ""
+
+
+class PreviousGroupLookup:
+    """Read group snapshots from a previous git ref for rename / member-delta detection."""
+
+    def __init__(self, repo_root: pathlib.Path, ref: str, groups_dir_rel: str) -> None:
+        self._repo_root = repo_root
+        self._ref = ref
+        self._paths_by_id: dict[str, str] = {}
+        self._cache: dict[str, dict[str, Any] | None] = {}
+        if not ref or not groups_dir_rel:
+            return
+        proc = _git(repo_root, ["ls-tree", "-r", "--name-only", ref, "--", groups_dir_rel])
+        if proc.returncode != 0:
+            return
+        for line in proc.stdout.splitlines():
+            rel = line.strip()
+            if not rel.endswith(".json"):
+                continue
+            stem = pathlib.PurePosixPath(rel).name[:-5]
+            if "__" in stem:
+                gid = stem.rsplit("__", 1)[-1].strip().lower()
+                if gid:
+                    self._paths_by_id[gid] = rel
+
+    def get(self, group_id: str) -> dict[str, Any] | None:
+        gid = group_id.strip().lower()
+        if gid in self._cache:
+            return self._cache[gid]
+        rel = self._paths_by_id.get(gid)
+        if not rel:
+            self._cache[gid] = None
+            return None
+        try:
+            content = _git(self._repo_root, ["show", f"{self._ref}:{rel}"]).stdout
+            data = json.loads(content)
+            self._cache[gid] = data if isinstance(data, dict) else None
+        except Exception:  # noqa: BLE001
+            self._cache[gid] = None
+        return self._cache[gid]
+
+
+# ---------------------------------------------------------------------------
+# Token capability report
+# ---------------------------------------------------------------------------
+
+_CAPABILITY_MAP = [
+    ({"Group.Read.All"}, "Groups snapshot (CA-referenced + watched)"),
+    ({"RoleManagement.Read.Directory"}, "Permanent role assignments"),
+    ({"RoleEligibilitySchedule.Read.Directory"}, "PIM-eligible role assignments"),
+    ({"RoleManagementPolicy.Read.Directory"}, "PIM role governance policies"),
+    ({"Policy.Read.All"}, "Auth methods, cross-tenant access, security settings"),
+    ({"IdentityRiskyUser.Read.All", "IdentityRiskPolicy.Read.All"}, "Identity Protection risk policies"),
+]
+
+
+def _report_token_capabilities(token: str) -> None:
+    """Decode the Graph JWT payload and log which export categories the token supports."""
+    try:
+        parts = token.split(".")
+        if len(parts) < 2:
+            return
+        padded = parts[1] + "=" * (4 - len(parts[1]) % 4)
+        payload = json.loads(base64.b64decode(padded).decode("utf-8"))
+        roles: set[str] = set(payload.get("roles") or [])
+    except Exception:  # noqa: BLE001
+        return
+
+    log("Token capabilities:")
+    for required, description in _CAPABILITY_MAP:
+        icon = "✓" if (roles & required) else "○"
+        log(f"  {icon}  {description}")
+    log("")
 
 
 # ---------------------------------------------------------------------------
@@ -287,9 +435,65 @@ def _fetch_group(client: GraphClient, group_id: str) -> tuple[dict | None, str |
     url = (
         "https://graph.microsoft.com/v1.0/groups/"
         + urllib.parse.quote(group_id)
-        + "?$select=id,displayName,description,groupTypes,securityEnabled,mailEnabled,mail"
+        + "?$select=id,displayName,description,groupTypes,securityEnabled,mailEnabled,mail,"
+        "membershipRule,membershipRuleProcessingState,isAssignableToRole"
     )
     return client.get_object(url)
+
+
+def _fetch_group_owners(client: GraphClient, group_id: str) -> tuple[list[dict[str, str]], str | None]:
+    url = (
+        "https://graph.microsoft.com/v1.0/groups/"
+        + urllib.parse.quote(group_id)
+        + "/owners?$select=id,displayName,userPrincipalName"
+    )
+    raw, error = client.get_collection(url)
+    owners: list[dict[str, str]] = []
+    for o in raw:
+        if not isinstance(o, dict):
+            continue
+        odata_type = str(o.get("@odata.type") or "").lower()
+        owner_type = "user" if "user" in odata_type else ("servicePrincipal" if "serviceprincipal" in odata_type else "unknown")
+        owners.append({
+            "id": str(o.get("id") or ""),
+            "displayName": str(o.get("displayName") or ""),
+            "userPrincipalName": str(o.get("userPrincipalName") or ""),
+            "type": owner_type,
+        })
+    owners.sort(key=lambda x: str(x.get("userPrincipalName") or x.get("displayName") or "").casefold())
+    return owners, error
+
+
+def _fetch_privileged_group_ids(client: GraphClient) -> set[str]:
+    """Return IDs of all role-assignable groups (isAssignableToRole=true)."""
+    groups, error = client.get_collection(
+        "https://graph.microsoft.com/v1.0/groups"
+        "?$filter=isAssignableToRole%20eq%20true"
+        "&$select=id,displayName"
+    )
+    if error:
+        log(f"  Warning: could not fetch role-assignable groups ({error}) — privileged group auto-watch skipped.")
+        return set()
+    ids = {str(g.get("id") or "").strip().lower() for g in groups if isinstance(g, dict) and g.get("id")}
+    if ids:
+        log(f"  Found {len(ids)} role-assignable group(s) — auto-adding to watch list.")
+    return ids
+
+
+def _compute_member_delta(
+    current: list[dict[str, str]],
+    previous: list[dict[str, str]] | None,
+) -> dict[str, list[dict[str, str]]] | None:
+    """Return {added, removed} member sets compared to the previous snapshot, or None if no previous."""
+    if previous is None:
+        return None
+    current_ids = {m["id"]: m for m in current if m.get("id")}
+    previous_ids = {m["id"]: m for m in previous if m.get("id")}
+    added = [current_ids[i] for i in current_ids if i not in previous_ids]
+    removed = [previous_ids[i] for i in previous_ids if i not in current_ids]
+    added.sort(key=lambda x: str(x.get("userPrincipalName") or x.get("displayName") or "").casefold())
+    removed.sort(key=lambda x: str(x.get("userPrincipalName") or x.get("displayName") or "").casefold())
+    return {"added": added, "removed": removed}
 
 
 def _fetch_member_count(client: GraphClient, group_id: str) -> int | None:
@@ -339,32 +543,42 @@ def export_groups(
     client: GraphClient,
     root: pathlib.Path,
     fail_on_error: bool,
+    reports_root: pathlib.Path | None = None,
     watch_groups: set[str] | None = None,
+    privileged_group_ids: set[str] | None = None,
+    previous_lookup: PreviousGroupLookup | None = None,
 ) -> tuple[int, list[tuple[str, str]]]:
     """Export security groups to tenant-state/entra/Groups/.
 
-    All CA-referenced groups are exported with member counts.
-    Groups in *watch_groups* are additionally exported with the full member list,
-    and are always included even if not referenced in any CA policy.
+    All CA-referenced groups are exported with member counts, ownership, and
+    dynamic membership rules.  Groups that are watched or role-assignable receive
+    the full member list and member-delta summary.  All groups are checked for
+    display-name changes against the previous snapshot.
     """
     watch_groups = watch_groups or set()
+    privileged_group_ids = privileged_group_ids or set()
+
+    # Effective watch set = explicit watch list ∪ privileged (role-assignable) groups
+    effective_watch = watch_groups | privileged_group_ids
+
     ca_dir = root / "Conditional Access"
     refs = _collect_ca_group_ids(ca_dir)
 
-    # Merge: CA-referenced groups ∪ watched groups (with empty CA ref set for the latter)
-    all_group_ids: set[str] = set(refs)
-    for gid in watch_groups:
+    # Merge: CA-referenced ∪ all watched (with empty CA ref set for non-CA groups)
+    for gid in effective_watch:
         if gid not in refs:
             refs[gid] = set()
-            all_group_ids.add(gid)
 
-    if not all_group_ids:
+    if not refs:
         log("No CA-referenced or watched groups found. Skipping groups export.")
         return 0, []
 
-    ca_count = len([g for g in all_group_ids if g in refs and refs[g]])
-    watch_only_count = len(watch_groups - set(g for g, v in refs.items() if v))
-    log(f"Exporting {len(all_group_ids)} group(s): {ca_count} CA-referenced, {len(watch_groups)} watched ({watch_only_count} watch-only).")
+    ca_count = sum(1 for v in refs.values() if v)
+    watch_only = len(effective_watch - {g for g, v in refs.items() if v})
+    log(
+        f"Exporting {len(refs)} group(s): {ca_count} CA-referenced, "
+        f"{len(effective_watch)} watched ({watch_only} watch-only)."
+    )
 
     out_dir = root / "Groups"
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -380,8 +594,18 @@ def export_groups(
             failed.append((group_id, msg))
             continue
 
-        is_watched = group_id.lower() in watch_groups
+        is_watched = group_id.lower() in effective_watch
+        is_privileged = group_id.lower() in privileged_group_ids
         display_name = str(group.get("displayName") or group_id).strip()
+
+        # Name-change detection
+        prev = previous_lookup.get(group_id) if previous_lookup else None
+        previous_display_name: str | None = None
+        if prev and isinstance(prev, dict):
+            prev_name = str(prev.get("displayName") or "").strip()
+            if prev_name and prev_name != display_name:
+                previous_display_name = prev_name
+                log(f"  Rename detected: '{prev_name}' → '{display_name}'")
 
         snapshot: dict[str, Any] = {
             "id": group_id,
@@ -391,18 +615,42 @@ def export_groups(
             "securityEnabled": group.get("securityEnabled"),
             "mailEnabled": group.get("mailEnabled"),
             "mail": group.get("mail"),
+            "membershipRule": group.get("membershipRule"),
+            "membershipRuleProcessingState": group.get("membershipRuleProcessingState"),
+            "isAssignableToRole": group.get("isAssignableToRole"),
             "watched": is_watched,
+            "privileged": is_privileged,
             "caReferences": sorted(policy_names),
         }
+        if previous_display_name is not None:
+            snapshot["previousDisplayName"] = previous_display_name
 
         if is_watched:
+            # Full member list + delta
             members, members_error = _fetch_group_members(client, group_id)
             if members_error:
-                log(f"  Warning: could not fetch members for watched group {display_name}: {members_error}")
+                log(f"  Warning: could not fetch members for group {display_name}: {members_error}")
                 failed.append((f"{group_id} (members)", members_error))
             snapshot["memberCount"] = len(members)
             snapshot["members"] = members
-            log(f"  Group (watched): {display_name} — {len(members)} member(s) (full list)")
+
+            prev_members = prev.get("members") if isinstance(prev, dict) else None
+            delta = _compute_member_delta(members, prev_members)
+            if delta is not None:
+                snapshot["memberDelta"] = delta
+                added_n, removed_n = len(delta["added"]), len(delta["removed"])
+                if added_n or removed_n:
+                    log(f"  Group (watched): {display_name} — {len(members)} member(s) (+{added_n} −{removed_n})")
+                else:
+                    log(f"  Group (watched): {display_name} — {len(members)} member(s) (no change)")
+            else:
+                log(f"  Group (watched): {display_name} — {len(members)} member(s) (first snapshot)")
+
+            # Owners for watched/privileged groups
+            owners, owners_error = _fetch_group_owners(client, group_id)
+            if owners_error:
+                log(f"  Warning: could not fetch owners for group {display_name}: {owners_error}")
+            snapshot["owners"] = owners
         else:
             member_count = _fetch_member_count(client, group_id)
             snapshot["memberCount"] = member_count
@@ -412,29 +660,31 @@ def export_groups(
         write_json(out_dir / file_name, snapshot)
         written += 1
 
-    # Summary markdown
-    md_lines = [
-        "# Groups",
-        "",
-        "Security groups referenced in Conditional Access policies or explicitly watched.",
-        f"Object count: **{written}**",
-        "",
-        "| Name | Id | Members | Watched | CA Policies |",
-        "|---|---|---|---|---|",
-    ]
-    for gf in sorted(out_dir.glob("*.json")):
-        try:
-            data = json.loads(gf.read_text(encoding="utf-8"))
-        except Exception:  # noqa: BLE001
-            continue
-        name = str(data.get("displayName") or "").replace("|", "\\|")
-        gid = str(data.get("id") or "")
-        count = data.get("memberCount")
-        count_str = str(count) if count is not None else "?"
-        watched_str = "Yes" if data.get("watched") else ""
-        policies = ", ".join(str(p) for p in (data.get("caReferences") or []))
-        md_lines.append(f"| {name} | {gid} | {count_str} | {watched_str} | {policies} |")
-    (out_dir / "Groups.md").write_text("\n".join(md_lines) + "\n", encoding="utf-8")
+    if reports_root is not None and reports_root.mkdir(parents=True, exist_ok=True) is None:
+        md_lines = [
+            "# Groups",
+            "",
+            "Security groups referenced in Conditional Access policies, explicitly watched, or role-assignable.",
+            f"Object count: **{written}**",
+            "",
+            "| Name | Id | Members | Privileged | Watched | CA Policies |",
+            "|---|---|---|---|---|---|",
+        ]
+        for gf in sorted(out_dir.glob("*.json")):
+            try:
+                data = json.loads(gf.read_text(encoding="utf-8"))
+            except Exception:  # noqa: BLE001
+                continue
+            name = str(data.get("displayName") or "").replace("|", "\\|")
+            rename = f" *(was: {data['previousDisplayName']})*" if data.get("previousDisplayName") else ""
+            gid = str(data.get("id") or "")
+            count = data.get("memberCount")
+            count_str = str(count) if count is not None else "?"
+            privileged_str = "Yes" if data.get("privileged") else ""
+            watched_str = "Yes" if data.get("watched") else ""
+            policies = ", ".join(str(p) for p in (data.get("caReferences") or []))
+            md_lines.append(f"| {name}{rename} | {gid} | {count_str} | {privileged_str} | {watched_str} | {policies} |")
+        (reports_root / "groups.md").write_text("\n".join(md_lines) + "\n", encoding="utf-8")
 
     return written, failed
 
@@ -483,20 +733,46 @@ def _batch_resolve_principals(
     return result
 
 
+def _batch_resolve_au_scopes(
+    client: GraphClient,
+    scope_ids: set[str],
+) -> dict[str, str]:
+    """Resolve administrative unit IDs to display names. Returns {au_id: displayName}."""
+    au_ids = {s for s in scope_ids if s and s != "/" and "/administrativeUnits/" in s}
+    resolved: dict[str, str] = {}
+    for scope in au_ids:
+        au_id = scope.rstrip("/").rsplit("/", 1)[-1]
+        if not au_id:
+            continue
+        payload, error = client.get_object(
+            "https://graph.microsoft.com/v1.0/directory/administrativeUnits/"
+            + urllib.parse.quote(au_id)
+            + "?$select=id,displayName"
+        )
+        if not error and isinstance(payload, dict):
+            resolved[scope] = str(payload.get("displayName") or au_id)
+        else:
+            resolved[scope] = au_id
+    return resolved
+
+
 def _normalize_assignment(
     assignment: dict,
     principal_by_id: dict[str, dict[str, str]],
     assignment_type: str,
+    scope_display: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     principal_id = str(assignment.get("principalId") or "").strip()
     principal_info = principal_by_id.get(principal_id, {})
+    scope_id = str(assignment.get("directoryScopeId") or "/")
     entry: dict[str, Any] = {
         "id": str(assignment.get("id") or ""),
         "principalId": principal_id,
         "principalDisplayName": principal_info.get("displayName", ""),
         "principalType": principal_info.get("principalType", ""),
         "userPrincipalName": principal_info.get("userPrincipalName", ""),
-        "directoryScopeId": str(assignment.get("directoryScopeId") or "/"),
+        "directoryScopeId": scope_id,
+        "directoryScopeDisplayName": (scope_display or {}).get(scope_id, "/" if scope_id == "/" else scope_id),
         "assignmentType": assignment_type,
     }
     if assignment_type == "eligible":
@@ -509,6 +785,7 @@ def export_role_assignments(
     client: GraphClient,
     root: pathlib.Path,
     fail_on_error: bool,
+    reports_root: pathlib.Path | None = None,
 ) -> tuple[int, list[tuple[str, str]]]:
     """Export directory role definitions with permanent and PIM-eligible assignments."""
     failed: list[tuple[str, str]] = []
@@ -575,6 +852,18 @@ def export_role_assignments(
         log(f"Resolving {len(all_principal_ids)} unique principal(s)...")
         principal_by_id = _batch_resolve_principals(client, all_principal_ids)
 
+    # Resolve administrative unit scope names for non-tenant-wide assignments
+    all_scope_ids = {
+        str(a.get("directoryScopeId") or "/")
+        for a in (perm_assignments + eligible_assignments)
+        if isinstance(a, dict)
+    }
+    scope_display: dict[str, str] = {}
+    au_scopes = {s for s in all_scope_ids if s != "/" and "/administrativeUnits/" in s}
+    if au_scopes:
+        log(f"Resolving {len(au_scopes)} administrative unit scope(s)...")
+        scope_display = _batch_resolve_au_scopes(client, au_scopes)
+
     # Group assignments by role definition ID
     perm_by_role: dict[str, list[dict]] = {}
     for assignment in perm_assignments:
@@ -617,11 +906,11 @@ def export_role_assignments(
             "description": role_def.get("description"),
             "isBuiltIn": role_def.get("isBuiltIn"),
             "permanentAssignments": sorted(
-                [_normalize_assignment(a, principal_by_id, "permanent") for a in perm],
+                [_normalize_assignment(a, principal_by_id, "permanent", scope_display) for a in perm],
                 key=_sort_key,
             ),
             "eligibleAssignments": sorted(
-                [_normalize_assignment(a, principal_by_id, "eligible") for a in eligible],
+                [_normalize_assignment(a, principal_by_id, "eligible", scope_display) for a in eligible],
                 key=_sort_key,
             ),
         }
@@ -641,32 +930,32 @@ def export_role_assignments(
             "displayName": role_id,
             "description": None,
             "isBuiltIn": None,
-            "permanentAssignments": [_normalize_assignment(a, principal_by_id, "permanent") for a in perm],
-            "eligibleAssignments": [_normalize_assignment(a, principal_by_id, "eligible") for a in eligible],
+            "permanentAssignments": [_normalize_assignment(a, principal_by_id, "permanent", scope_display) for a in perm],
+            "eligibleAssignments": [_normalize_assignment(a, principal_by_id, "eligible", scope_display) for a in eligible],
         }
         write_json(out_dir / f"Unknown Role__{role_id}.json", snapshot)
         written += 1
 
-    # Summary markdown
-    md_lines = [
-        "# Role Assignments",
-        "",
-        "Directory roles with at least one permanent or PIM-eligible assignment.",
-        f"Object count: **{written}**",
-        "",
-        "| Role | Permanent | Eligible |",
-        "|---|---|---|",
-    ]
-    for rf in sorted(out_dir.glob("*.json")):
-        try:
-            data = json.loads(rf.read_text(encoding="utf-8"))
-        except Exception:  # noqa: BLE001
-            continue
-        name = str(data.get("displayName") or "").replace("|", "\\|")
-        perm_count = len(data.get("permanentAssignments") or [])
-        elig_count = len(data.get("eligibleAssignments") or [])
-        md_lines.append(f"| {name} | {perm_count} | {elig_count} |")
-    (out_dir / "Role Assignments.md").write_text("\n".join(md_lines) + "\n", encoding="utf-8")
+    if reports_root is not None and reports_root.mkdir(parents=True, exist_ok=True) is None:
+        md_lines = [
+            "# Role Assignments",
+            "",
+            "Directory roles with at least one permanent or PIM-eligible assignment.",
+            f"Object count: **{written}**",
+            "",
+            "| Role | Permanent | Eligible |",
+            "|---|---|---|",
+        ]
+        for rf in sorted(out_dir.glob("*.json")):
+            try:
+                data = json.loads(rf.read_text(encoding="utf-8"))
+            except Exception:  # noqa: BLE001
+                continue
+            name = str(data.get("displayName") or "").replace("|", "\\|")
+            perm_count = len(data.get("permanentAssignments") or [])
+            elig_count = len(data.get("eligibleAssignments") or [])
+            md_lines.append(f"| {name} | {perm_count} | {elig_count} |")
+        (reports_root / "role-assignments.md").write_text("\n".join(md_lines) + "\n", encoding="utf-8")
 
     log(f"Exported role assignments for {written} role(s).")
     return written, failed
@@ -680,6 +969,7 @@ def export_auth_methods_policy(
     client: GraphClient,
     root: pathlib.Path,
     fail_on_error: bool,
+    reports_root: pathlib.Path | None = None,
 ) -> tuple[int, list[tuple[str, str]]]:
     """Export the authentication methods policy including per-method configurations."""
     failed: list[tuple[str, str]] = []
@@ -697,22 +987,19 @@ def export_auth_methods_policy(
     out_dir.mkdir(parents=True, exist_ok=True)
     write_json(out_dir / "Authentication Methods Policy.json", policy)
 
-    # Summary markdown
     method_configs = policy.get("authenticationMethodConfigurations") or []
-    md_lines = [
-        "# Authentication Methods Policy",
-        "",
-        f"Source: `https://graph.microsoft.com/v1.0/policies/authenticationMethodsPolicy`",
-        f"Object count: **1**",
-        "",
-        "| Method | State |",
-        "|---|---|",
-    ]
-    for method in sorted(method_configs, key=lambda m: str(m.get("id") or "").casefold()):
-        method_id = str(method.get("id") or "").replace("|", "\\|")
-        state = str(method.get("state") or "")
-        md_lines.append(f"| {method_id} | {state} |")
-    (out_dir / "Authentication Methods.md").write_text("\n".join(md_lines) + "\n", encoding="utf-8")
+    if reports_root is not None and reports_root.mkdir(parents=True, exist_ok=True) is None:
+        md_lines = [
+            "# Authentication Methods Policy",
+            "",
+            "| Method | State |",
+            "|---|---|",
+        ]
+        for method in sorted(method_configs, key=lambda m: str(m.get("id") or "").casefold()):
+            method_id = str(method.get("id") or "").replace("|", "\\|")
+            state = str(method.get("state") or "")
+            md_lines.append(f"| {method_id} | {state} |")
+        (reports_root / "auth-methods-policy.md").write_text("\n".join(md_lines) + "\n", encoding="utf-8")
 
     log(f"Exported authentication methods policy ({len(method_configs)} method configuration(s)).")
     return 1, failed
@@ -726,6 +1013,7 @@ def export_cross_tenant_access(
     client: GraphClient,
     root: pathlib.Path,
     fail_on_error: bool,
+    reports_root: pathlib.Path | None = None,
 ) -> tuple[int, list[tuple[str, str]]]:
     """Export cross-tenant access policy (default + partners) and external identities policy."""
     failed: list[tuple[str, str]] = []
@@ -766,21 +1054,7 @@ def export_cross_tenant_access(
             written += 1
         log(f"  Exported {len(partners)} cross-tenant access partner setting(s).")
 
-        # Partners summary markdown
-        md_lines = [
-            "# Cross-Tenant Access Partners",
-            "",
-            f"Source: `https://graph.microsoft.com/v1.0/policies/crossTenantAccessPolicy/partners`",
-            f"Object count: **{len(partners)}**",
-            "",
-            "| Tenant | Id |",
-            "|---|---|",
-        ]
-        for p in sorted(partners, key=lambda x: str(x.get("displayName") or x.get("tenantId") or "").casefold()):
-            name = str(p.get("displayName") or p.get("tenantId") or "").replace("|", "\\|")
-            tid = str(p.get("tenantId") or "")
-            md_lines.append(f"| {name} | {tid} |")
-        (partners_dir / "Cross-Tenant Access Partners.md").write_text("\n".join(md_lines) + "\n", encoding="utf-8")
+        pass  # partners summary folded into the consolidated cross-tenant report below
 
     # External identities / collaboration policy.
     # HTTP 400 means the policy is not configured for this tenant type — treat as informational.
@@ -800,19 +1074,43 @@ def export_cross_tenant_access(
         written += 1
         log("  Exported external collaboration settings.")
 
-    # Top-level summary markdown
-    md_lines = [
-        "# Cross-Tenant Access",
-        "",
-        f"Object count: **{written}**",
-        "",
-        "| Item | Path |",
-        "|---|---|",
-        "| Default Settings | Cross-Tenant Access/Default Settings.json |",
-        "| Partners | Cross-Tenant Access/Partners/ |",
-        "| External Collaboration Settings | Cross-Tenant Access/External Collaboration Settings.json |",
-    ]
-    (out_dir / "Cross-Tenant Access.md").write_text("\n".join(md_lines) + "\n", encoding="utf-8")
+    if reports_root is not None and reports_root.mkdir(parents=True, exist_ok=True) is None:
+        # Load default settings for inline summary
+        default_path = out_dir / "Default Settings.json"
+        default_data: dict = {}
+        try:
+            default_data = json.loads(default_path.read_text(encoding="utf-8")) if default_path.exists() else {}
+        except Exception:  # noqa: BLE001
+            pass
+
+        # Load partners
+        partner_rows: list[tuple[str, str]] = []
+        for pf in sorted((out_dir / "Partners").glob("*.json")) if (out_dir / "Partners").is_dir() else []:
+            try:
+                p = json.loads(pf.read_text(encoding="utf-8"))
+                name = str(p.get("displayName") or p.get("tenantId") or "").replace("|", "\\|")
+                tid = str(p.get("tenantId") or "")
+                partner_rows.append((name, tid))
+            except Exception:  # noqa: BLE001
+                continue
+
+        md_lines = [
+            "# Cross-Tenant Access",
+            "",
+            f"Object count: **{written}**",
+            "",
+        ]
+        if default_data:
+            md_lines += ["## Default Settings", "", "See `Cross-Tenant Access/Default Settings.json`.", ""]
+        if partner_rows:
+            md_lines += [f"## Partners ({len(partner_rows)})", "", "| Tenant | Id |", "|---|---|"]
+            for name, tid in partner_rows:
+                md_lines.append(f"| {name} | {tid} |")
+            md_lines.append("")
+        ext_path = out_dir / "External Collaboration Settings.json"
+        if ext_path.exists():
+            md_lines += ["## External Collaboration Settings", "", "See `Cross-Tenant Access/External Collaboration Settings.json`.", ""]
+        (reports_root / "cross-tenant-access.md").write_text("\n".join(md_lines) + "\n", encoding="utf-8")
 
     return written, failed
 
@@ -841,6 +1139,7 @@ def export_identity_protection(
     client: GraphClient,
     root: pathlib.Path,
     fail_on_error: bool,
+    reports_root: pathlib.Path | None = None,
 ) -> tuple[int, list[tuple[str, str]]]:
     """Export Identity Protection risk policies (sign-in risk, user risk)."""
     failed: list[tuple[str, str]] = []
@@ -865,14 +1164,13 @@ def export_identity_protection(
         state = str(policy.get("isEnabled", policy.get("state", "unknown")))
         log(f"  Exported {policy_spec['display']} (state: {state}).")
 
-    if written > 0:
-        # Summary markdown
+    if written > 0 and reports_root is not None and reports_root.mkdir(parents=True, exist_ok=True) is None:
         md_lines = [
             "# Identity Protection",
             "",
             f"Object count: **{written}**",
             "",
-            "| Policy | File |",
+            "| Policy | State |",
             "|---|---|",
         ]
         for spec in _IDENTITY_PROTECTION_POLICIES:
@@ -882,9 +1180,185 @@ def export_identity_protection(
                     data = json.loads(path.read_text(encoding="utf-8"))
                     state = str(data.get("isEnabled", data.get("state", "unknown")))
                 except Exception:  # noqa: BLE001
-                    state = ""
-                md_lines.append(f"| {spec['display'].title()} | {spec['filename']} |")
-        (out_dir / "Identity Protection.md").write_text("\n".join(md_lines) + "\n", encoding="utf-8")
+                    state = "unknown"
+                md_lines.append(f"| {spec['display'].title()} | {state} |")
+        (reports_root / "identity-protection.md").write_text("\n".join(md_lines) + "\n", encoding="utf-8")
+
+    return written, failed
+
+
+# ---------------------------------------------------------------------------
+# 2.2  PIM role governance policies
+# ---------------------------------------------------------------------------
+
+def export_pim_policies(
+    client: GraphClient,
+    root: pathlib.Path,
+    fail_on_error: bool,
+    reports_root: pathlib.Path | None = None,
+) -> tuple[int, list[tuple[str, str]]]:
+    """Export per-role PIM governance policies — activation duration, approval, MFA settings.
+
+    Requires RoleManagementPolicy.Read.Directory permission.
+    Stores one JSON file per role in tenant-state/entra/PIM Role Policies/.
+    """
+    failed: list[tuple[str, str]] = []
+
+    # Step 1: get all policy assignments (links role definitions to governance policies)
+    assignments, error = client.get_collection(
+        "https://graph.microsoft.com/v1.0/policies/roleManagementPolicyAssignments"
+        "?$filter=scopeId%20eq%20'/'%20and%20scopeType%20eq%20'DirectoryRole'"
+        "&$select=id,policyId,roleDefinitionId"
+    )
+    if error:
+        log(f"  Warning: could not fetch PIM policy assignments: {error}")
+        if error in ("HTTP 403", "HTTP 400", "HTTP 404"):
+            log("    PIM governance policies require RoleManagementPolicy.Read.Directory permission. Skipping.")
+        else:
+            failed.append(("PIM Policy Assignments", error))
+        return 0, failed
+
+    log(f"Fetched {len(assignments)} PIM policy assignment(s).")
+
+    # Step 2: fetch role definitions for display names
+    role_defs, error = client.get_collection(
+        "https://graph.microsoft.com/v1.0/roleManagement/directory/roleDefinitions"
+        "?$select=id,displayName,isBuiltIn"
+    )
+    role_name_by_id = {
+        str(r.get("id") or ""): str(r.get("displayName") or "")
+        for r in role_defs
+        if isinstance(r, dict) and r.get("id")
+    }
+
+    out_dir = root / "PIM Role Policies"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    written = 0
+
+    for assignment in assignments:
+        if not isinstance(assignment, dict):
+            continue
+        policy_id = str(assignment.get("policyId") or "").strip()
+        role_def_id = str(assignment.get("roleDefinitionId") or "").strip()
+        if not policy_id or not role_def_id:
+            continue
+
+        role_name = role_name_by_id.get(role_def_id, role_def_id)
+
+        # Step 3: fetch rules for this policy (activation duration, approval, MFA, etc.)
+        rules, error = client.get_collection(
+            "https://graph.microsoft.com/v1.0/policies/roleManagementPolicies/"
+            + urllib.parse.quote(policy_id)
+            + "/rules"
+        )
+        if error:
+            log(f"  Warning: could not fetch rules for policy {policy_id} (role: {role_name}): {error}")
+            failed.append((f"PIM rules for {role_name}", error))
+            continue
+
+        # Organise rules by @odata.type for readability
+        rules_by_type: dict[str, Any] = {}
+        for rule in rules:
+            if not isinstance(rule, dict):
+                continue
+            rule_type = str(rule.get("@odata.type") or rule.get("id") or "unknown")
+            # Strip the #microsoft.graph. prefix for cleaner keys
+            key = rule_type.replace("#microsoft.graph.", "")
+            rules_by_type[key] = rule
+
+        snapshot: dict[str, Any] = {
+            "roleDefinitionId": role_def_id,
+            "roleDisplayName": role_name,
+            "policyId": policy_id,
+            "rules": rules_by_type,
+        }
+
+        file_name = f"{sanitize_filename(role_name)}__{role_def_id}.json"
+        write_json(out_dir / file_name, snapshot)
+        written += 1
+
+    if reports_root is not None and reports_root.mkdir(parents=True, exist_ok=True) is None:
+        md_lines = [
+            "# PIM Role Policies",
+            "",
+            "Per-role PIM governance settings: activation duration, approval requirements, MFA enforcement.",
+            f"Object count: **{written}**",
+            "",
+            "| Role | Policy ID |",
+            "|---|---|",
+        ]
+        for rf in sorted(out_dir.glob("*.json")):
+            try:
+                data = json.loads(rf.read_text(encoding="utf-8"))
+            except Exception:  # noqa: BLE001
+                continue
+            name = str(data.get("roleDisplayName") or "").replace("|", "\\|")
+            pid = str(data.get("policyId") or "")
+            md_lines.append(f"| {name} | {pid} |")
+        (reports_root / "pim-role-policies.md").write_text("\n".join(md_lines) + "\n", encoding="utf-8")
+
+    log(f"Exported PIM governance policies for {written} role(s).")
+    return written, failed
+
+
+# ---------------------------------------------------------------------------
+# 2.3  Security settings
+# ---------------------------------------------------------------------------
+
+def export_security_settings(
+    client: GraphClient,
+    root: pathlib.Path,
+    fail_on_error: bool,
+    reports_root: pathlib.Path | None = None,
+) -> tuple[int, list[tuple[str, str]]]:
+    """Export security defaults and authorization policy to tenant-state/entra/Security/."""
+    failed: list[tuple[str, str]] = []
+    out_dir = root / "Security"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    written = 0
+
+    _SECURITY_ENDPOINTS = [
+        {
+            "url": "https://graph.microsoft.com/v1.0/policies/identitySecurityDefaultsEnforcementPolicy",
+            "filename": "Security Defaults.json",
+            "display": "security defaults",
+        },
+        {
+            "url": "https://graph.microsoft.com/v1.0/policies/authorizationPolicy",
+            "filename": "Authorization Policy.json",
+            "display": "authorization policy",
+        },
+    ]
+
+    for spec in _SECURITY_ENDPOINTS:
+        policy, error = client.get_object(spec["url"])
+        if error:
+            if error in ("HTTP 400", "HTTP 404"):
+                log(f"  Info: {spec['display']} not available ({error}). Skipping.")
+            else:
+                log(f"  Warning: could not fetch {spec['display']}: {error}")
+                failed.append((spec["display"], error))
+            continue
+        if not isinstance(policy, dict):
+            continue
+        write_json(out_dir / spec["filename"], policy)
+        written += 1
+        log(f"  Exported {spec['display']}.")
+
+    if reports_root is not None and written > 0 and reports_root.mkdir(parents=True, exist_ok=True) is None:
+        md_lines = [
+            "# Security Settings",
+            "",
+            "Tenant-wide security configuration.",
+            f"Object count: **{written}**",
+            "",
+            "| Item | File |",
+            "|---|---|",
+        ]
+        for spec in _SECURITY_ENDPOINTS:
+            if (out_dir / spec["filename"]).exists():
+                md_lines.append(f"| {spec['display'].title()} | Security/{spec['filename']} |")
+        (reports_root / "security.md").write_text("\n".join(md_lines) + "\n", encoding="utf-8")
 
     return written, failed
 
@@ -904,50 +1378,107 @@ def main() -> int:
         return 0
 
     include_groups = to_bool(args.include_groups)
+    include_privileged_groups = to_bool(args.include_privileged_groups)
     include_role_assignments = to_bool(args.include_role_assignments)
     include_auth_methods = to_bool(args.include_auth_methods_policy)
     include_cross_tenant = to_bool(args.include_cross_tenant_access)
     include_identity_protection = to_bool(args.include_identity_protection)
+    include_pim_policies = to_bool(args.include_pim_policies)
+    include_security_settings = to_bool(args.include_security_settings)
     watch_groups = _parse_watch_groups_csv(args.watch_groups_csv)
 
-    if not any([include_groups, include_role_assignments, include_auth_methods, include_cross_tenant, include_identity_protection]):
+    if not any([include_groups, include_role_assignments, include_auth_methods,
+                include_cross_tenant, include_identity_protection,
+                include_pim_policies, include_security_settings]):
         log("All Entra identity export categories are disabled. Skipping.")
         return 0
 
-    if watch_groups:
-        log(f"Watched groups (full member tracking): {len(watch_groups)} group(s)")
+    # Derive reports root: explicit arg > <root>/../reports/<root.name>
+    if args.reports_root.strip():
+        reports_root: pathlib.Path | None = pathlib.Path(args.reports_root).resolve()
+    else:
+        derived = root.parent / "reports" / root.name
+        reports_root = derived
+    if reports_root is not None and reports_root.mkdir(parents=True, exist_ok=True) is None:
+        reports_root.mkdir(parents=True, exist_ok=True)
 
     client = GraphClient(token)
+    _report_token_capabilities(token)
+
+    if watch_groups:
+        log(f"Watched groups (explicit): {len(watch_groups)} group(s)")
+
+    # Resolve previous snapshot ref for rename/delta detection
+    previous_lookup: PreviousGroupLookup | None = None
+    if include_groups:
+        repo_root = _discover_repo_root(root)
+        if repo_root is not None:
+            candidates = [
+                args.previous_snapshot_ref,
+                os.getenv("DRIFT_BRANCH_ENTRA", ""),
+                "drift/entra",
+            ]
+            ref = ""
+            for raw in candidates:
+                ref = _resolve_branch_ref(repo_root, raw)
+                if ref:
+                    break
+            if ref:
+                groups_dir_rel = str(root.relative_to(repo_root) / "Groups").replace("\\", "/")
+                previous_lookup = PreviousGroupLookup(repo_root, ref, groups_dir_rel)
+                log(f"Using previous snapshot ref '{ref}' for group rename/delta detection.")
+
     total_written = 0
     all_failed: list[tuple[str, str]] = []
 
     if include_groups:
-        log("=== 1.1 Exporting CA-referenced groups ===")
-        written, failed = export_groups(client, root, fail_on_export_error, watch_groups=watch_groups)
+        log("=== 1.1 Exporting groups ===")
+        privileged_group_ids: set[str] = set()
+        if include_privileged_groups:
+            privileged_group_ids = _fetch_privileged_group_ids(client)
+        written, failed = export_groups(
+            client, root, fail_on_export_error,
+            reports_root=reports_root,
+            watch_groups=watch_groups,
+            privileged_group_ids=privileged_group_ids,
+            previous_lookup=previous_lookup,
+        )
         total_written += written
         all_failed.extend(failed)
 
     if include_role_assignments:
         log("=== 1.2 Exporting directory role assignments ===")
-        written, failed = export_role_assignments(client, root, fail_on_export_error)
+        written, failed = export_role_assignments(client, root, fail_on_export_error, reports_root=reports_root)
         total_written += written
         all_failed.extend(failed)
 
     if include_auth_methods:
         log("=== 1.3 Exporting authentication methods policy ===")
-        written, failed = export_auth_methods_policy(client, root, fail_on_export_error)
+        written, failed = export_auth_methods_policy(client, root, fail_on_export_error, reports_root=reports_root)
         total_written += written
         all_failed.extend(failed)
 
     if include_cross_tenant:
         log("=== 1.4 Exporting cross-tenant access settings ===")
-        written, failed = export_cross_tenant_access(client, root, fail_on_export_error)
+        written, failed = export_cross_tenant_access(client, root, fail_on_export_error, reports_root=reports_root)
         total_written += written
         all_failed.extend(failed)
 
     if include_identity_protection:
         log("=== 1.5 Exporting identity protection policies ===")
-        written, failed = export_identity_protection(client, root, fail_on_export_error)
+        written, failed = export_identity_protection(client, root, fail_on_export_error, reports_root=reports_root)
+        total_written += written
+        all_failed.extend(failed)
+
+    if include_pim_policies:
+        log("=== 2.2 Exporting PIM role governance policies ===")
+        written, failed = export_pim_policies(client, root, fail_on_export_error, reports_root=reports_root)
+        total_written += written
+        all_failed.extend(failed)
+
+    if include_security_settings:
+        log("=== 2.3 Exporting security settings ===")
+        written, failed = export_security_settings(client, root, fail_on_export_error, reports_root=reports_root)
         total_written += written
         all_failed.extend(failed)
 

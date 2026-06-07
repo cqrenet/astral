@@ -66,6 +66,13 @@ variables:
   # All other groups receive count-only tracking. Leave empty to disable member tracking.
   - name: ENTRA_WATCH_GROUPS_CSV
     value: ""
+  # v2 identity exports
+  - name: ENTRA_INCLUDE_PRIVILEGED_GROUPS
+    value: true
+  - name: ENTRA_INCLUDE_PIM_POLICIES
+    value: true
+  - name: ENTRA_INCLUDE_SECURITY_SETTINGS
+    value: true
   - name: SPLIT_DOCUMENTATION
     value: true
   - name: ENABLE_TAGGING
@@ -1607,8 +1614,8 @@ jobs:
           targetType: inline
           script: |
             set -euo pipefail
-            echo "Starting Entra identity export (groups, role assignments, auth methods, cross-tenant access, identity protection)..."
-            timeout 15m python3 -u "$(PIPELINE_SCRIPT_ROOT)/export_entra_identity.py" \
+            echo "Starting Entra identity export..."
+            timeout 20m python3 -u "$(PIPELINE_SCRIPT_ROOT)/export_entra_identity.py" \
               --root "$(Build.SourcesDirectory)/$(BACKUP_FOLDER)/$(ENTRA_BACKUP_SUBDIR)" \
               --token "$(accessToken)" \
               --include-groups "$(ENTRA_INCLUDE_GROUPS)" \
@@ -1616,7 +1623,12 @@ jobs:
               --include-auth-methods-policy "$(ENTRA_INCLUDE_AUTH_METHODS_POLICY)" \
               --include-cross-tenant-access "$(ENTRA_INCLUDE_CROSS_TENANT_ACCESS)" \
               --include-identity-protection "$(ENTRA_INCLUDE_IDENTITY_PROTECTION)" \
+              --include-privileged-groups "$(ENTRA_INCLUDE_PRIVILEGED_GROUPS)" \
+              --include-pim-policies "$(ENTRA_INCLUDE_PIM_POLICIES)" \
+              --include-security-settings "$(ENTRA_INCLUDE_SECURITY_SETTINGS)" \
               --watch-groups-csv "$(ENTRA_WATCH_GROUPS_CSV)" \
+              --previous-snapshot-ref "origin/$(DRIFT_BRANCH_ENTRA)" \
+              --reports-root "$(Build.SourcesDirectory)/$(BACKUP_FOLDER)/$(REPORTS_SUBDIR)/$(ENTRA_BACKUP_SUBDIR)" \
               --fail-on-export-error "true"
           workingDirectory: "$(Build.SourcesDirectory)"
           failOnStderr: false
