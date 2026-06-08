@@ -3,6 +3,10 @@ trigger:
     include:
       - main
   paths:
+    # Run when tenant data changes so reports stay current.
+    include:
+      - tenant-state/intune/**
+      - tenant-state/entra/**
     # Don't re-trigger when we commit the reports we just generated.
     exclude:
       - tenant-state/reports/**
