@@ -119,7 +119,7 @@ Current scope behavior:
 
 ### Main Backup Pipeline
 
-`azure-pipelines.yml` runs daily at 02:00 on `main` to generate a full tenant snapshot, reports, and documentation artifacts. It is also triggered on-demand by the change probe when drift is detected.
+`azure-pipelines.yml` runs daily at 02:00 on `main` to generate a full tenant snapshot. It is also triggered on-demand by the change probe when drift is detected.
 
 For Intune it:
 
@@ -162,6 +162,20 @@ Supported restore modes:
 - `selective`: restore only selected file paths
 
 It also supports optional Entra update when restore automation is triggered for Entra review outcomes.
+
+### Reports Pipeline
+
+`azure-pipelines-reports.yml` runs daily at 04:00 on `main` to generate reports and documentation artifacts from the latest committed tenant state.
+
+It:
+
+1. Checks out the latest `main` branch.
+2. Generates Intune reports and split-markdown documentation with `scripts/run_reports.py`.
+3. Generates Entra baseline reports with `scripts/run_reports.py`.
+4. Generates Entra identity reports with `scripts/export_entra_identity.py --reports-only`.
+5. Commits results to `main` with `[skip ci]` to avoid triggering itself.
+
+Reports are written to `tenant-state/reports/**` and documentation artifacts are published as build artifacts.
 
 ## Schedule And Run Modes
 
