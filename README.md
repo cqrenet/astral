@@ -12,9 +12,15 @@ Quick start:
 
 1. Fork or import this repository into an Azure DevOps project.
 2. Review `templates/variables-tenant.yml` and create a matching Azure DevOps Variable Group in your project (e.g. `vg-astral`).
-3. Uncomment the variable group reference in the three pipeline YAMLs.
-4. Run `deploy/provision.ps1` to create the Azure AD app registration, assign Graph permissions, configure the federated credential, and provision the event-driven change probe (Azure Function App) and optionally the MCP server (Azure Container Apps).
-5. Create the Azure DevOps service connection using the app registration details from the bootstrap script.
+3. Uncomment the variable group reference in the pipeline YAMLs:
+   - `azure-pipelines.yml`
+   - `azure-pipelines-review-sync.yml`
+   - `azure-pipelines-restore.yml`
+   - `azure-pipelines-reports.yml`
+   - `deploy/validate-deployment.yml`
+   - `deploy/update-from-upstream.yml`
+4. Create the Azure AD app registration and assign Graph permissions. The easiest path is the automatic service connection in Azure DevOps followed by `deploy/bootstrap-tenant.ps1`; see the onboarding runbook for the full two-path guide.
+5. Run `deploy/provision.ps1` to provision the event-driven change probe (Azure Function App) and optionally the MCP server (Azure Container Apps).
 6. Import the four pipelines (`azure-pipelines.yml`, `azure-pipelines-review-sync.yml`, `azure-pipelines-restore.yml`, `azure-pipelines-reports.yml`) into Azure DevOps.
 7. Run `deploy/validate-deployment.yml` to verify connectivity and permissions.
 8. Set `AUTO_REMEDIATE_RESTORE_PIPELINE_ID` in your variable group after the restore pipeline is imported.
@@ -194,7 +200,8 @@ Because Microsoft Graph change notifications and delta queries do not support In
 - **`queue_consumer`** (queue trigger): dequeues messages and calls the Azure DevOps REST API to queue the backup pipeline.
 - **Debouncer**: 15-minute quiet window + 30-minute cooldown prevents backup storms during bulk changes.
 - **State**: stored in Azure Table Storage (`ProbeState` table).
-- **Provisioning**: `deploy/provision.ps1` creates the Entra app, grants admin consent, provisions Resource Group / Storage Account / Function App, and configures app settings.
+- **Bootstrap**: `deploy/bootstrap-tenant.ps1` creates the Entra app registration for the backup/restore pipelines, assigns Graph permissions, and grants admin consent.
+- **Provisioning**: `deploy/provision.ps1` deploys the change probe infrastructure (Resource Group, Storage Account, Function App) and optionally the MCP server (Container Apps, ACR).
 
 Full mode adds:
 

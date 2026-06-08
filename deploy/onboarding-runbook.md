@@ -51,6 +51,7 @@ Do this for:
 - `azure-pipelines.yml`
 - `azure-pipelines-review-sync.yml`
 - `azure-pipelines-restore.yml`
+- `azure-pipelines-reports.yml`
 - `deploy/validate-deployment.yml`
 - `deploy/update-from-upstream.yml`
 
@@ -71,7 +72,7 @@ There are two paths. **Path A (automatic)** is simpler — ADO creates the app r
 3. Select **App registration (automatic)** with **Workload identity federation**. Click **Next**.
 4. Select **Scope level: Subscription** and choose any subscription in your tenant (ASTRAL uses Microsoft Graph, not ARM resources — the subscription is required by the form only).
 5. Enter the **Service connection name** matching `SERVICE_CONNECTION_NAME` (e.g. `sc-astral-backup`).
-6. **Do not tick "Grant access permission to all pipelines"** — leave it unchecked. You will authorize only the three ASTRAL pipelines individually in Step 7.
+6. **Do not tick "Grant access permission to all pipelines"** — leave it unchecked. You will authorize only the four ASTRAL pipelines individually in Step 7.
 7. Click **Save**. ADO creates the app registration and federated credential automatically.
 8. On the service connection overview page, click **Manage App registration** — this opens the Entra app registration. Copy the **Application (client) ID** from there.
 
@@ -187,7 +188,7 @@ After importing `azure-pipelines-restore.yml`, find its definition ID:
    - Test read from Graph
    - Test PR creation and abandonment
 
-> This permission prompt appears once per pipeline per resource. The three main pipelines will show the same prompt on their first run — approve them the same way.
+> This permission prompt appears once per pipeline per resource. The four main pipelines will show the same prompt on their first run — approve them the same way.
 
 ## Step 10: Configure branch policies on main
 
