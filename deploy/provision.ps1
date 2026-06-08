@@ -46,6 +46,11 @@
     Numeric pipeline ID of azure-pipelines.yml. Find it as definitionId=XX in the
     pipeline URL.
 
+.PARAMETER AdoReviewSyncPipelineId
+    Numeric pipeline ID of azure-pipelines-review-sync.yml. When provided, the
+    pr_comment_webhook Function is configured to trigger review-sync immediately on
+    /accept or /reject PR comments. Leave blank to rely solely on the 20-min schedule.
+
 .PARAMETER AdoToken
     Azure DevOps PAT with Build (Read & Execute) scope.
 
@@ -85,11 +90,13 @@ param (
     [string]$ResourceGroup  = "rg-astral",
     [string]$Location       = "swedencentral",
     [string]$SubscriptionId = "",
-    [string]$AdoOrganization = "",
-    [string]$AdoProject      = "",
-    [string]$AdoPipelineId   = "",
-    [string]$AdoToken        = "",
-    [string]$AdoBranch       = "main",
+    [string]$AdoOrganization         = "",
+    [string]$AdoProject              = "",
+    [string]$AdoPipelineId           = "",
+    [string]$AdoReviewSyncPipelineId = "",
+    [string]$AdoToken                = "",
+    [string]$AdoBranch               = "main",
+    [string]$WebhookSecret           = "",
     [int]$QuietWindowMinutes = 15,
     [int]$CooldownMinutes    = 30,
     [switch]$DeployMcpServer,
@@ -186,7 +193,7 @@ if (Test-Path $configPath) {
 }
 
 if ($savedConfig) {
-    foreach ($key in @('AdoOrganization','AdoProject','AdoPipelineId','AdoBranch',
+    foreach ($key in @('AdoOrganization','AdoProject','AdoPipelineId','AdoReviewSyncPipelineId','AdoBranch',
                        'ResourceGroup','Location','McpContainerAppName','McpAcrName',
                        'McpResourceGroup','McpLocation')) {
         if (-not $PSBoundParameters.ContainsKey($key) -and $savedConfig.$key) {
@@ -215,10 +222,11 @@ Import-Module Microsoft.Graph.Identity.SignIns
 # ---------------------------------------------------------------------------
 
 Write-Host "`n--- Azure DevOps ---" -ForegroundColor Cyan
-$AdoOrganization = Get-OrPrompt $AdoOrganization "Azure DevOps Organization (e.g. 'contoso')"
-$AdoProject      = Get-OrPrompt $AdoProject      "Azure DevOps Project"
-$AdoPipelineId   = Get-OrPrompt $AdoPipelineId   "Pipeline ID of azure-pipelines.yml (definitionId=XX in URL)"
-$AdoToken        = Get-OrPrompt $AdoToken        "Azure DevOps PAT (Build Read & Execute)" -Sensitive
+$AdoOrganization         = Get-OrPrompt $AdoOrganization         "Azure DevOps Organization (e.g. 'contoso')"
+$AdoProject              = Get-OrPrompt $AdoProject              "Azure DevOps Project"
+$AdoPipelineId           = Get-OrPrompt $AdoPipelineId           "Pipeline ID of azure-pipelines.yml (definitionId=XX in URL)"
+$AdoReviewSyncPipelineId = Get-OrPrompt $AdoReviewSyncPipelineId "Pipeline ID of azure-pipelines-review-sync.yml [blank to disable webhook trigger]"
+$AdoToken                = Get-OrPrompt $AdoToken                "Azure DevOps PAT (Build Read & Execute)" -Sensitive
 
 # ---------------------------------------------------------------------------
 # MCP server decision
@@ -553,6 +561,32 @@ if (-not $DeployMcpOnly) {
     } else {
         Write-Host "Function App '$FunctionAppName' already exists." -ForegroundColor Yellow
     }
+    # Preserve the webhook secret across re-deployments.
+    # On first deploy the Function App has no WEBHOOK_SECRET yet, so we generate one.
+    # On subsequent deploys we read the existing value and reuse it so the ADO service
+    # hook config does not need to be updated after every provisioning run.
+    if ($AdoReviewSyncPipelineId -and -not $WebhookSecret) {
+        $existingSecret = ""
+        try {
+            $existingSecret = (Invoke-AzCli @(
+                "functionapp","config","appsettings","list",
+                "--name", $FunctionAppName,
+                "--resource-group", $ResourceGroup,
+                "--query", "[?name=='WEBHOOK_SECRET'].value | [0]",
+                "--output", "tsv"
+            ) -NoRetry).Trim()
+        } catch {}
+        if ($existingSecret) {
+            $WebhookSecret = $existingSecret
+            Write-Host "Reusing existing webhook secret." -ForegroundColor Green
+        } else {
+            $WebhookSecret = [System.Convert]::ToBase64String(
+                [System.Security.Cryptography.RandomNumberGenerator]::GetBytes(24)
+            ).TrimEnd("=").Replace("+", "-").Replace("/", "_")
+            Write-Host "Generated webhook secret (shown in summary)." -ForegroundColor Cyan
+        }
+    }
+
     Write-Host "Configuring Function App settings..." -ForegroundColor Cyan
     Invoke-AzCli @(
         "functionapp","config","appsettings","set",
@@ -575,6 +609,8 @@ if (-not $DeployMcpOnly) {
         "ADO_BRANCH=$AdoBranch",
         "PROBE_QUIET_WINDOW_MINUTES=$QuietWindowMinutes",
         "PROBE_COOLDOWN_MINUTES=$CooldownMinutes",
+        "ADO_REVIEW_SYNC_PIPELINE_ID=$AdoReviewSyncPipelineId",
+        "WEBHOOK_SECRET=$WebhookSecret",
         "REPO_ROOT=/home/site/wwwroot",
         "--output", "none"
     )
@@ -747,6 +783,20 @@ if (-not $DeployMcpOnly) {
                 }
                 $ls = Join-Path $stagePath "local.settings.json"
                 if (Test-Path $ls) { Remove-Item $ls }
+
+                # Install Python dependencies into .python_packages/lib/site-packages
+                # so they are available when the zip is mounted read-only via WEBSITE_RUN_FROM_PACKAGE.
+                $reqFile = Join-Path $stagePath "requirements.txt"
+                if (Test-Path $reqFile) {
+                    Write-Host "Installing Python dependencies into package..." -ForegroundColor Cyan
+                    $pkgDir = Join-Path $stagePath ".python_packages" "lib" "site-packages"
+                    New-Item -ItemType Directory -Path $pkgDir -Force | Out-Null
+                    $pip = if (Test-Command "pip3") { "pip3" } else { "pip" }
+                    & $pip install -r $reqFile --target $pkgDir --quiet --disable-pip-version-check
+                    if ($LASTEXITCODE -ne 0) { throw "pip install failed — check Python/pip is available on this machine." }
+                    Write-Host "Dependencies installed." -ForegroundColor Green
+                }
+
                 if (Test-Command "zip") {
                     Push-Location $stagePath; try { & zip -r $zipPath . | Out-Null } finally { Pop-Location }
                 } else {
@@ -778,10 +828,11 @@ if (-not $DeployMcpOnly) {
 
 try {
     [PSCustomObject]@{
-        AdoOrganization     = $AdoOrganization
-        AdoProject          = $AdoProject
-        AdoPipelineId       = $AdoPipelineId
-        AdoBranch           = $AdoBranch
+        AdoOrganization          = $AdoOrganization
+        AdoProject               = $AdoProject
+        AdoPipelineId            = $AdoPipelineId
+        AdoReviewSyncPipelineId  = $AdoReviewSyncPipelineId
+        AdoBranch                = $AdoBranch
         SubscriptionId      = $SubscriptionId
         TenantId            = $tenantId
         ResourceGroup       = $ResourceGroup
@@ -827,6 +878,16 @@ if ($mcpDeploy) {
 Write-Host ""
 Write-Host "IMPORTANT: CLIENT_SECRET shown above only once. Save it now." -ForegroundColor Yellow
 if (-not $DeployMcpOnly) {
+    if ($AdoReviewSyncPipelineId) {
+        Write-Host ""
+        Write-Host "PR Comment Webhook (instant /accept|/reject trigger):" -ForegroundColor Cyan
+        Write-Host "  URL:    https://$FunctionAppName.azurewebsites.net/api/pr_comment_webhook"
+        Write-Host "  Secret: $WebhookSecret" -ForegroundColor Yellow
+        Write-Host "  IMPORTANT: webhook secret shown above only once. Save it now." -ForegroundColor Yellow
+        Write-Host "  Configure in ADO: Project Settings -> Service hooks -> Web Hooks"
+        Write-Host "    Event:    Pull request commented on"
+        Write-Host "    Username: astral  Password: <Secret above>"
+    }
     Write-Host ""
     Write-Host "Next steps:"
     Write-Host "  Verify probe timer:"

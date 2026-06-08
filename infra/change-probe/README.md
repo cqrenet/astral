@@ -26,6 +26,18 @@ Microsoft Graph change notifications and delta queries do **not** support Intune
                                                                         │  Azure DevOps   │
                                                                         │  backup pipeline│
                                                                         └─────────────────┘
+
+ADO PR comment
+  (reviewer posts /accept or /reject)
+        │
+        │  ADO Service Hook
+        ▼
+┌───────────────────┐    /accept|/reject     ┌─────────────────────┐
+│ pr_comment_webhook│ ──────────────────────►│  ADO REST API       │
+│  (HTTP Trigger)   │                        │  review-sync        │
+└───────────────────┘                        │  pipeline (on-demand│
+                                             └─────────────────────┘
+20-min schedule in azure-pipelines-review-sync.yml remains as fallback.
 ```
 
 ## Components
@@ -48,6 +60,16 @@ Microsoft Graph change notifications and delta queries do **not** support Intune
   1. Parse JSON payload (`reason`, `checked_at`).
   2. Call Azure DevOps REST API to queue the backup pipeline run.
   3. Raise on failure so the Functions runtime handles retry and poison-queue logic.
+
+### `pr_comment_webhook` (HTTP Trigger)
+
+- **Trigger**: POST from ADO service hook on "Pull request commented on"
+- **Auth**: `Authorization: Basic :<WEBHOOK_SECRET>` (if `WEBHOOK_SECRET` is set)
+- **Actions**:
+  1. Validate the shared secret (if configured).
+  2. Extract `resource.comment.content` from the ADO service hook payload.
+  3. If the comment matches `^/accept` or `^/reject` (case-insensitive), call the ADO REST API to queue `ADO_REVIEW_SYNC_PIPELINE_ID` immediately.
+  4. Always return `200 OK` to prevent ADO from retrying; the 20-min schedule is the fallback.
 
 ### `scripts/probe_tenant_changes.py`
 
@@ -87,6 +109,8 @@ All settings are provided via Function App application settings (environment var
 | `ADO_PIPELINE_ID` | Yes | — | Backup pipeline definition ID |
 | `ADO_TOKEN` | Yes | — | Azure DevOps PAT with **Build (read & execute)** |
 | `ADO_BRANCH` | No | `main` | Git ref to queue the pipeline against |
+| `ADO_REVIEW_SYNC_PIPELINE_ID` | No | — | Pipeline definition ID for `azure-pipelines-review-sync.yml`; required for `pr_comment_webhook` |
+| `WEBHOOK_SECRET` | No | — | Shared secret for `pr_comment_webhook`; validated as `Authorization: Basic :<secret>` |
 | `PROBE_QUIET_WINDOW_MINUTES` | No | `15` | Minutes to wait for change burst to settle |
 | `PROBE_COOLDOWN_MINUTES` | No | `30` | Minutes between successive triggers |
 
@@ -153,6 +177,20 @@ python3 scripts/trigger_backup_pipeline.py \
   --token "$ADO_TOKEN" \
   --branch refs/heads/main
 ```
+
+## Wiring up the ADO service hook
+
+After deploying the Function App, configure the service hook in ADO so PR comments trigger an immediate review-sync run:
+
+1. Go to **Azure DevOps → Project Settings → Service hooks → + Create subscription**.
+2. Select **Web Hooks** and click **Next**.
+3. **Event**: *Pull request commented on*. Optionally filter to the specific repository.
+4. **Action — URL**: `https://<func-app>.azurewebsites.net/api/pr_comment_webhook`
+5. **Basic authentication — Username**: any value (e.g. `astral`)
+6. **Basic authentication — Password**: the value you set for `WEBHOOK_SECRET`
+7. Leave **HTTP headers** empty and click **Finish**.
+
+> **Note:** If `WEBHOOK_SECRET` is left empty in the Function App settings, the function skips auth entirely — useful during local testing but not recommended for production.
 
 ## Deployment
 
