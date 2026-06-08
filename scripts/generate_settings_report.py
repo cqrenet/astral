@@ -271,6 +271,12 @@ def main() -> None:
     rows.extend(process_flat_category(root, "Device Configurations"))
     rows.extend(process_flat_category(root, "Compliance Policies"))
 
+    for row in rows:
+        for col in FIELDNAMES:
+            v = row.get(col, "")
+            if "\n" in v or "\r" in v:
+                row[col] = v.replace("\r\n", " ").replace("\r", " ").replace("\n", " ")
+
     out_path = output_dir / OUTPUT_FILE
     with out_path.open("w", newline="", encoding="utf-8") as f:
         writer = csv.DictWriter(f, fieldnames=FIELDNAMES, extrasaction="ignore")

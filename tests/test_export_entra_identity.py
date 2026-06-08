@@ -35,6 +35,7 @@ def _make_args(**overrides) -> SimpleNamespace:
         watch_groups_csv="",
         previous_snapshot_ref="",
         reports_root="",
+        reports_only="false",
         fail_on_export_error="true",
     )
     defaults.update(overrides)

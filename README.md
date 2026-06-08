@@ -15,7 +15,7 @@ Quick start:
 3. Uncomment the variable group reference in the three pipeline YAMLs.
 4. Run `deploy/provision.ps1` to create the Azure AD app registration, assign Graph permissions, configure the federated credential, and provision the event-driven change probe (Azure Function App) and optionally the MCP server (Azure Container Apps).
 5. Create the Azure DevOps service connection using the app registration details from the bootstrap script.
-6. Import the three pipelines (`azure-pipelines.yml`, `azure-pipelines-review-sync.yml`, `azure-pipelines-restore.yml`) into Azure DevOps.
+6. Import the four pipelines (`azure-pipelines.yml`, `azure-pipelines-review-sync.yml`, `azure-pipelines-restore.yml`, `azure-pipelines-reports.yml`) into Azure DevOps.
 7. Run `deploy/validate-deployment.yml` to verify connectivity and permissions.
 8. Set `AUTO_REMEDIATE_RESTORE_PIPELINE_ID` in your variable group after the restore pipeline is imported.
 
@@ -29,11 +29,12 @@ Watch [GitHub releases](https://github.com/cqrenet/astral/releases) for new vers
 
 ## What The Repository Does
 
-The implementation is centered on three Azure DevOps pipelines and an MCP server:
+The implementation is centered on four Azure DevOps pipelines and an MCP server:
 
-- `azure-pipelines.yml`: backup/export pipeline with rolling PR management. Runs daily at 02:00 to generate a full tenant snapshot, reports, and documentation artifacts, and is also triggered on-demand by the event-driven change probe.
+- `azure-pipelines.yml`: backup/export pipeline with rolling PR management. Runs daily at 02:00 to generate a full tenant snapshot and is also triggered on-demand by the event-driven change probe.
 - `azure-pipelines-review-sync.yml`: 20-minute reviewer-decision sync and post-merge remediation queue.
 - `azure-pipelines-restore.yml`: manual or auto-queued restore pipeline for approved baseline rollback.
+- `azure-pipelines-reports.yml`: nightly report and documentation generation pipeline (04:00). Commits generated reports directly to `main`.
 - `infra/mcp-server/`: Azure Container Apps-hosted MCP server exposing tenant state and drift history to AI assistants via natural-language queries.
 
 The main workflow is:
@@ -87,7 +88,7 @@ Current scope behavior:
 ## Repository Layout
 
 - `README.md`: operational overview.
-- `azure-pipelines.yml`: backup/export, report generation, drift commit, rolling PR, and docs/artifact flow.
+- `azure-pipelines.yml`: backup/export, drift commit, rolling PR, and docs/artifact flow.
 - `azure-pipelines-review-sync.yml`: reviewer decision sync and post-merge remediation helper.
 - `azure-pipelines-restore.yml`: baseline restore pipeline with full or selective scope.
 - `infra/change-probe/`: Azure Function App for event-driven change detection.
@@ -118,17 +119,16 @@ For Intune it:
 3. Runs IntuneCD export.
 4. Reverts partial Settings Catalog exports with `scripts/filter_intune_partial_settings_noise.py`.
 5. Resolves assignment group names from Graph when needed.
-6. Generates assignment and object inventory reports.
-7. Validates outputs with `scripts/validate_backup_outputs.py`.
-8. Commits drift and updates the rolling PR flow.
+6. Validates outputs with `scripts/validate_backup_outputs.py`.
+7. Commits drift and updates the rolling PR flow.
 
 For Entra it:
 
 1. Prepares `drift/entra` from `main`.
 2. Chooses effective export scope per mode.
 3. Exports selected categories with `scripts/export_entra_baseline.py`.
-4. Resolves Conditional Access reference names with `scripts/resolve_ca_references.py`.
-5. Generates assignment, app, and object inventory reports.
+4. Exports identity objects with `scripts/export_entra_identity.py`.
+5. Resolves Conditional Access reference names with `scripts/resolve_ca_references.py`.
 6. Validates outputs with `scripts/validate_backup_outputs.py`.
 7. Reverts enrichment-only JSON churn with `scripts/filter_entra_enrichment_noise.py`.
 8. Commits drift with `scripts/commit_entra_drift.py`.
@@ -156,7 +156,8 @@ It also supports optional Entra update when restore automation is triggered for 
 
 ## Schedule And Run Modes
 
-- Main backup schedule: daily at 02:00, `0 2 * * *`, on `main` (full snapshot, reports, and docs)
+- Main backup schedule: daily at 02:00, `0 2 * * *`, on `main` (full snapshot)
+- Reports schedule: daily at 04:00, `0 4 * * *`, on `main` (reports and documentation)
 - Change probe trigger: event-driven, on-demand via Azure Function App
 - Review sync schedule: every 20 minutes, `*/20 * * * *`, on `main`
 - Full mode: configured full-run hour (default 00:00) or manual queue with `forceFullRun=true`
@@ -175,9 +176,13 @@ Because Microsoft Graph change notifications and delta queries do not support In
 Full mode adds:
 
 - full Entra scope, including App Registrations and Enterprise Applications
-- Intune split-documentation generation
-- HTML/PDF artifact generation when browser dependencies are available
 - optional tagging and documentation publish steps
+
+The reports pipeline (`azure-pipelines-reports.yml`) handles:
+
+- Intune reports and split-documentation generation
+- Entra reports and identity reports
+- HTML/PDF artifact generation when browser dependencies are available
 
 ## Branch And PR Model
 
@@ -252,6 +257,9 @@ Entra behavior:
 - `ENTRA_INCLUDE_APP_REGISTRATIONS`
 - `ENTRA_INCLUDE_ENTERPRISE_APPS`
 - `ENTRA_ENTERPRISE_APP_WORKERS`
+- `ENTRA_INCLUDE_PRIVILEGED_GROUPS`
+- `ENTRA_INCLUDE_PIM_POLICIES`
+- `ENTRA_INCLUDE_SECURITY_SETTINGS`
 
 PR and reviewer automation:
 
@@ -444,8 +452,7 @@ Validate backup outputs:
 python3 ./scripts/validate_backup_outputs.py \
   --workload intune \
   --mode light \
-  --root ./tenant-state/intune \
-  --reports-root ./tenant-state/reports/intune
+  --root ./tenant-state/intune
 ```
 
 Run the change probe locally:

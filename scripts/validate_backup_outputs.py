@@ -16,7 +16,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--workload", required=True, choices=["intune", "entra"])
     parser.add_argument("--mode", default="light", choices=["light", "full"])
     parser.add_argument("--root", required=True, help="Workload backup root path.")
-    parser.add_argument("--reports-root", required=True, help="Workload reports root path.")
+    parser.add_argument("--reports-root", default="", help="Workload reports root path. When omitted, report file checks are skipped.")
     parser.add_argument("--include-named-locations", default="false")
     parser.add_argument("--include-authentication-strengths", default="false")
     parser.add_argument("--include-conditional-access", default="false")
@@ -38,7 +38,7 @@ def _json_count(root: Path) -> int:
     return sum(1 for _ in root.rglob("*.json"))
 
 
-def _validate_intune(root: Path, reports_root: Path, errors: list[str]) -> None:
+def _validate_intune(root: Path, reports_root: Path | None, errors: list[str]) -> None:
     if not root.exists():
         errors.append(f"Missing Intune backup root: {root}")
         return
@@ -47,16 +47,17 @@ def _validate_intune(root: Path, reports_root: Path, errors: list[str]) -> None:
     if json_count == 0:
         errors.append(f"Intune backup root has no JSON exports: {root}")
 
-    _require_file(reports_root / "policy-assignments.md", "Intune assignment markdown report", errors)
-    _require_file(reports_root / "policy-assignments.csv", "Intune assignment CSV report", errors)
-    _require_file(reports_root / "object-inventory-all.csv", "Intune object inventory CSV", errors)
+    if reports_root is not None:
+        _require_file(reports_root / "policy-assignments.md", "Intune assignment markdown report", errors)
+        _require_file(reports_root / "policy-assignments.csv", "Intune assignment CSV report", errors)
+        _require_file(reports_root / "object-inventory-all.csv", "Intune object inventory CSV", errors)
 
     if errors:
         return
     print(f"Intune output validation passed: jsonFiles={json_count}")
 
 
-def _validate_entra(root: Path, reports_root: Path, args: argparse.Namespace, errors: list[str]) -> None:
+def _validate_entra(root: Path, reports_root: Path | None, args: argparse.Namespace, errors: list[str]) -> None:
     if not root.exists():
         errors.append(f"Missing Entra backup root: {root}")
         return
@@ -83,14 +84,15 @@ def _validate_entra(root: Path, reports_root: Path, args: argparse.Namespace, er
         index_path = root / category_name / f"{category_name}.md"
         _require_file(index_path, f"Entra export index for '{category_name}'", errors)
 
-    _require_file(reports_root / "object-inventory-all.csv", "Entra object inventory CSV", errors)
+    if reports_root is not None:
+        _require_file(reports_root / "object-inventory-all.csv", "Entra object inventory CSV", errors)
 
-    if include_conditional_access:
-        _require_file(reports_root / "policy-assignments.md", "Entra assignment markdown report", errors)
-        _require_file(reports_root / "policy-assignments.csv", "Entra assignment CSV report", errors)
+        if include_conditional_access:
+            _require_file(reports_root / "policy-assignments.md", "Entra assignment markdown report", errors)
+            _require_file(reports_root / "policy-assignments.csv", "Entra assignment CSV report", errors)
 
-    if include_app_registrations_effective or include_enterprise_apps_effective:
-        _require_file(reports_root / "apps-inventory.csv", "Entra apps inventory CSV", errors)
+        if include_app_registrations_effective or include_enterprise_apps_effective:
+            _require_file(reports_root / "apps-inventory.csv", "Entra apps inventory CSV", errors)
 
     if errors:
         return
@@ -110,7 +112,7 @@ def _validate_entra(root: Path, reports_root: Path, args: argparse.Namespace, er
 def main() -> int:
     args = parse_args()
     root = Path(args.root).resolve()
-    reports_root = Path(args.reports_root).resolve()
+    reports_root = Path(args.reports_root).resolve() if args.reports_root.strip() else None
     errors: list[str] = []
 
     if args.workload == "intune":

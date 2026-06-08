@@ -57,7 +57,7 @@ Important clarifications:
 
 | Component | Function | Security Relevance |
 | --- | --- | --- |
-| Azure DevOps pipeline `azure-pipelines.yml` | Scheduled backup, drift commit, rolling PR management, documentation artifact publishing | Main execution path |
+| Azure DevOps pipeline `azure-pipelines.yml` | Scheduled backup, drift commit, rolling PR management | Main execution path |
 | Azure DevOps pipeline `azure-pipelines-review-sync.yml` | Processes reviewer `/reject` and `/accept` decisions and refreshes PR summaries | Uses Azure DevOps API token |
 | Azure DevOps pipeline `azure-pipelines-restore.yml` | Restores approved baseline to tenant | Write-capable path |
 | Azure Function App (`infra/change-probe`) | Event-driven probe: polls audit logs, debounces, triggers backup pipeline on demand | Outbound-only; uses separate Entra app registration |
@@ -68,6 +68,7 @@ Important clarifications:
 | Azure DevOps REST APIs | PR creation/update, review thread sync, restore queueing, pipeline trigger | Change-management control plane |
 | Optional: MCP server (`infra/mcp-server`) | Azure Container Apps-hosted HTTPS endpoint exposing tenant state and drift history to MCP-capable AI assistants | First and only inbound endpoint in the platform; protected by API key or Entra ID bearer token; read-only access to Git data via ADO REST API |
 | Optional: Azure Container Registry | Hosts the MCP server container image built during provisioning | Image supply chain — should be scoped to the deployment subscription |
+| Azure DevOps pipeline `azure-pipelines-reports.yml` | Nightly report and documentation generation; commits reports to `main` | Read-only against Git data; no Graph write access |
 | Optional Azure OpenAI | PR summary generation only | Optional data egress path |
 
 ### High-Level Flow

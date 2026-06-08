@@ -105,6 +105,14 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--reports-only",
+        default="false",
+        help=(
+            "Skip all Graph API calls. Read committed JSON snapshots from --root and write "
+            "markdown reports to --reports-root. Token is not required in this mode."
+        ),
+    )
+    parser.add_argument(
         "--fail-on-export-error",
         default="true",
         help="Fail with non-zero exit code when any requested export category fails (true/false).",
@@ -660,31 +668,8 @@ def export_groups(
         write_json(out_dir / file_name, snapshot)
         written += 1
 
-    if reports_root is not None and reports_root.mkdir(parents=True, exist_ok=True) is None:
-        md_lines = [
-            "# Groups",
-            "",
-            "Security groups referenced in Conditional Access policies, explicitly watched, or role-assignable.",
-            f"Object count: **{written}**",
-            "",
-            "| Name | Id | Members | Privileged | Watched | CA Policies |",
-            "|---|---|---|---|---|---|",
-        ]
-        for gf in sorted(out_dir.glob("*.json")):
-            try:
-                data = json.loads(gf.read_text(encoding="utf-8"))
-            except Exception:  # noqa: BLE001
-                continue
-            name = str(data.get("displayName") or "").replace("|", "\\|")
-            rename = f" *(was: {data['previousDisplayName']})*" if data.get("previousDisplayName") else ""
-            gid = str(data.get("id") or "")
-            count = data.get("memberCount")
-            count_str = str(count) if count is not None else "?"
-            privileged_str = "Yes" if data.get("privileged") else ""
-            watched_str = "Yes" if data.get("watched") else ""
-            policies = ", ".join(str(p) for p in (data.get("caReferences") or []))
-            md_lines.append(f"| {name}{rename} | {gid} | {count_str} | {privileged_str} | {watched_str} | {policies} |")
-        (reports_root / "groups.md").write_text("\n".join(md_lines) + "\n", encoding="utf-8")
+    if reports_root is not None:
+        _write_groups_report(out_dir, reports_root)
 
     return written, failed
 
@@ -936,26 +921,8 @@ def export_role_assignments(
         write_json(out_dir / f"Unknown Role__{role_id}.json", snapshot)
         written += 1
 
-    if reports_root is not None and reports_root.mkdir(parents=True, exist_ok=True) is None:
-        md_lines = [
-            "# Role Assignments",
-            "",
-            "Directory roles with at least one permanent or PIM-eligible assignment.",
-            f"Object count: **{written}**",
-            "",
-            "| Role | Permanent | Eligible |",
-            "|---|---|---|",
-        ]
-        for rf in sorted(out_dir.glob("*.json")):
-            try:
-                data = json.loads(rf.read_text(encoding="utf-8"))
-            except Exception:  # noqa: BLE001
-                continue
-            name = str(data.get("displayName") or "").replace("|", "\\|")
-            perm_count = len(data.get("permanentAssignments") or [])
-            elig_count = len(data.get("eligibleAssignments") or [])
-            md_lines.append(f"| {name} | {perm_count} | {elig_count} |")
-        (reports_root / "role-assignments.md").write_text("\n".join(md_lines) + "\n", encoding="utf-8")
+    if reports_root is not None:
+        _write_role_assignments_report(out_dir, reports_root)
 
     log(f"Exported role assignments for {written} role(s).")
     return written, failed
@@ -988,18 +955,8 @@ def export_auth_methods_policy(
     write_json(out_dir / "Authentication Methods Policy.json", policy)
 
     method_configs = policy.get("authenticationMethodConfigurations") or []
-    if reports_root is not None and reports_root.mkdir(parents=True, exist_ok=True) is None:
-        md_lines = [
-            "# Authentication Methods Policy",
-            "",
-            "| Method | State |",
-            "|---|---|",
-        ]
-        for method in sorted(method_configs, key=lambda m: str(m.get("id") or "").casefold()):
-            method_id = str(method.get("id") or "").replace("|", "\\|")
-            state = str(method.get("state") or "")
-            md_lines.append(f"| {method_id} | {state} |")
-        (reports_root / "auth-methods-policy.md").write_text("\n".join(md_lines) + "\n", encoding="utf-8")
+    if reports_root is not None:
+        _write_auth_methods_report(out_dir, reports_root)
 
     log(f"Exported authentication methods policy ({len(method_configs)} method configuration(s)).")
     return 1, failed
@@ -1054,7 +1011,7 @@ def export_cross_tenant_access(
             written += 1
         log(f"  Exported {len(partners)} cross-tenant access partner setting(s).")
 
-        pass  # partners summary folded into the consolidated cross-tenant report below
+        pass  # partner rows are included in the consolidated cross-tenant report written below
 
     # External identities / collaboration policy.
     # HTTP 400 means the policy is not configured for this tenant type — treat as informational.
@@ -1074,43 +1031,8 @@ def export_cross_tenant_access(
         written += 1
         log("  Exported external collaboration settings.")
 
-    if reports_root is not None and reports_root.mkdir(parents=True, exist_ok=True) is None:
-        # Load default settings for inline summary
-        default_path = out_dir / "Default Settings.json"
-        default_data: dict = {}
-        try:
-            default_data = json.loads(default_path.read_text(encoding="utf-8")) if default_path.exists() else {}
-        except Exception:  # noqa: BLE001
-            pass
-
-        # Load partners
-        partner_rows: list[tuple[str, str]] = []
-        for pf in sorted((out_dir / "Partners").glob("*.json")) if (out_dir / "Partners").is_dir() else []:
-            try:
-                p = json.loads(pf.read_text(encoding="utf-8"))
-                name = str(p.get("displayName") or p.get("tenantId") or "").replace("|", "\\|")
-                tid = str(p.get("tenantId") or "")
-                partner_rows.append((name, tid))
-            except Exception:  # noqa: BLE001
-                continue
-
-        md_lines = [
-            "# Cross-Tenant Access",
-            "",
-            f"Object count: **{written}**",
-            "",
-        ]
-        if default_data:
-            md_lines += ["## Default Settings", "", "See `Cross-Tenant Access/Default Settings.json`.", ""]
-        if partner_rows:
-            md_lines += [f"## Partners ({len(partner_rows)})", "", "| Tenant | Id |", "|---|---|"]
-            for name, tid in partner_rows:
-                md_lines.append(f"| {name} | {tid} |")
-            md_lines.append("")
-        ext_path = out_dir / "External Collaboration Settings.json"
-        if ext_path.exists():
-            md_lines += ["## External Collaboration Settings", "", "See `Cross-Tenant Access/External Collaboration Settings.json`.", ""]
-        (reports_root / "cross-tenant-access.md").write_text("\n".join(md_lines) + "\n", encoding="utf-8")
+    if reports_root is not None:
+        _write_cross_tenant_report(out_dir, reports_root)
 
     return written, failed
 
@@ -1118,6 +1040,19 @@ def export_cross_tenant_access(
 # ---------------------------------------------------------------------------
 # 1.5  Identity Protection risk policies
 # ---------------------------------------------------------------------------
+
+_SECURITY_ENDPOINTS = [
+    {
+        "url": "https://graph.microsoft.com/v1.0/policies/identitySecurityDefaultsEnforcementPolicy",
+        "filename": "Security Defaults.json",
+        "display": "security defaults",
+    },
+    {
+        "url": "https://graph.microsoft.com/v1.0/policies/authorizationPolicy",
+        "filename": "Authorization Policy.json",
+        "display": "authorization policy",
+    },
+]
 
 _IDENTITY_PROTECTION_POLICIES = [
     {
@@ -1164,25 +1099,8 @@ def export_identity_protection(
         state = str(policy.get("isEnabled", policy.get("state", "unknown")))
         log(f"  Exported {policy_spec['display']} (state: {state}).")
 
-    if written > 0 and reports_root is not None and reports_root.mkdir(parents=True, exist_ok=True) is None:
-        md_lines = [
-            "# Identity Protection",
-            "",
-            f"Object count: **{written}**",
-            "",
-            "| Policy | State |",
-            "|---|---|",
-        ]
-        for spec in _IDENTITY_PROTECTION_POLICIES:
-            path = out_dir / spec["filename"]
-            if path.exists():
-                try:
-                    data = json.loads(path.read_text(encoding="utf-8"))
-                    state = str(data.get("isEnabled", data.get("state", "unknown")))
-                except Exception:  # noqa: BLE001
-                    state = "unknown"
-                md_lines.append(f"| {spec['display'].title()} | {state} |")
-        (reports_root / "identity-protection.md").write_text("\n".join(md_lines) + "\n", encoding="utf-8")
+    if written > 0 and reports_root is not None:
+        _write_identity_protection_report(out_dir, reports_root)
 
     return written, failed
 
@@ -1277,25 +1195,8 @@ def export_pim_policies(
         write_json(out_dir / file_name, snapshot)
         written += 1
 
-    if reports_root is not None and reports_root.mkdir(parents=True, exist_ok=True) is None:
-        md_lines = [
-            "# PIM Role Policies",
-            "",
-            "Per-role PIM governance settings: activation duration, approval requirements, MFA enforcement.",
-            f"Object count: **{written}**",
-            "",
-            "| Role | Policy ID |",
-            "|---|---|",
-        ]
-        for rf in sorted(out_dir.glob("*.json")):
-            try:
-                data = json.loads(rf.read_text(encoding="utf-8"))
-            except Exception:  # noqa: BLE001
-                continue
-            name = str(data.get("roleDisplayName") or "").replace("|", "\\|")
-            pid = str(data.get("policyId") or "")
-            md_lines.append(f"| {name} | {pid} |")
-        (reports_root / "pim-role-policies.md").write_text("\n".join(md_lines) + "\n", encoding="utf-8")
+    if reports_root is not None:
+        _write_pim_policies_report(out_dir, reports_root)
 
     log(f"Exported PIM governance policies for {written} role(s).")
     return written, failed
@@ -1317,19 +1218,6 @@ def export_security_settings(
     out_dir.mkdir(parents=True, exist_ok=True)
     written = 0
 
-    _SECURITY_ENDPOINTS = [
-        {
-            "url": "https://graph.microsoft.com/v1.0/policies/identitySecurityDefaultsEnforcementPolicy",
-            "filename": "Security Defaults.json",
-            "display": "security defaults",
-        },
-        {
-            "url": "https://graph.microsoft.com/v1.0/policies/authorizationPolicy",
-            "filename": "Authorization Policy.json",
-            "display": "authorization policy",
-        },
-    ]
-
     for spec in _SECURITY_ENDPOINTS:
         policy, error = client.get_object(spec["url"])
         if error:
@@ -1345,22 +1233,207 @@ def export_security_settings(
         written += 1
         log(f"  Exported {spec['display']}.")
 
-    if reports_root is not None and written > 0 and reports_root.mkdir(parents=True, exist_ok=True) is None:
-        md_lines = [
-            "# Security Settings",
-            "",
-            "Tenant-wide security configuration.",
-            f"Object count: **{written}**",
-            "",
-            "| Item | File |",
-            "|---|---|",
-        ]
-        for spec in _SECURITY_ENDPOINTS:
-            if (out_dir / spec["filename"]).exists():
-                md_lines.append(f"| {spec['display'].title()} | Security/{spec['filename']} |")
-        (reports_root / "security.md").write_text("\n".join(md_lines) + "\n", encoding="utf-8")
+    if written > 0 and reports_root is not None:
+        _write_security_report(out_dir, reports_root)
 
     return written, failed
+
+
+# ---------------------------------------------------------------------------
+# Standalone report writers — read from committed JSON, no API calls
+# ---------------------------------------------------------------------------
+
+def _write_groups_report(data_dir: pathlib.Path, reports_root: pathlib.Path) -> None:
+    if not data_dir.is_dir():
+        return
+    reports_root.mkdir(parents=True, exist_ok=True)
+    md_lines = [
+        "# Groups",
+        "",
+        "Security groups referenced in Conditional Access policies, explicitly watched, or role-assignable.",
+        f"Object count: **{sum(1 for _ in data_dir.glob('*.json'))}**",
+        "",
+        "| Name | Id | Members | Privileged | Watched | CA Policies |",
+        "|---|---|---|---|---|---|",
+    ]
+    for gf in sorted(data_dir.glob("*.json")):
+        try:
+            data = json.loads(gf.read_text(encoding="utf-8"))
+        except Exception:  # noqa: BLE001
+            continue
+        name = str(data.get("displayName") or "").replace("|", "\\|")
+        rename = f" *(was: {data['previousDisplayName']})*" if data.get("previousDisplayName") else ""
+        gid = str(data.get("id") or "")
+        count = data.get("memberCount")
+        count_str = str(count) if count is not None else "?"
+        md_lines.append(
+            f"| {name}{rename} | {gid} | {count_str} "
+            f"| {'Yes' if data.get('privileged') else ''} "
+            f"| {'Yes' if data.get('watched') else ''} "
+            f"| {', '.join(str(p) for p in (data.get('caReferences') or []))} |"
+        )
+    (reports_root / "groups.md").write_text("\n".join(md_lines) + "\n", encoding="utf-8")
+
+
+def _write_role_assignments_report(data_dir: pathlib.Path, reports_root: pathlib.Path) -> None:
+    if not data_dir.is_dir():
+        return
+    reports_root.mkdir(parents=True, exist_ok=True)
+    rows: list[tuple[str, int, int]] = []
+    for rf in sorted(data_dir.glob("*.json")):
+        try:
+            data = json.loads(rf.read_text(encoding="utf-8"))
+        except Exception:  # noqa: BLE001
+            continue
+        rows.append((
+            str(data.get("displayName") or "").replace("|", "\\|"),
+            len(data.get("permanentAssignments") or []),
+            len(data.get("eligibleAssignments") or []),
+        ))
+    md_lines = [
+        "# Role Assignments",
+        "",
+        "Directory roles with at least one permanent or PIM-eligible assignment.",
+        f"Object count: **{len(rows)}**",
+        "",
+        "| Role | Permanent | Eligible |",
+        "|---|---|---|",
+    ] + [f"| {name} | {p} | {e} |" for name, p, e in rows]
+    (reports_root / "role-assignments.md").write_text("\n".join(md_lines) + "\n", encoding="utf-8")
+
+
+def _write_auth_methods_report(data_dir: pathlib.Path, reports_root: pathlib.Path) -> None:
+    policy_path = data_dir / "Authentication Methods Policy.json"
+    if not policy_path.exists():
+        return
+    reports_root.mkdir(parents=True, exist_ok=True)
+    try:
+        policy = json.loads(policy_path.read_text(encoding="utf-8"))
+    except Exception:  # noqa: BLE001
+        return
+    method_configs = policy.get("authenticationMethodConfigurations") or []
+    md_lines = [
+        "# Authentication Methods Policy",
+        "",
+        "| Method | State |",
+        "|---|---|",
+    ] + [
+        f"| {str(m.get('id') or '').replace('|', chr(92) + '|')} | {m.get('state', '')} |"
+        for m in sorted(method_configs, key=lambda m: str(m.get("id") or "").casefold())
+    ]
+    (reports_root / "auth-methods-policy.md").write_text("\n".join(md_lines) + "\n", encoding="utf-8")
+
+
+def _write_cross_tenant_report(data_dir: pathlib.Path, reports_root: pathlib.Path) -> None:
+    if not data_dir.is_dir():
+        return
+    reports_root.mkdir(parents=True, exist_ok=True)
+    partners_dir = data_dir / "Partners"
+    partner_rows: list[tuple[str, str]] = []
+    if partners_dir.is_dir():
+        for pf in sorted(partners_dir.glob("*.json")):
+            try:
+                p = json.loads(pf.read_text(encoding="utf-8"))
+                name = str(p.get("displayName") or p.get("tenantId") or "").replace("|", "\\|")
+                tid = str(p.get("tenantId") or "")
+                partner_rows.append((name, tid))
+            except Exception:  # noqa: BLE001
+                continue
+    md_lines = ["# Cross-Tenant Access", "", f"Object count: **{2 + len(partner_rows)}**", ""]
+    if (data_dir / "Default Settings.json").exists():
+        md_lines += ["## Default Settings", "", "See `Cross-Tenant Access/Default Settings.json`.", ""]
+    if partner_rows:
+        md_lines += [f"## Partners ({len(partner_rows)})", "", "| Tenant | Id |", "|---|---|"]
+        md_lines += [f"| {name} | {tid} |" for name, tid in partner_rows]
+        md_lines.append("")
+    if (data_dir / "External Collaboration Settings.json").exists():
+        md_lines += ["## External Collaboration Settings", "", "See `Cross-Tenant Access/External Collaboration Settings.json`.", ""]
+    (reports_root / "cross-tenant-access.md").write_text("\n".join(md_lines) + "\n", encoding="utf-8")
+
+
+def _write_identity_protection_report(data_dir: pathlib.Path, reports_root: pathlib.Path) -> None:
+    if not data_dir.is_dir():
+        return
+    rows: list[tuple[str, str]] = []
+    for spec in _IDENTITY_PROTECTION_POLICIES:
+        path = data_dir / spec["filename"]
+        if not path.exists():
+            continue
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+            state = str(data.get("isEnabled", data.get("state", "unknown")))
+        except Exception:  # noqa: BLE001
+            state = "unknown"
+        rows.append((spec["display"].title(), state))
+    if not rows:
+        return
+    reports_root.mkdir(parents=True, exist_ok=True)
+    md_lines = [
+        "# Identity Protection",
+        "",
+        f"Object count: **{len(rows)}**",
+        "",
+        "| Policy | State |",
+        "|---|---|",
+    ] + [f"| {name} | {state} |" for name, state in rows]
+    (reports_root / "identity-protection.md").write_text("\n".join(md_lines) + "\n", encoding="utf-8")
+
+
+def _write_pim_policies_report(data_dir: pathlib.Path, reports_root: pathlib.Path) -> None:
+    if not data_dir.is_dir():
+        return
+    rows: list[tuple[str, str]] = []
+    for rf in sorted(data_dir.glob("*.json")):
+        try:
+            data = json.loads(rf.read_text(encoding="utf-8"))
+            rows.append((str(data.get("roleDisplayName") or "").replace("|", "\\|"), str(data.get("policyId") or "")))
+        except Exception:  # noqa: BLE001
+            continue
+    if not rows:
+        return
+    reports_root.mkdir(parents=True, exist_ok=True)
+    md_lines = [
+        "# PIM Role Policies",
+        "",
+        "Per-role PIM governance settings: activation duration, approval requirements, MFA enforcement.",
+        f"Object count: **{len(rows)}**",
+        "",
+        "| Role | Policy ID |",
+        "|---|---|",
+    ] + [f"| {name} | {pid} |" for name, pid in rows]
+    (reports_root / "pim-role-policies.md").write_text("\n".join(md_lines) + "\n", encoding="utf-8")
+
+
+def _write_security_report(data_dir: pathlib.Path, reports_root: pathlib.Path) -> None:
+    if not data_dir.is_dir():
+        return
+    present = [spec for spec in _SECURITY_ENDPOINTS if (data_dir / spec["filename"]).exists()]
+    if not present:
+        return
+    reports_root.mkdir(parents=True, exist_ok=True)
+    md_lines = [
+        "# Security Settings",
+        "",
+        "Tenant-wide security configuration.",
+        f"Object count: **{len(present)}**",
+        "",
+        "| Item | File |",
+        "|---|---|",
+    ] + [f"| {spec['display'].title()} | Security/{spec['filename']} |" for spec in present]
+    (reports_root / "security.md").write_text("\n".join(md_lines) + "\n", encoding="utf-8")
+
+
+def generate_identity_reports(root: pathlib.Path, reports_root: pathlib.Path) -> None:
+    """Generate all identity markdown reports by reading committed JSON. No API calls needed."""
+    log(f"Generating identity reports from {root} → {reports_root}")
+    _write_groups_report(root / "Groups", reports_root)
+    _write_role_assignments_report(root / "Role Assignments", reports_root)
+    _write_auth_methods_report(root / "Authentication Methods", reports_root)
+    _write_cross_tenant_report(root / "Cross-Tenant Access", reports_root)
+    _write_identity_protection_report(root / "Identity Protection", reports_root)
+    _write_pim_policies_report(root / "PIM Role Policies", reports_root)
+    _write_security_report(root / "Security", reports_root)
+    log("Identity reports written.")
 
 
 # ---------------------------------------------------------------------------
@@ -1372,6 +1445,16 @@ def main() -> int:
     root = pathlib.Path(args.root).resolve()
     token = args.token.strip()
     fail_on_export_error = to_bool(args.fail_on_export_error)
+
+    # Reports-only mode: read committed JSON, generate markdown, no API calls.
+    if to_bool(args.reports_only):
+        reports_root_raw = args.reports_root.strip() if args.reports_root else ""
+        if reports_root_raw:
+            rr = pathlib.Path(reports_root_raw).resolve()
+        else:
+            rr = root.parent / "reports" / root.name
+        generate_identity_reports(root, rr)
+        return 0
 
     if not token:
         log("No Graph token provided. Skipping Entra identity export.")

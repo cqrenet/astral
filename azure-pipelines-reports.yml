@@ -1,0 +1,163 @@
+trigger:
+  branches:
+    include:
+      - main
+  paths:
+    # Don't re-trigger when we commit the reports we just generated.
+    exclude:
+      - tenant-state/reports/**
+
+schedules:
+  - cron: "0 4 * * *"
+    displayName: "Nightly report refresh"
+    branches:
+      include:
+        - main
+    always: true
+
+variables:
+  - group: vg-astral
+  - template: templates/variables-common.yml
+  - name: INTUNE_BACKUP_SUBDIR
+    value: intune
+  - name: ENTRA_BACKUP_SUBDIR
+    value: entra
+  - name: INTUNECD_VERSION
+    value: 2.6.0
+
+jobs:
+  - job: generate_reports
+    displayName: Generate and commit reports
+    pool:
+      name: $(AGENT_POOL_NAME)
+    steps:
+      - checkout: self
+        persistCredentials: true
+
+      # Reports always run from main — switch to it and pull latest merged state.
+      - task: Bash@3
+        displayName: Ensure main branch is checked out
+        inputs:
+          targetType: inline
+          script: |
+            set -euo pipefail
+            git fetch --quiet origin main
+            git checkout -B main origin/main
+          workingDirectory: "$(Build.SourcesDirectory)"
+          failOnStderr: false
+
+      - task: Bash@3
+        displayName: Install dependencies
+        inputs:
+          targetType: inline
+          script: |
+            set -euo pipefail
+            pip3 install "IntuneCD==$(INTUNECD_VERSION)" PyYAML
+          workingDirectory: "$(Build.SourcesDirectory)"
+          failOnStderr: true
+
+      # -----------------------------------------------------------------------
+      # Intune reports
+      # -----------------------------------------------------------------------
+
+      - task: Bash@3
+        displayName: Generate Intune reports
+        inputs:
+          targetType: inline
+          script: |
+            set -euo pipefail
+            python3 "$(Build.SourcesDirectory)/scripts/run_reports.py" \
+              --workload intune \
+              --backup-dir "$(Build.SourcesDirectory)/$(BACKUP_FOLDER)/$(INTUNE_BACKUP_SUBDIR)" \
+              --reports-dir "$(Build.SourcesDirectory)/$(BACKUP_FOLDER)/$(REPORTS_SUBDIR)/intune" \
+              --repo-root "$(Build.SourcesDirectory)" \
+              --mode 1 \
+              --type reports
+          workingDirectory: "$(Build.SourcesDirectory)"
+          failOnStderr: true
+
+      - task: Bash@3
+        displayName: Generate Intune documentation
+        inputs:
+          targetType: inline
+          script: |
+            set -euo pipefail
+            python3 "$(Build.SourcesDirectory)/scripts/run_reports.py" \
+              --workload intune \
+              --backup-dir "$(Build.SourcesDirectory)/$(BACKUP_FOLDER)/$(INTUNE_BACKUP_SUBDIR)" \
+              --reports-dir "$(Build.SourcesDirectory)/$(BACKUP_FOLDER)/$(REPORTS_SUBDIR)/intune" \
+              --repo-root "$(Build.SourcesDirectory)" \
+              --mode 1 \
+              --type documentation
+          workingDirectory: "$(Build.SourcesDirectory)"
+          failOnStderr: false
+        env:
+          TENANT_NAME: $(TENANT_NAME)
+          BUILD_REPOSITORY_URI: $(Build.Repository.Uri)
+          SPLIT_DOCUMENTATION: $(SPLIT_DOCUMENTATION)
+
+      # -----------------------------------------------------------------------
+      # Entra reports
+      # -----------------------------------------------------------------------
+
+      - task: Bash@3
+        displayName: Generate Entra reports
+        inputs:
+          targetType: inline
+          script: |
+            set -euo pipefail
+            python3 "$(Build.SourcesDirectory)/scripts/run_reports.py" \
+              --workload entra \
+              --backup-dir "$(Build.SourcesDirectory)/$(BACKUP_FOLDER)/$(ENTRA_BACKUP_SUBDIR)" \
+              --reports-dir "$(Build.SourcesDirectory)/$(BACKUP_FOLDER)/$(REPORTS_SUBDIR)/entra" \
+              --repo-root "$(Build.SourcesDirectory)" \
+              --mode 1 \
+              --type reports
+          workingDirectory: "$(Build.SourcesDirectory)"
+          failOnStderr: true
+        env:
+          ENTRA_INCLUDE_CONDITIONAL_ACCESS: "true"
+          ENTRA_INCLUDE_APP_REGISTRATIONS_EFFECTIVE: "true"
+          ENTRA_INCLUDE_ENTERPRISE_APPS_EFFECTIVE: "true"
+
+      - task: Bash@3
+        displayName: Generate Entra identity reports
+        inputs:
+          targetType: inline
+          script: |
+            set -euo pipefail
+            python3 "$(Build.SourcesDirectory)/scripts/export_entra_identity.py" \
+              --root "$(Build.SourcesDirectory)/$(BACKUP_FOLDER)/$(ENTRA_BACKUP_SUBDIR)" \
+              --token "" \
+              --reports-only true \
+              --reports-root "$(Build.SourcesDirectory)/$(BACKUP_FOLDER)/$(REPORTS_SUBDIR)/$(ENTRA_BACKUP_SUBDIR)"
+          workingDirectory: "$(Build.SourcesDirectory)"
+          failOnStderr: false
+
+      # -----------------------------------------------------------------------
+      # Commit all reports back to main
+      # -----------------------------------------------------------------------
+
+      - task: Bash@3
+        displayName: Commit and push reports to main
+        inputs:
+          targetType: inline
+          script: |
+            set -euo pipefail
+            REPORTS_PATH="$(BACKUP_FOLDER)/$(REPORTS_SUBDIR)"
+
+            git config user.name "$(USER_NAME)"
+            git config user.email "$(USER_EMAIL)"
+            git add -- "$REPORTS_PATH"
+
+            if git diff --cached --quiet; then
+              echo "Reports unchanged — nothing to commit."
+              exit 0
+            fi
+
+            DATEF="$(date -u +%Y.%m.%d_%H.%M)"
+            git commit -m "$DATEF -- Update reports [skip ci]"
+            git push origin HEAD:main
+            echo "Reports committed and pushed to main."
+          workingDirectory: "$(Build.SourcesDirectory)"
+          failOnStderr: false

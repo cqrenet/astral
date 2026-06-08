@@ -727,22 +727,6 @@ jobs:
           BUILD_SOURCESDIRECTORY: $(Build.SourcesDirectory)
 
       - task: Bash@3
-        displayName: Generate Intune reports
-        inputs:
-          targetType: inline
-          script: |
-            set -euo pipefail
-            python3 "$(Build.SourcesDirectory)/scripts/run_reports.py" \
-              --workload intune \
-              --backup-dir "$(Build.SourcesDirectory)/$(BACKUP_FOLDER)/$(INTUNE_BACKUP_SUBDIR)" \
-              --reports-dir "$(Build.SourcesDirectory)/$(BACKUP_FOLDER)/$(REPORTS_SUBDIR)/intune" \
-              --repo-root "$(Build.SourcesDirectory)" \
-              --mode "$(FULL_RUN)" \
-              --type reports
-          workingDirectory: "$(Build.SourcesDirectory)"
-          failOnStderr: true
-
-      - task: Bash@3
         displayName: Validate Intune backup outputs
         inputs:
           targetType: inline
@@ -755,8 +739,7 @@ jobs:
             python3 "$(PIPELINE_SCRIPT_ROOT)/validate_backup_outputs.py" \
               --workload intune \
               --mode "$MODE" \
-              --root "$(Build.SourcesDirectory)/$(BACKUP_FOLDER)/$(INTUNE_BACKUP_SUBDIR)" \
-              --reports-root "$(Build.SourcesDirectory)/$(BACKUP_FOLDER)/$(REPORTS_SUBDIR)/intune"
+              --root "$(Build.SourcesDirectory)/$(BACKUP_FOLDER)/$(INTUNE_BACKUP_SUBDIR)"
           workingDirectory: "$(Build.SourcesDirectory)"
           failOnStderr: true
 
@@ -1174,55 +1157,6 @@ jobs:
               echo "##vso[task.setVariable variable=ROLLING_PR_SYNC_REQUIRED]0"
               echo "##vso[task.setVariable variable=ROLLING_PR_SYNC_REQUIRED;isOutput=true]0"
             }
-
-      # Commit Intune reports on every full run, even when no config changed.
-      # The main PowerShell commit step explicitly excludes tenant-state/reports/ from
-      # change detection and staging. This step handles reports independently so they
-      # are always up to date in git after a full run.
-      - task: Bash@3
-        displayName: Commit Intune reports (full run)
-        condition: eq(variables['FULL_RUN'], '1')
-        inputs:
-          targetType: inline
-          script: |
-            set -euo pipefail
-            REPORTS_PATH="$(BACKUP_FOLDER)/$(REPORTS_SUBDIR)/$(INTUNE_BACKUP_SUBDIR)"
-
-            git add --all -- "$REPORTS_PATH"
-
-            if git diff --cached --quiet; then
-              echo "Intune reports unchanged since last commit — nothing to commit."
-              exit 0
-            fi
-
-            git -c user.name="$(USER_NAME)" -c user.email="$(USER_EMAIL)" \
-              commit -m "$(BACKUP_START) -- Intune reports (full run)"
-            git push --force-with-lease origin "HEAD:$(DRIFT_BRANCH_INTUNE)"
-            echo "Intune reports committed and pushed to $(DRIFT_BRANCH_INTUNE)."
-          workingDirectory: "$(Build.SourcesDirectory)"
-          failOnStderr: false
-
-      # Create markdown documentation (non-drift output)
-      - task: Bash@3
-        displayName: Generate markdown document
-        condition: and(eq(variables['CHANGE_DETECTED'], '1'), eq(variables['FULL_RUN'], '1'))
-        inputs:
-          targetType: inline
-          script: |
-            set -euo pipefail
-            python3 "$(Build.SourcesDirectory)/scripts/run_reports.py" \
-              --workload intune \
-              --backup-dir "$(Build.SourcesDirectory)/$(BACKUP_FOLDER)/$(INTUNE_BACKUP_SUBDIR)" \
-              --reports-dir "$(Build.SourcesDirectory)/$(BACKUP_FOLDER)/$(REPORTS_SUBDIR)/intune" \
-              --repo-root "$(Build.SourcesDirectory)" \
-              --mode "$(FULL_RUN)" \
-              --type documentation
-          workingDirectory: "$(Build.SourcesDirectory)"
-          failOnStderr: false
-        env:
-          TENANT_NAME: $(TENANT_NAME)
-          BUILD_REPOSITORY_URI: $(Build.Repository.Uri)
-          SPLIT_DOCUMENTATION: $(SPLIT_DOCUMENTATION)
 
   - job: create_or_update_intune_pr
     displayName: Create or update rolling Intune drift PR
@@ -1655,7 +1589,6 @@ jobs:
               --include-security-settings "$(ENTRA_INCLUDE_SECURITY_SETTINGS)" \
               --watch-groups-csv "$(ENTRA_WATCH_GROUPS_CSV)" \
               --previous-snapshot-ref "origin/$(DRIFT_BRANCH_ENTRA)" \
-              --reports-root "$(Build.SourcesDirectory)/$(BACKUP_FOLDER)/$(REPORTS_SUBDIR)/$(ENTRA_BACKUP_SUBDIR)" \
               --fail-on-export-error "true"
           workingDirectory: "$(Build.SourcesDirectory)"
           failOnStderr: false
@@ -1675,26 +1608,6 @@ jobs:
           failOnStderr: false
 
       - task: Bash@3
-        displayName: Generate Entra reports
-        inputs:
-          targetType: inline
-          script: |
-            set -euo pipefail
-            python3 "$(Build.SourcesDirectory)/scripts/run_reports.py" \
-              --workload entra \
-              --backup-dir "$(Build.SourcesDirectory)/$(BACKUP_FOLDER)/$(ENTRA_BACKUP_SUBDIR)" \
-              --reports-dir "$(Build.SourcesDirectory)/$(BACKUP_FOLDER)/$(REPORTS_SUBDIR)/entra" \
-              --repo-root "$(Build.SourcesDirectory)" \
-              --mode "$(ENTRA_RUN_MODE)" \
-              --type reports
-          workingDirectory: "$(Build.SourcesDirectory)"
-          failOnStderr: true
-        env:
-          ENTRA_INCLUDE_CONDITIONAL_ACCESS: $(ENTRA_INCLUDE_CONDITIONAL_ACCESS)
-          ENTRA_INCLUDE_APP_REGISTRATIONS_EFFECTIVE: $(ENTRA_INCLUDE_APP_REGISTRATIONS_EFFECTIVE)
-          ENTRA_INCLUDE_ENTERPRISE_APPS_EFFECTIVE: $(ENTRA_INCLUDE_ENTERPRISE_APPS_EFFECTIVE)
-
-      - task: Bash@3
         displayName: Validate Entra backup outputs
         inputs:
           targetType: inline
@@ -1704,7 +1617,6 @@ jobs:
               --workload entra \
               --mode "$(ENTRA_RUN_MODE)" \
               --root "$(Build.SourcesDirectory)/$(BACKUP_FOLDER)/$(ENTRA_BACKUP_SUBDIR)" \
-              --reports-root "$(Build.SourcesDirectory)/$(BACKUP_FOLDER)/$(REPORTS_SUBDIR)/entra" \
               --include-named-locations "$(ENTRA_INCLUDE_NAMED_LOCATIONS)" \
               --include-authentication-strengths "$(ENTRA_INCLUDE_AUTHENTICATION_STRENGTHS)" \
               --include-conditional-access "$(ENTRA_INCLUDE_CONDITIONAL_ACCESS)" \
@@ -1738,7 +1650,6 @@ jobs:
             python3 "$(Build.SourcesDirectory)/scripts/commit_entra_drift.py" \
               --repo-root "$(Build.SourcesDirectory)" \
               --workload-root "$(BACKUP_FOLDER)/$(ENTRA_BACKUP_SUBDIR)" \
-              --reports-root "$(BACKUP_FOLDER)/$(REPORTS_SUBDIR)/$(ENTRA_BACKUP_SUBDIR)" \
               --baseline-branch "$(BASELINE_BRANCH)" \
               --drift-branch "$(DRIFT_BRANCH_ENTRA)" \
               --access-token "$(accessToken)" \

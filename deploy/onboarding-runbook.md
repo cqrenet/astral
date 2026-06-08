@@ -142,6 +142,7 @@ For each pipeline: **Pipelines → New pipeline → Azure Repos Git → select y
 | `azure-pipelines.yml` | `ASTRAL — Backup` |
 | `azure-pipelines-review-sync.yml` | `ASTRAL — Review Sync` |
 | `azure-pipelines-restore.yml` | `ASTRAL — Restore` |
+| `azure-pipelines-reports.yml` | `ASTRAL — Reports` |
 
 ## Step 7: Grant repository permissions to the build identity
 
@@ -155,10 +156,11 @@ For each pipeline: **Pipelines → New pipeline → Azure Repos Git → select y
    - Create tag (only if you enable snapshot tagging)
 
 4. On the same **Security** page, scroll down to the **Pipeline permissions** section.
-   Click **+** and add all three pipelines:
-   - `ASTRAL — Main Backup`
+   Click **+** and add all four pipelines:
+   - `ASTRAL — Backup`
    - `ASTRAL — Review Sync`
    - `ASTRAL — Restore`
+   - `ASTRAL — Reports`
 
    This is required because you did not tick "Grant access to all pipelines" when creating the service connection.
 
