@@ -78,12 +78,21 @@ Entra currently tracks:
 - Conditional Access
 - App Registrations
 - Enterprise Applications
+- Security Groups (with Conditional Access references and member counts)
+- Directory Role Assignments (permanent + PIM-eligible)
+- PIM Role Governance Policies (activation duration, approval, MFA settings)
+- Authentication Methods Policy
+- Cross-Tenant Access Settings
+- Identity Protection Risk Policies
+- Security Defaults
+- Authorization Policy
 
 Current scope behavior:
 
-- Named Locations, Authentication Strengths, and Conditional Access run on hourly light runs and midnight full runs.
-- App Registrations and Enterprise Applications are enabled in the pipeline but exported only on full runs.
-- During light runs, the previous drift-branch snapshot of `App Registrations` and `Enterprise Applications` is preserved to avoid churn and heavy export cost.
+- The main backup pipeline runs daily at 02:00 and is triggered on-demand by the event-driven change probe.
+- Named Locations, Authentication Strengths, and Conditional Access run on every backup.
+- App Registrations, Enterprise Applications, and v2 identity objects (PIM policies, security settings, privileged groups) are exported on full runs only (daily full-run hour or `forceFullRun=true`).
+- During light runs, the previous drift-branch snapshot of full-run-only categories is preserved to avoid churn and heavy export cost.
 
 ## Repository Layout
 
