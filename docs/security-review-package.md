@@ -68,7 +68,7 @@ Important clarifications:
 | Azure DevOps REST APIs | PR creation/update, review thread sync, restore queueing, pipeline trigger | Change-management control plane |
 | Optional: MCP server (`infra/mcp-server`) | Azure Container Apps-hosted HTTPS endpoint exposing tenant state and drift history to MCP-capable AI assistants | First and only inbound endpoint in the platform; protected by API key or Entra ID bearer token; read-only access to Git data via ADO REST API |
 | Optional: Azure Container Registry | Hosts the MCP server container image built during provisioning | Image supply chain — should be scoped to the deployment subscription |
-| Azure DevOps pipeline `azure-pipelines-reports.yml` | Nightly report and documentation generation; commits reports to `main` | Read-only against Git data; no Graph write access |
+| Azure DevOps pipeline `azure-pipelines-reports.yml` | Report and documentation generation; runs nightly at 04:00 and on changes to `tenant-state/intune/**` or `tenant-state/entra/**`; commits reports to `main` | Read-only against Git data; no Graph write access |
 | Optional Azure OpenAI | PR summary generation only | Optional data egress path |
 
 ### High-Level Flow
@@ -80,7 +80,7 @@ flowchart LR
     A --> D["Azure Queue Storage<br/>backup-trigger-queue"]
     E["Azure Function App<br/>queue_consumer"] --> D
     E --> F["Azure DevOps REST API<br/>queue pipeline run"]
-    G["Azure DevOps scheduled pipeline<br/>daily snapshot + reports"] --> H["Federated service connection"]
+    G["Azure DevOps scheduled pipeline<br/>daily snapshot"] --> H["Federated service connection"]
     H --> B
     G --> I["Git repo: main + drift branches"]
     G --> J["Azure DevOps PR and thread APIs"]
@@ -98,9 +98,10 @@ flowchart LR
 
 ### Backup and Review
 
-The main pipeline runs daily at 02:00 on `main` to generate a full tenant snapshot, reports, and documentation artifacts. It is also triggered on demand by the change probe when drift is detected (see the Change Probe section below).
+The main pipeline runs daily at 02:00 on `main` to generate a full tenant snapshot. It is also triggered on demand by the change probe when drift is detected (see the Change Probe section below). Report and documentation generation is handled by `azure-pipelines-reports.yml`.
 
-- Daily at 02:00: export Intune and Entra configuration, generate reports, commit drift to rolling workload branches, and update one rolling PR per workload.
+- Daily at 02:00: export Intune and Entra configuration, commit drift to rolling workload branches, and update one rolling PR per workload.
+- `azure-pipelines-reports.yml`: runs daily at 04:00 and on changes to `tenant-state/intune/**` or `tenant-state/entra/**` to regenerate reports and documentation, then commits results to `main`.
 - When delayed reviewer notifications are enabled, newly created rolling PRs are opened as Azure DevOps draft PRs, the automated summary is inserted, and the PR is then published for reviewer notification.
 - At the configured full-run hour: perform the same work plus documentation artifact generation (Markdown, and optionally HTML/PDF if browser dependencies are available).
 

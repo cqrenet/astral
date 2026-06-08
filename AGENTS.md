@@ -9,7 +9,7 @@ The implementation is centered on four Azure DevOps pipelines and an optional MC
 - `azure-pipelines.yml`: daily full backup/export pipeline with rolling PR management (previously hourly; now driven primarily by event-driven change probe).
 - `azure-pipelines-review-sync.yml`: 20-minute reviewer-decision sync and post-merge remediation queue.
 - `azure-pipelines-restore.yml`: manual or auto-queued restore pipeline for approved baseline rollback.
-- `azure-pipelines-reports.yml`: nightly report and documentation generation pipeline (04:00). Commits generated reports directly to `main`.
+- `azure-pipelines-reports.yml`: report and documentation generation pipeline. Runs nightly at 04:00 and triggers automatically when `tenant-state/intune/**` or `tenant-state/entra/**` changes. Commits generated reports directly to `main`.
 
 Workflow at a high level:
 1. Export Intune and Entra configuration into `tenant-state/`.
@@ -39,7 +39,7 @@ Workflow at a high level:
 ├── azure-pipelines.yml              # Main backup pipeline (daily snapshot + event-driven trigger)
 ├── azure-pipelines-review-sync.yml  # 20-minute review sync
 ├── azure-pipelines-restore.yml      # Baseline restore pipeline
-├── azure-pipelines-reports.yml      # Nightly report and documentation generation
+├── azure-pipelines-reports.yml      # Report and documentation generation (scheduled + data-driven)
 ├── scripts/                         # Python automation helpers
 ├── tests/                           # unittest coverage for scripts
 ├── tenant-state/                    # Committed JSON exports and reports
@@ -197,10 +197,11 @@ Because Microsoft Graph change notifications and delta queries do not support In
   6. Filter enrichment noise and commit drift.
 
 - **Reports job** (`generate_reports` in `azure-pipelines-reports.yml`):
-  1. Checkout latest `main`.
-  2. Generate Intune reports and documentation.
-  3. Generate Entra reports and identity reports (using `--reports-only` where applicable).
-  4. Commit results to `main` with `[skip ci]`.
+  1. Triggered by nightly schedule (04:00) or by changes to `tenant-state/intune/**` or `tenant-state/entra/**`.
+  2. Checkout latest `main`.
+  3. Generate Intune reports and documentation.
+  4. Generate Entra reports and identity reports (using `--reports-only` where applicable).
+  5. Commit results to `main` with `[skip ci]`.
 
 - **Review sync jobs** (`sync_intune_review_decisions`, `sync_entra_review_decisions`):
   1. Apply `/reject` decisions.

@@ -40,7 +40,7 @@ The implementation is centered on four Azure DevOps pipelines and an MCP server:
 - `azure-pipelines.yml`: backup/export pipeline with rolling PR management. Runs daily at 02:00 to generate a full tenant snapshot and is also triggered on-demand by the event-driven change probe.
 - `azure-pipelines-review-sync.yml`: 20-minute reviewer-decision sync and post-merge remediation queue.
 - `azure-pipelines-restore.yml`: manual or auto-queued restore pipeline for approved baseline rollback.
-- `azure-pipelines-reports.yml`: nightly report and documentation generation pipeline (04:00). Commits generated reports directly to `main`.
+- `azure-pipelines-reports.yml`: report and documentation generation pipeline. Runs nightly at 04:00 and triggers automatically when `tenant-state/intune/**` or `tenant-state/entra/**` changes. Commits generated reports directly to `main`.
 - `infra/mcp-server/`: Azure Container Apps-hosted MCP server exposing tenant state and drift history to AI assistants via natural-language queries.
 
 The main workflow is:
@@ -171,7 +171,12 @@ It also supports optional Entra update when restore automation is triggered for 
 
 ### Reports Pipeline
 
-`azure-pipelines-reports.yml` runs daily at 04:00 on `main` to generate reports and documentation artifacts from the latest committed tenant state.
+`azure-pipelines-reports.yml` generates reports and documentation artifacts from the latest committed tenant state.
+
+It runs on two triggers:
+
+- **Nightly schedule**: daily at 04:00 on `main`.
+- **Data-driven trigger**: automatically when drift is committed to `tenant-state/intune/**` or `tenant-state/entra/**` (excluding `tenant-state/reports/**` to avoid loops).
 
 It:
 
@@ -187,6 +192,7 @@ Reports are written to `tenant-state/reports/**` and documentation artifacts are
 
 - Main backup schedule: daily at 02:00, `0 2 * * *`, on `main` (full snapshot)
 - Reports schedule: daily at 04:00, `0 4 * * *`, on `main` (reports and documentation)
+- Reports data-driven trigger: `tenant-state/intune/**` or `tenant-state/entra/**` changes on `main`
 - Change probe trigger: event-driven, on-demand via Azure Function App
 - Review sync schedule: every 20 minutes, `*/20 * * * *`, on `main`
 - Full mode: configured full-run hour (default 00:00) or manual queue with `forceFullRun=true`
