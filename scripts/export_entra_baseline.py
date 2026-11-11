@@ -467,6 +467,30 @@ def _find_app_role(resource_sp: Any, app_role_id: str) -> tuple[str, str]:
     return "", ""
 
 
+def _load_resource_sp(
+    client: GraphClient,
+    resource_id: str,
+    cache: dict[str, dict[str, Any] | None],
+    lock: Any,
+) -> tuple[dict[str, Any] | None, str | None]:
+    """Resource service principal by object id: from the cache, else fetched once and cached.
+
+    Returns (service principal, lookup error); the error is only set when a fetch was made.
+    """
+    with lock:
+        if resource_id in cache:
+            return cache[resource_id], None
+    payload, error = client.get_object(
+        "https://graph.microsoft.com/v1.0/servicePrincipals/"
+        + urllib.parse.quote(resource_id)
+        + "?$select=id,appId,displayName,appRoles"
+    )
+    with lock:
+        if resource_id not in cache:  # another worker may have stored it meanwhile
+            cache[resource_id] = payload if isinstance(payload, dict) else None
+        return cache[resource_id], error
+
+
 def resolve_enterprise_app_role_assignments(
     service_principal: dict[str, Any],
     client: GraphClient,
@@ -494,22 +518,9 @@ def resolve_enterprise_app_role_assignments(
         app_role_id = str(assignment.get("appRoleId") or "")
         if not resource_id:
             continue
-        with lock:
-            has_resource = resource_id in resource_sp_by_id
-        if not has_resource:
-            payload, error = client.get_object(
-                "https://graph.microsoft.com/v1.0/servicePrincipals/"
-                + urllib.parse.quote(resource_id)
-                + "?$select=id,appId,displayName,appRoles"
-            )
-            with lock:
-                if resource_id not in resource_sp_by_id:
-                    resource_sp_by_id[resource_id] = payload if isinstance(payload, dict) else None
-            if error:
-                lookup_errors.append(f"resourceId {resource_id}: {error}")
-
-        with lock:
-            resource_sp = resource_sp_by_id.get(resource_id)
+        resource_sp, error = _load_resource_sp(client, resource_id, resource_sp_by_id, lock)
+        if error:
+            lookup_errors.append(f"resourceId {resource_id}: {error}")
         resource_name = str(resource_sp.get("displayName") or "") if isinstance(resource_sp, dict) else ""
         if not resource_name:
             unresolved_resource_count += 1
