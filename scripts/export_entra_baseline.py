@@ -1107,6 +1107,42 @@ def _local_org_names(client: GraphClient) -> tuple[dict[str, str], int]:
     return names, 0
 
 
+def _prime_resource_sp_caches(
+    root: pathlib.Path,
+    by_appid: dict[str, dict[str, Any] | None],
+    by_id: dict[str, dict[str, Any] | None],
+) -> None:
+    """Seed the resource service-principal caches from a previous local Enterprise Applications export."""
+    cached = _load_resource_sp_cache_from_export(root)
+    if not cached:
+        return
+    by_appid.update(cached)
+    for sp in cached.values():
+        object_id = str(sp.get("id") or "").strip()
+        if object_id:
+            by_id[object_id] = sp
+    log(f"Primed resource service-principal cache from local Enterprise Applications export: {len(cached)} objects")
+
+
+def _previous_snapshot_lookups(root: pathlib.Path, requested_ref: str) -> dict[str, PreviousSnapshotLookup]:
+    """Per-category lookups into the previous snapshot, used to backfill unresolved enrichment."""
+    repo_root = _discover_repo_root(root)
+    snapshot_ref = _previous_snapshot_ref(repo_root, requested_ref) if repo_root else ""
+    root_repo_rel = _repo_relative_posix(repo_root, root) if repo_root is not None else ""
+    if repo_root is None or not snapshot_ref or not root_repo_rel:
+        log("No previous snapshot reference found for resolution backfill; unresolved placeholders may cause drift noise.")
+        return {}
+    log(f"Using previous snapshot reference for resolution backfill: {snapshot_ref}")
+    return {
+        title: PreviousSnapshotLookup(
+            repo_root=repo_root,
+            ref=snapshot_ref,
+            category_repo_dir=f"{root_repo_rel}/{title}".strip("/"),
+        )
+        for title in ("Enterprise Applications", "App Registrations")
+    }
+
+
 def main() -> int:
     args = parse_args()
     root = pathlib.Path(args.root).resolve()
@@ -1114,10 +1150,6 @@ def main() -> int:
     if not token:
         raise SystemExit("Microsoft Graph token required (--token or GRAPH_TOKEN).")
     workers = max(1, min(int(args.enterprise_app_workers), 32))
-    fail_on_export_error = common.to_bool(args.fail_on_export_error)
-    include_app_registrations = common.to_bool(args.include_app_registrations)
-
-    client = GraphClient(token)
 
     exports = [
         {"title": title, "rel_dir": title, "url": url}
@@ -1128,42 +1160,16 @@ def main() -> int:
         log("All Entra export categories are disabled. Skipping Entra baseline export.")
         return 0
 
-    total_written = 0
-    warnings = 0
-    failed_exports: list[tuple[str, str]] = []
+    client = GraphClient(token)
     resource_sp_by_appid: dict[str, dict[str, Any] | None] = {}
     resource_sp_by_id: dict[str, dict[str, Any] | None] = {}
-    if include_app_registrations:
-        cached_resource_sps = _load_resource_sp_cache_from_export(root)
-        if cached_resource_sps:
-            resource_sp_by_appid.update(cached_resource_sps)
-            for sp in cached_resource_sps.values():
-                object_id = str(sp.get("id") or "").strip()
-                if object_id:
-                    resource_sp_by_id[object_id] = sp
-            log(
-                "Primed resource service-principal cache from local Enterprise Applications export: "
-                + f"{len(cached_resource_sps)} objects"
-            )
+    if common.to_bool(args.include_app_registrations):
+        _prime_resource_sp_caches(root, resource_sp_by_appid, resource_sp_by_id)
+    previous_lookup_by_title = _previous_snapshot_lookups(root, args.previous_snapshot_ref)
+    local_org_by_id, warnings = _local_org_names(client)
 
-    repo_root = _discover_repo_root(root)
-    previous_snapshot_ref = _previous_snapshot_ref(repo_root, args.previous_snapshot_ref) if repo_root else ""
-    root_repo_rel = _repo_relative_posix(repo_root, root) if repo_root is not None else ""
-    previous_lookup_by_title: dict[str, PreviousSnapshotLookup] = {}
-    if repo_root is not None and previous_snapshot_ref and root_repo_rel:
-        for title in ("Enterprise Applications", "App Registrations"):
-            previous_lookup_by_title[title] = PreviousSnapshotLookup(
-                repo_root=repo_root,
-                ref=previous_snapshot_ref,
-                category_repo_dir=f"{root_repo_rel}/{title}".strip("/"),
-            )
-        log(f"Using previous snapshot reference for resolution backfill: {previous_snapshot_ref}")
-    else:
-        log("No previous snapshot reference found for resolution backfill; unresolved placeholders may cause drift noise.")
-
-    local_org_by_id, org_warnings = _local_org_names(client)
-    warnings += org_warnings
-
+    total_written = 0
+    failed_exports: list[tuple[str, str]] = []
     for export in exports:
         title = export["title"]
         log(f"Starting export: {title}")
@@ -1197,20 +1203,14 @@ def main() -> int:
         total_written += written
         log(f"Exported {written} objects: {title}")
 
-    if failed_exports and fail_on_export_error:
+    if failed_exports and common.to_bool(args.fail_on_export_error):
         log("Entra baseline export failed because one or more requested categories could not be exported:")
         for title, error in failed_exports:
             log(f" - {title}: {error}")
-        log(
-            "Requested category failures are treated as fatal to avoid committing a partial or stale backup snapshot."
-        )
+        log("Requested category failures are treated as fatal to avoid committing a partial or stale backup snapshot.")
         return 2
 
-    log(
-        "Entra baseline export complete. "
-        + f"Total objects written: {total_written}. "
-        + f"Warnings: {warnings}."
-    )
+    log(f"Entra baseline export complete. Total objects written: {total_written}. Warnings: {warnings}.")
     return 0
 
 
