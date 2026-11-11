@@ -107,6 +107,25 @@ def _get_jwks() -> list:
         return keys
 
 
+def _claims_authorized(claims: dict) -> bool:
+    """Tenant, issuer and delegated-scope rules for an already signature-verified Entra token."""
+    tid = claims.get("tid", "")
+    iss = claims.get("iss", "")
+    if _entra_tenant_id and tid != _entra_tenant_id:
+        logger.warning("Entra JWT: wrong tenant (tid=%s)", tid)
+        return False
+    if _entra_tenant_id and _entra_tenant_id not in iss:
+        logger.warning("Entra JWT: wrong issuer (iss=%s)", iss)
+        return False
+    # Audience alone is not authorization: Entra issues tokens for this API to any
+    # tenant user and (app-only, no scp) to any service principal. Require the
+    # delegated scope; restrict *who* via appRoleAssignmentRequired on the app.
+    if _REQUIRED_SCOPE not in str(claims.get("scp", "")).split():
+        logger.warning("Entra JWT: missing scope %s (oid=%s)", _REQUIRED_SCOPE, claims.get("oid"))
+        return False
+    return True
+
+
 def _validate_entra_token(token: str) -> bool:
     """Return True if token is a valid Entra JWT for this tenant and client. Blocking."""
     try:
@@ -114,31 +133,15 @@ def _validate_entra_token(token: str) -> bool:
         from jwt import decode, get_unverified_header
         from jwt.algorithms import RSAAlgorithm
 
-        header = get_unverified_header(token)
-        kid = header.get("kid")
-        keys = _get_jwks()
-        key_dict = next((k for k in keys if k.get("kid") == kid), None)
+        kid = get_unverified_header(token).get("kid")
+        key_dict = next((k for k in _get_jwks() if k.get("kid") == kid), None)
         if not key_dict:
             logger.warning("Entra JWT: signing key not found (kid=%s)", kid)
             return False
         pub_key = RSAAlgorithm.from_jwk(_json.dumps(key_dict))
         bare = _mcp_client_id.removeprefix("api://")
         claims = decode(token, pub_key, algorithms=["RS256"], audience=[bare, f"api://{bare}"])
-        tid = claims.get("tid", "")
-        iss = claims.get("iss", "")
-        if _entra_tenant_id and tid != _entra_tenant_id:
-            logger.warning("Entra JWT: wrong tenant (tid=%s)", tid)
-            return False
-        if _entra_tenant_id and _entra_tenant_id not in iss:
-            logger.warning("Entra JWT: wrong issuer (iss=%s)", iss)
-            return False
-        # Audience alone is not authorization: Entra issues tokens for this API to any
-        # tenant user and (app-only, no scp) to any service principal. Require the
-        # delegated scope; restrict *who* via appRoleAssignmentRequired on the app.
-        if _REQUIRED_SCOPE not in str(claims.get("scp", "")).split():
-            logger.warning("Entra JWT: missing scope %s (oid=%s)", _REQUIRED_SCOPE, claims.get("oid"))
-            return False
-        return True
+        return _claims_authorized(claims)
     except Exception as exc:
         logger.warning("Entra JWT validation failed: %s", exc)
         return False
@@ -376,6 +379,44 @@ def _build_oauth_metadata() -> dict | None:
     }
 
 
+def _describe_auth() -> str | None:
+    """Which authentication the SSE transport will enforce; None when none is configured."""
+    entra = bool(_entra_tenant_id and _mcp_client_id)
+    identity = f"(tenant={_entra_tenant_id}, client={_mcp_client_id})"
+    if _api_key and entra:
+        return f"API key + Entra JWT {identity}"
+    if _api_key:
+        return "API key only."
+    if entra:
+        return f"Entra JWT only {identity}"
+    return None
+
+
+def _build_sse_app():
+    """ASGI app: health probe, optional OAuth discovery, and the MCP SSE endpoint behind the auth middleware."""
+    from starlette.applications import Starlette
+    from starlette.responses import JSONResponse
+    from starlette.routing import Mount, Route
+
+    oauth_meta = _build_oauth_metadata()
+
+    async def oauth_metadata_handler(request):
+        return JSONResponse(oauth_meta)
+
+    async def health(request):
+        return JSONResponse({"status": "ok"})
+
+    routes = []
+    if oauth_meta:
+        routes.append(Route("/.well-known/oauth-authorization-server", oauth_metadata_handler))
+        logger.info("OAuth discovery endpoint enabled (tenant=%s, client=%s)", _entra_tenant_id, _mcp_client_id)
+    else:
+        logger.info("OAuth discovery endpoint disabled — set ENTRA_TENANT_ID and MCP_CLIENT_ID to enable.")
+    routes.append(Route("/health", health))
+    routes.append(Mount("/", app=_McpAuthMiddleware(mcp.sse_app())))
+    return Starlette(routes=routes)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="ASTRAL MCP Server")
     parser.add_argument(
@@ -395,45 +436,19 @@ def main() -> int:
         args.port,
     )
 
-    if args.transport == "sse":
-        import uvicorn
-        from starlette.applications import Starlette
-        from starlette.responses import JSONResponse
-        from starlette.routing import Mount, Route
-
-        oauth_meta = _build_oauth_metadata()
-
-        async def oauth_metadata_handler(request):
-            return JSONResponse(oauth_meta)
-
-        async def health(request):
-            return JSONResponse({"status": "ok"})
-
-        sse_app = _McpAuthMiddleware(mcp.sse_app())
-
-        if _api_key and (_entra_tenant_id and _mcp_client_id):
-            logger.info("Auth: API key + Entra JWT (tenant=%s, client=%s)", _entra_tenant_id, _mcp_client_id)
-        elif _api_key:
-            logger.info("Auth: API key only.")
-        elif _entra_tenant_id and _mcp_client_id:
-            logger.info("Auth: Entra JWT only (tenant=%s, client=%s)", _entra_tenant_id, _mcp_client_id)
-        else:
-            logger.error("Auth not configured — set MCP_API_KEY or ENTRA_TENANT_ID+MCP_CLIENT_ID. Refusing to start.")
-            return 1
-
-        routes = []
-        if oauth_meta:
-            routes.append(Route("/.well-known/oauth-authorization-server", oauth_metadata_handler))
-            logger.info("OAuth discovery endpoint enabled (tenant=%s, client=%s)", _entra_tenant_id, _mcp_client_id)
-        else:
-            logger.info("OAuth discovery endpoint disabled — set ENTRA_TENANT_ID and MCP_CLIENT_ID to enable.")
-        routes.append(Route("/health", health))
-        routes.append(Mount("/", app=sse_app))
-
-        app = Starlette(routes=routes)
-        uvicorn.run(app, host=args.host, port=args.port)
-    else:
+    if args.transport != "sse":
         mcp.run(transport="stdio")
+        return 0
+
+    auth = _describe_auth()
+    if auth is None:  # fail closed, before any server dependency is even imported
+        logger.error("Auth not configured — set MCP_API_KEY or ENTRA_TENANT_ID+MCP_CLIENT_ID. Refusing to start.")
+        return 1
+    logger.info("Auth: %s", auth)
+
+    import uvicorn
+
+    uvicorn.run(_build_sse_app(), host=args.host, port=args.port)
     return 0
 
 
