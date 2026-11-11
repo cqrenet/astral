@@ -9,7 +9,7 @@ import json
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Iterable
+from typing import Any, Iterable
 
 from report_utils import resolve_assignment_target, safe_text
 import common
@@ -152,36 +152,43 @@ def _object_rows(base: dict[str, object], assignments: object) -> Iterable[Assig
         )
 
 
+def _load_backup_object(root: Path, path: Path) -> tuple[Path, dict[str, Any]] | None:
+    """(path relative to root, parsed JSON) for a backed-up object; None for reports, archives and non-objects."""
+    try:
+        rel_path = path.relative_to(root)
+    except ValueError:
+        return None
+    if (rel_path.parts and rel_path.parts[0] == "reports") or "__archive__" in rel_path.parts:
+        return None
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+    return (rel_path, payload) if isinstance(payload, dict) else None
+
+
+def _is_excluded_category(category: str) -> bool:
+    return any(category == excluded or category.startswith(f"{excluded}/") for excluded in _EXCLUDED_CATEGORIES)
+
+
 def iter_assignment_rows(
     root: Path,
     policy_type_filter: set[str],
     graph_type_filter: set[str],
 ) -> Iterable[AssignmentRow]:
     for path in sorted(root.rglob("*.json")):
-        try:
-            rel_path = path.relative_to(root)
-        except ValueError:
+        loaded = _load_backup_object(root, path)
+        if loaded is None:
             continue
-        if rel_path.parts and rel_path.parts[0] == "reports":
-            continue
-        if "__archive__" in rel_path.parts:
-            continue
-
-        try:
-            payload = json.loads(path.read_text(encoding="utf-8"))
-        except Exception:
-            continue
-        if not isinstance(payload, dict):
-            continue
-
+        rel_path, payload = loaded
         category = "/".join(rel_path.parent.parts)
-        if any(category == excluded or category.startswith(f"{excluded}/") for excluded in _EXCLUDED_CATEGORIES):
-            continue
         policy_type = rel_path.parts[0] if rel_path.parts else ""
         object_type = safe_text(payload.get("@odata.type"))
-        if policy_type_filter and policy_type.lower() not in policy_type_filter:
-            continue
-        if graph_type_filter and object_type.lower() not in graph_type_filter:
+        if (
+            _is_excluded_category(category)
+            or (policy_type_filter and policy_type.lower() not in policy_type_filter)
+            or (graph_type_filter and object_type.lower() not in graph_type_filter)
+        ):
             continue
 
         base: dict[str, object] = {
