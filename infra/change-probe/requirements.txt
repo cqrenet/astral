@@ -1,3 +1,4 @@
-azure-functions
-azure-data-tables
-azure-storage-queue
+# Bounded to the current major version: a deploy must not pick up a breaking major release unnoticed.
+azure-functions>=1.20,<3
+azure-data-tables>=12.5,<13
+azure-storage-queue>=12.9,<13

@@ -101,7 +101,9 @@ if ($changedFile) {
   }
 
   if (!(Get-Module "Microsoft.Graph.DeviceManagement.Administration" -ListAvailable)) {
-    Install-Module Microsoft.Graph.DeviceManagement.Administration -AllowClobber -Force -AcceptLicense
+    # 2.x only: Connect-MgGraph -AccessToken takes a SecureString from v2 on, and an unbounded install
+    # would pick up a future major release (and its breaking changes) on the next run.
+    Install-Module Microsoft.Graph.DeviceManagement.Administration -MinimumVersion 2.0.0 -MaximumVersion 2.99.99 -AllowClobber -Force -AcceptLicense
   }
 
   Write-Host "Authenticating to Graph API"

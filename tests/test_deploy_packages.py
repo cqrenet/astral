@@ -107,6 +107,20 @@ class DeployPackageTests(unittest.TestCase):
             with self.subTest(script=rel):
                 self.assertTrue(shipped <= staged, f"{rel} stages {sorted(staged)} but the image needs {sorted(shipped)}")
 
+    def test_requirements_are_bounded(self) -> None:
+        for path in sorted((ROOT / "infra").glob("*/requirements.txt")):
+            for line in path.read_text(encoding="utf-8").splitlines():
+                line = line.strip()
+                if line and not line.startswith("#"):
+                    with self.subTest(file=str(path.relative_to(ROOT)), requirement=line):
+                        self.assertRegex(line, r"==|<", "pin it or cap its next major version")
+
+    def test_runtime_module_installs_are_version_bounded(self) -> None:
+        text = (ROOT / "scripts/commit_intune_drift.ps1").read_text(encoding="utf-8")
+        for line in text.splitlines():
+            if "Install-Module" in line and not line.strip().startswith("#"):
+                self.assertIn("-MaximumVersion", line)
+
     def test_powershell_scripts_with_non_ascii_text_have_a_bom(self) -> None:
         # Windows PowerShell 5.1 reads BOM-less files as ANSI: an em dash in a string literal then ends the string.
         for path in sorted((ROOT / "deploy").glob("*.ps1")):
