@@ -5,6 +5,9 @@ FROM python:3.11-slim
 
 WORKDIR /app
 
+# git: ASTRAL_REPO_URL mode keeps a clone of the tenant-state repository (any Git forge)
+RUN apt-get update && apt-get install -y --no-install-recommends git && rm -rf /var/lib/apt/lists/*
+
 # Install dependencies
 COPY infra/mcp-server/requirements.txt ./
 RUN pip install --no-cache-dir -r requirements.txt
@@ -16,6 +19,9 @@ COPY infra/mcp-server/mcp_server.py ./
 
 ENV PYTHONUNBUFFERED=1
 EXPOSE 8080
+
+# Run unprivileged; the server only reads files and talks HTTPS.
+USER nobody
 
 # Default to SSE transport for cloud hosting
 CMD ["python", "mcp_server.py", "--transport", "sse", "--host", "0.0.0.0", "--port", "8080"]

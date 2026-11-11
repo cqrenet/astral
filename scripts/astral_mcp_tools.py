@@ -1,11 +1,22 @@
 #!/usr/bin/env python3
-"""Core tools for querying ASTRAL tenant state via Azure DevOps REST API or local Git repo."""
+"""Core tools for querying ASTRAL tenant state.
+
+Sources: a local clone (ASTRAL_REPO_ROOT), a clone kept in sync from any Git forge
+(ASTRAL_REPO_URL: Gitea, GitHub, Azure DevOps...), or the Azure DevOps REST API (ADO_*).
+"""
 
 from __future__ import annotations
 
 import base64
+import csv
+import datetime as dt
 import json
+import logging
 import os
+import re
+import subprocess
+import threading
+import time
 import urllib.parse
 from typing import Any
 
@@ -42,190 +53,139 @@ _WORKLOAD_CATEGORIES: dict[str, list[str]] = {
 }
 
 
+def _validate(workload: str, category: str | None = None, name: str | None = None) -> None:
+    """Allowlist tool inputs before they become repo paths (blocks ../ traversal)."""
+    if workload not in _WORKLOAD_CATEGORIES:
+        raise ValueError(f"Unknown workload '{workload}'. Use one of: {', '.join(_WORKLOAD_CATEGORIES)}")
+    if category is not None and category not in _WORKLOAD_CATEGORIES[workload]:
+        raise ValueError(f"Unknown category '{category}' for workload '{workload}'.")
+    if name is not None and (name in {"", ".", ".."} or "/" in name or "\\" in name):
+        raise ValueError(f"Invalid policy name '{name}'.")
+
+
 def _make_basic_auth_header(token: str) -> str:
     encoded = base64.b64encode(f":{token}".encode("utf-8")).decode("utf-8")
     return f"Basic {encoded}"
 
 
-class AstralMcpClient:
-    """Client for reading ASTRAL tenant state from Azure DevOps Git or a local clone."""
-
-    def __init__(
-        self,
-        organization: str | None = None,
-        project: str | None = None,
-        token: str | None = None,
-        repo_name: str | None = None,
-        branch: str = "main",
-        local_root: str | None = None,
-    ) -> None:
-        self.organization = (organization or "").strip()
-        self.project = (project or "").strip()
-        self.token = (token or "").strip()
-        self.repo_name = (repo_name or "").strip() or None
-        self.branch = branch
-        self.local_root = local_root
-        self._auth_header = _make_basic_auth_header(self.token) if self.token else ""
-        self._repo_id: str | None = None
-        self._repo_name_resolved: str | None = None
-
-    # ------------------------------------------------------------------
-    # Local filesystem helpers
-    # ------------------------------------------------------------------
-    def _local_path(self, *parts: str) -> str:
-        if not self.local_root:
-            raise RuntimeError("local_root is not configured")
-        return os.path.join(self.local_root, *parts)
-
-    def _read_local_file(self, path: str) -> str:
-        full = self._local_path(path)
-        with open(full, encoding="utf-8") as f:
-            return f.read()
-
-    def _list_local_dir(self, path: str) -> list[dict[str, Any]]:
-        full = self._local_path(path)
-        entries: list[dict[str, Any]] = []
-        if not os.path.isdir(full):
-            return entries
-        for name in sorted(os.listdir(full)):
-            child = os.path.join(full, name)
-            entries.append(
+def _parse_git_log(log: str) -> list[dict[str, Any]]:
+    """Parse `git log --format=%H|%an|%ae|%ad|%s` into the Azure DevOps commit shape."""
+    commits: list[dict[str, Any]] = []
+    for line in log.splitlines():
+        parts = line.split("|", 4)
+        if len(parts) == 5:
+            commits.append(
                 {
-                    "path": f"{path}/{name}",
-                    "name": name,
-                    "isFolder": os.path.isdir(child),
+                    "commitId": parts[0],
+                    "author": {"name": parts[1], "email": parts[2]},
+                    "committer": {"date": parts[3]},
+                    "comment": parts[4],
                 }
             )
-        return entries
+    return commits
 
-    def _list_local_json_recursive(self, path: str) -> list[dict[str, Any]]:
-        full = self._local_path(path)
+
+class _LocalSource:
+    """Reads tenant state from a local Git clone."""
+
+    def __init__(self, root: str) -> None:
+        self.root = root
+
+    def _path(self, *parts: str) -> str:
+        return os.path.join(self.root, *parts)
+
+    def read_file(self, path: str) -> str:
+        with open(self._path(path), encoding="utf-8") as f:
+            return f.read()
+
+    def list_json_recursive(self, path: str) -> list[dict[str, Any]]:
+        full = self._path(path)
         policies: list[dict[str, Any]] = []
         if not os.path.isdir(full):
             return policies
         for root, _dirs, files in os.walk(full):
-            rel_root = os.path.relpath(root, self.local_root)
+            rel_root = os.path.relpath(root, self.root)
             for name in files:
                 if name.endswith(".json"):
-                    policies.append(
-                        {
-                            "path": f"{rel_root}/{name}".replace("\\", "/"),
-                            "name": name[:-5],
-                        }
-                    )
+                    policies.append({"path": f"{rel_root}/{name}".replace("\\", "/"), "name": name[:-5]})
         return policies
 
-    def _find_local_json(self, path: str, name: str) -> str | None:
-        full = self._local_path(path)
-        if not os.path.isdir(full):
-            return None
-        for root, _dirs, files in os.walk(full):
-            if f"{name}.json" in files:
-                return os.path.join(root, f"{name}.json")
+    def find_json(self, path: str, name: str) -> str | None:
+        """Repo-relative path of `<name>.json` somewhere under *path*, or None."""
+        for policy in self.list_json_recursive(path):
+            if policy["name"] == name:
+                return policy["path"]
         return None
 
-    def _local_file_commits(self, path: str, limit: int = 10) -> list[dict[str, Any]]:
-        if not self.local_root:
-            raise RuntimeError("local_root is not configured")
+    def _log(self, path: str, limit: int, extra: list[str]) -> list[dict[str, Any]]:
         try:
             log = run_git(
-                self.local_root,
-                [
-                    "log",
-                    f"-n{limit}",
-                    f"--format=%H|%an|%ae|%ad|%s",
-                    "--date=iso-strict",
-                    "--",
-                    path,
-                ],
+                self.root,
+                ["log", f"-n{limit}", *extra, "--format=%H|%an|%ae|%ad|%s", "--date=iso-strict", "--", path],
             )
         except RuntimeError:
             return []
-        commits: list[dict[str, Any]] = []
-        for line in log.splitlines():
-            parts = line.split("|", 4)
-            if len(parts) == 5:
-                commits.append(
-                    {
-                        "commitId": parts[0],
-                        "author": {"name": parts[1], "email": parts[2]},
-                        "committer": {"date": parts[3]},
-                        "comment": parts[4],
-                    }
-                )
-        return commits
+        return _parse_git_log(log)
 
-    def _local_recent_commits(self, path: str, since: str, limit: int = 50) -> list[dict[str, Any]]:
-        if not self.local_root:
-            raise RuntimeError("local_root is not configured")
-        try:
-            log = run_git(
-                self.local_root,
-                [
-                    "log",
-                    f"-n{limit}",
-                    f"--since={since}",
-                    f"--format=%H|%an|%ae|%ad|%s",
-                    "--date=iso-strict",
-                    "--",
-                    path,
-                ],
-            )
-        except RuntimeError:
-            return []
-        commits: list[dict[str, Any]] = []
-        for line in log.splitlines():
-            parts = line.split("|", 4)
-            if len(parts) == 5:
-                commits.append(
-                    {
-                        "commitId": parts[0],
-                        "author": {"name": parts[1], "email": parts[2]},
-                        "committer": {"date": parts[3]},
-                        "comment": parts[4],
-                    }
-                )
-        return commits
+    def file_commits(self, path: str, limit: int) -> list[dict[str, Any]]:
+        return self._log(path, limit, [])
 
-    # ------------------------------------------------------------------
-    # Azure DevOps REST API helpers
-    # ------------------------------------------------------------------
+    def recent_commits(self, path: str, since: dt.datetime, limit: int) -> list[dict[str, Any]]:
+        return self._log(path, limit, [f"--since={since.isoformat()}"])
+
+
+class _AdoSource:
+    """Reads tenant state through the Azure DevOps Git REST API."""
+
+    def __init__(self, organization: str, project: str, token: str, repo_name: str | None, branch: str) -> None:
+        self.organization = organization
+        self.project = project
+        self.repo_name = repo_name
+        self.branch = branch
+        self._auth_header = _make_basic_auth_header(token) if token else ""
+        self._repo_id: str | None = None
+
     def _discover_repo(self) -> str:
         if self._repo_id:
             return self._repo_id
         if not self.organization or not self.project:
             raise RuntimeError("ADO organization and project are required for remote access")
         url = f"https://dev.azure.com/{self.organization}/{self.project}/_apis/git/repositories?api-version=7.1"
-        result = request_json(url, headers={"Authorization": self._auth_header}, timeout=30)
-        items = result.get("value", [])
+        items = request_json(url, headers={"Authorization": self._auth_header}, timeout=30).get("value", [])
         if not items:
             raise RuntimeError(f"No Git repositories found in project {self.project}")
         if self.repo_name:
-            for repo in items:
-                if repo.get("name") == self.repo_name:
-                    self._repo_id = repo["id"]
-                    self._repo_name_resolved = repo.get("name")
-                    return self._repo_id
-            raise RuntimeError(f"Repository '{self.repo_name}' not found in project {self.project}")
-        self._repo_id = items[0]["id"]
-        self._repo_name_resolved = items[0].get("name")
+            repo = next((r for r in items if r.get("name") == self.repo_name), None)
+            if repo is None:
+                raise RuntimeError(f"Repository '{self.repo_name}' not found in project {self.project}")
+        else:
+            repo = items[0]
+        self._repo_id = repo["id"]
         return self._repo_id
 
-    def _ado_get(self, path: str, params: dict[str, str] | None = None) -> Any:
-        self._discover_repo()
-        base = (
+    def _get(self, path: str, params: dict[str, str]) -> Any:
+        repo_id = self._discover_repo()
+        query = urllib.parse.urlencode({"api-version": "7.1", **params})
+        url = (
             f"https://dev.azure.com/{self.organization}/{self.project}"
-            f"/_apis/git/repositories/{self._repo_id}/{path}"
+            f"/_apis/git/repositories/{repo_id}/{path}?{query}"
         )
-        query: dict[str, str] = {"api-version": "7.1"}
-        if params:
-            query.update(params)
-        qs = urllib.parse.urlencode(query)
-        url = f"{base}?{qs}"
         return request_json(url, headers={"Authorization": self._auth_header}, timeout=30)
 
-    def _read_remote_file(self, path: str) -> str:
-        result = self._ado_get(
+    def _items(self, path: str, recursion: str) -> list[dict[str, Any]]:
+        result = self._get(
+            "items",
+            {
+                "path": path,
+                "recursionLevel": recursion,
+                "versionDescriptor.versionType": "Branch",
+                "versionDescriptor.version": self.branch,
+            },
+        )
+        return result.get("value", [])
+
+    def read_file(self, path: str) -> str:
+        result = self._get(
             "items",
             {
                 "path": path,
@@ -238,120 +198,80 @@ class AstralMcpClient:
         if not content:
             return ""
         encoding = result.get("contentMetadata", {}).get("encoding", 0)
-        if encoding == 1200 or encoding == 1201:  # UTF-16 LE/BE
+        if encoding in (1200, 1201):  # UTF-16 LE/BE
             return base64.b64decode(content).decode("utf-16")
-        # Default: UTF-8 (ADO returns base64 for binary, but often raw text for small text files)
-        # In practice ADO returns base64 for most content. Try decoding.
+        # ADO returns base64 for most content, raw text for some small text files.
         try:
             return base64.b64decode(content).decode("utf-8")
         except Exception:
             return content
 
-    def _list_remote_dir(self, path: str) -> list[dict[str, Any]]:
-        result = self._ado_get(
-            "items",
-            {
-                "path": path,
-                "recursionLevel": "OneLevel",
-                "versionDescriptor.versionType": "Branch",
-                "versionDescriptor.version": self.branch,
-            },
-        )
-        items = result.get("value", [])
+    def list_json_recursive(self, path: str) -> list[dict[str, Any]]:
         return [
-            {
-                "path": item.get("path", ""),
-                "name": os.path.basename(item.get("path", "")),
-                "isFolder": item.get("isFolder", False),
-            }
-            for item in items
-            if item.get("path", "").rstrip("/") != path.rstrip("/")
+            {"path": item["path"], "name": os.path.basename(item["path"])[:-5]}
+            for item in self._items(path, "Full")
+            if not item.get("isFolder") and item.get("path", "").endswith(".json")
         ]
 
-    def _list_remote_json_recursive(self, path: str) -> list[dict[str, Any]]:
-        result = self._ado_get(
-            "items",
+    def find_json(self, path: str, name: str) -> str | None:
+        return next((p["path"] for p in self.list_json_recursive(path) if p["name"] == name), None)
+
+    def _commits(self, path: str, limit: int, extra: dict[str, str]) -> list[dict[str, Any]]:
+        result = self._get(
+            "commits",
             {
-                "path": path,
-                "recursionLevel": "Full",
-                "versionDescriptor.versionType": "Branch",
-                "versionDescriptor.version": self.branch,
+                "searchCriteria.itemPath": path,
+                "searchCriteria.itemVersion.versionType": "Branch",
+                "searchCriteria.itemVersion.version": self.branch,
+                "$top": str(limit),
+                **extra,
             },
         )
-        items = result.get("value", [])
-        policies: list[dict[str, Any]] = []
-        for item in items:
-            if item.get("isFolder"):
-                continue
-            item_path = item.get("path", "")
-            if not item_path.endswith(".json"):
-                continue
-            policies.append(
-                {
-                    "path": item_path,
-                    "name": os.path.basename(item_path)[:-5],
-                }
+        return result.get("value", [])
+
+    def file_commits(self, path: str, limit: int) -> list[dict[str, Any]]:
+        return self._commits(path, limit, {})
+
+    def recent_commits(self, path: str, since: dt.datetime, limit: int) -> list[dict[str, Any]]:
+        return self._commits(path, limit, {"searchCriteria.fromDate": since.isoformat()})
+
+
+def _commit_summary(commit: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "commitId": commit.get("commitId", ""),
+        "author": commit.get("author", {}),
+        "committer": commit.get("committer", {}),
+        "comment": commit.get("comment", ""),
+        "url": commit.get("remoteUrl", ""),
+    }
+
+
+class AstralMcpClient:
+    """Reads ASTRAL tenant state from a local clone (local_root) or Azure DevOps Git (REST)."""
+
+    def __init__(
+        self,
+        organization: str | None = None,
+        project: str | None = None,
+        token: str | None = None,
+        repo_name: str | None = None,
+        branch: str = "main",
+        local_root: str | None = None,
+    ) -> None:
+        self.local_root = local_root
+        self.branch = branch
+        self._source: _LocalSource | _AdoSource = (
+            _LocalSource(local_root)
+            if local_root
+            else _AdoSource(
+                (organization or "").strip(),
+                (project or "").strip(),
+                (token or "").strip(),
+                (repo_name or "").strip() or None,
+                branch,
             )
-        return policies
-
-    def _find_remote_json(self, path: str, name: str) -> str | None:
-        policies = self._list_remote_json_recursive(path)
-        for p in policies:
-            if p["name"] == name:
-                return p["path"]
-        return None
-
-    def _remote_file_commits(self, path: str, limit: int = 10) -> list[dict[str, Any]]:
-        result = self._ado_get(
-            "commits",
-            {
-                "searchCriteria.itemPath": path,
-                "searchCriteria.itemVersion.versionType": "Branch",
-                "searchCriteria.itemVersion.version": self.branch,
-                "$top": str(limit),
-            },
         )
-        return result.get("value", [])
 
-    def _remote_recent_commits(self, path: str, since: str, limit: int = 50) -> list[dict[str, Any]]:
-        # ADO commits API doesn't support since directly; we filter by top and then client-side
-        result = self._ado_get(
-            "commits",
-            {
-                "searchCriteria.itemPath": path,
-                "searchCriteria.itemVersion.versionType": "Branch",
-                "searchCriteria.itemVersion.version": self.branch,
-                "$top": str(limit),
-            },
-        )
-        return result.get("value", [])
-
-    # ------------------------------------------------------------------
-    # Unified interface
-    # ------------------------------------------------------------------
-    def _read_file(self, path: str) -> str:
-        if self.local_root:
-            return self._read_local_file(path)
-        return self._read_remote_file(path)
-
-    def _list_dir(self, path: str) -> list[dict[str, Any]]:
-        if self.local_root:
-            return self._list_local_dir(path)
-        return self._list_remote_dir(path)
-
-    def _file_commits(self, path: str, limit: int = 10) -> list[dict[str, Any]]:
-        if self.local_root:
-            return self._local_file_commits(path, limit)
-        return self._remote_file_commits(path, limit)
-
-    def _recent_commits(self, path: str, since: str, limit: int = 50) -> list[dict[str, Any]]:
-        if self.local_root:
-            return self._local_recent_commits(path, since, limit)
-        return self._remote_recent_commits(path, since, limit)
-
-    # ------------------------------------------------------------------
-    # Public tool-facing methods
-    # ------------------------------------------------------------------
     def list_workloads(self) -> list[str]:
         return list(_WORKLOAD_CATEGORIES.keys())
 
@@ -359,23 +279,16 @@ class AstralMcpClient:
         return list(_WORKLOAD_CATEGORIES.get(workload, []))
 
     def list_policies(self, workload: str, category: str) -> list[dict[str, Any]]:
-        path = f"tenant-state/{workload}/{category}"
-        if self.local_root:
-            return self._list_local_json_recursive(path)
-        return self._list_remote_json_recursive(path)
+        _validate(workload, category)
+        return self._source.list_json_recursive(f"tenant-state/{workload}/{category}")
 
     def get_policy(self, workload: str, category: str, name: str) -> dict[str, Any]:
+        _validate(workload, category, name)
         path = f"tenant-state/{workload}/{category}"
-        if self.local_root:
-            full_path = self._find_local_json(path, name)
-            if not full_path:
-                raise FileNotFoundError(f"Policy '{name}' not found in {path}")
-            raw = self._read_local_file(os.path.relpath(full_path, self.local_root))
-        else:
-            remote_path = self._find_remote_json(path, name)
-            if not remote_path:
-                raise FileNotFoundError(f"Policy '{name}' not found in {path}")
-            raw = self._read_remote_file(remote_path)
+        policy_path = self._source.find_json(path, name)
+        if not policy_path:
+            raise FileNotFoundError(f"Policy '{name}' not found in {path}")
+        raw = self._source.read_file(policy_path)
         if not raw:
             raise FileNotFoundError(f"Policy '{name}' is empty")
         try:
@@ -384,66 +297,92 @@ class AstralMcpClient:
             raise ValueError(f"Invalid JSON for policy '{name}': {exc}") from exc
 
     def get_policy_history(self, workload: str, category: str, name: str, limit: int = 10) -> list[dict[str, Any]]:
+        _validate(workload, category, name)
+        limit = max(1, min(int(limit), 100))
         path = f"tenant-state/{workload}/{category}/{name}.json"
-        commits = self._file_commits(path, limit)
-        return [
-            {
-                "commitId": c.get("commitId", ""),
-                "author": c.get("author", {}),
-                "committer": c.get("committer", {}),
-                "comment": c.get("comment", ""),
-                "url": c.get("remoteUrl", ""),
-            }
-            for c in commits
-        ]
+        return [_commit_summary(c) for c in self._source.file_commits(path, limit)]
 
     def search_policies(self, workload: str, query: str) -> list[dict[str, Any]]:
+        _validate(workload)
         query_lower = query.lower()
-        results: list[dict[str, Any]] = []
-        categories = self.list_categories(workload)
-        for category in categories:
-            policies = self.list_policies(workload, category)
-            for policy in policies:
-                if query_lower in policy["name"].lower():
-                    results.append({"category": category, **policy})
-        return results
-
-    def get_recent_drift(self, workload: str, hours: int = 24, limit: int = 50) -> list[dict[str, Any]]:
-        path = f"tenant-state/{workload}"
-        since = f"{hours} hours ago"
-        commits = self._recent_commits(path, since, limit)
         return [
-            {
-                "commitId": c.get("commitId", ""),
-                "author": c.get("author", {}),
-                "committer": c.get("committer", {}),
-                "comment": c.get("comment", ""),
-                "url": c.get("remoteUrl", ""),
-            }
-            for c in commits
+            {"category": category, **policy}
+            for category in self.list_categories(workload)
+            for policy in self.list_policies(workload, category)
+            if query_lower in policy["name"].lower()
         ]
 
+    def get_recent_drift(self, workload: str, hours: int = 24, limit: int = 50) -> list[dict[str, Any]]:
+        _validate(workload)
+        since = dt.datetime.now(dt.timezone.utc) - dt.timedelta(hours=int(hours))
+        commits = self._source.recent_commits(f"tenant-state/{workload}", since, limit)
+        return [_commit_summary(c) for c in commits]
+
     def get_assignment_report(self, workload: str = "intune") -> str:
-        path = f"tenant-state/reports/{workload}/assignments.md"
+        _validate(workload)
         try:
-            return self._read_file(path)
+            return self._source.read_file(f"tenant-state/reports/{workload}/policy-assignments.md")
         except Exception:
             return ""
 
     def get_object_inventory(self, workload: str = "intune", category: str = "") -> list[dict[str, Any]]:
         if not category:
             return []
-        path = f"tenant-state/reports/{workload}/{category.replace(' ', '_')}_inventory.csv"
+        _validate(workload, category)
+        slug = re.sub(r"[^a-z0-9]+", "-", category.lower()).strip("-")  # as generate_object_inventory_reports
         try:
-            raw = self._read_file(path)
+            raw = self._source.read_file(f"tenant-state/reports/{workload}/Object Inventory/{slug}-inventory.csv")
         except Exception:
             return []
         lines = raw.strip().splitlines()
-        if not lines:
-            return []
-        import csv
-        reader = csv.DictReader(lines)
-        return list(reader)
+        return list(csv.DictReader(lines)) if lines else []
+
+
+_clone_lock = threading.Lock()
+_clone_synced_at = 0.0
+
+
+def sync_remote_clone(force: bool = False) -> str | None:
+    """Clone/refresh ASTRAL_REPO_URL into ASTRAL_REPO_CLONE_DIR; None when not configured.
+
+    Env: ASTRAL_REPO_URL (https), ASTRAL_REPO_TOKEN (read-only token), ASTRAL_REPO_BRANCH (main),
+    ASTRAL_REPO_CLONE_DIR (/tmp/astral-repo), ASTRAL_REPO_REFRESH_SECONDS (300).
+    The token is passed per git command (http.extraheader), never stored in .git/config.
+    """
+    global _clone_synced_at
+    url = os.environ.get("ASTRAL_REPO_URL", "").strip()
+    if not url:
+        return None
+    if not url.startswith("https://") and not url.startswith("file://"):
+        raise RuntimeError("ASTRAL_REPO_URL must be an https:// URL.")
+    dest = os.environ.get("ASTRAL_REPO_CLONE_DIR", "/tmp/astral-repo")
+    branch = os.environ.get("ASTRAL_REPO_BRANCH", "main").strip() or "main"
+    interval = int(os.environ.get("ASTRAL_REPO_REFRESH_SECONDS", "300"))
+    token = os.environ.get("ASTRAL_REPO_TOKEN", "").strip()
+    auth: list[str] = []
+    if token:
+        basic = base64.b64encode(f"x-access-token:{token}".encode()).decode()
+        auth = ["-c", f"http.extraheader=AUTHORIZATION: basic {basic}"]
+    with _clone_lock:
+        have_clone = os.path.isdir(os.path.join(dest, ".git"))
+        if have_clone and not force and time.monotonic() - _clone_synced_at < interval:
+            return dest
+        if not have_clone:
+            subprocess.run(["git", *auth, "clone", "--quiet", "--single-branch", "--branch", branch, "--", url, dest],
+                           check=True, capture_output=True)
+        else:
+            subprocess.run(["git", *auth, "-C", dest, "fetch", "--quiet", "origin", branch], check=True, capture_output=True)
+            subprocess.run(["git", "-C", dest, "reset", "--quiet", "--hard", "FETCH_HEAD"], check=True, capture_output=True)
+        _clone_synced_at = time.monotonic()
+    return dest
+
+
+def refresh_remote_clone() -> None:
+    """Best-effort refresh before a tool call; on failure keep serving the last synced snapshot."""
+    try:
+        sync_remote_clone()
+    except Exception as exc:  # network/forge outage must not take the MCP server down
+        logging.getLogger(__name__).warning("Repository refresh failed; serving last snapshot (%s)", exc)
 
 
 def client_from_env() -> AstralMcpClient:
@@ -451,6 +390,9 @@ def client_from_env() -> AstralMcpClient:
     local_root = os.environ.get("ASTRAL_REPO_ROOT", "").strip()
     if local_root:
         return AstralMcpClient(local_root=local_root)
+    clone_root = sync_remote_clone(force=True)
+    if clone_root:
+        return AstralMcpClient(local_root=clone_root)
     return AstralMcpClient(
         organization=os.environ.get("ADO_ORGANIZATION", ""),
         project=os.environ.get("ADO_PROJECT", ""),

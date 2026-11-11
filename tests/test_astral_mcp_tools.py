@@ -6,6 +6,7 @@ import os
 import subprocess
 import tempfile
 import unittest
+import unittest.mock
 from pathlib import Path
 
 MODULE_PATH = Path(__file__).resolve().parents[1] / "scripts" / "astral_mcp_tools.py"
@@ -34,6 +35,17 @@ class AstralMcpToolsTests(unittest.TestCase):
         cats = client.list_categories("intune")
         self.assertIn("Compliance Policies", cats)
         self.assertIn("Conditional Access", client.list_categories("entra"))
+
+    def test_rejects_traversal_and_unknown_inputs(self) -> None:
+        client = self.module.AstralMcpClient(local_root="/nonexistent")
+        with self.assertRaises(ValueError):
+            client.list_policies("..", "..")
+        with self.assertRaises(ValueError):
+            client.list_policies("intune", "../../etc")
+        with self.assertRaises(ValueError):
+            client.get_policy("intune", "Compliance Policies", "../secret")
+        with self.assertRaises(ValueError):
+            client.get_assignment_report("../../")
 
     def test_local_list_policies(self) -> None:
         with tempfile.TemporaryDirectory() as td:
@@ -94,6 +106,36 @@ class AstralMcpToolsTests(unittest.TestCase):
             self.assertEqual(len(commits), 1)
             self.assertEqual(commits[0]["comment"], "first")
 
+    def test_local_reads_reports_under_generator_names(self) -> None:
+        # Regression: the client looked for assignments.md / <cat>_inventory.csv, which the generators never write.
+        with tempfile.TemporaryDirectory() as td:
+            reports = Path(td) / "tenant-state" / "reports" / "intune"
+            (reports / "Object Inventory").mkdir(parents=True)
+            (reports / "policy-assignments.md").write_text("# Assignments\n", encoding="utf-8")
+            (reports / "Object Inventory" / "compliance-policies-inventory.csv").write_text(
+                "ObjectName,ObjectType\nP1,Windows\n", encoding="utf-8"
+            )
+            client = self.module.AstralMcpClient(local_root=td)
+            self.assertIn("Assignments", client.get_assignment_report("intune"))
+            self.assertEqual(
+                client.get_object_inventory("intune", "Compliance Policies"),
+                [{"ObjectName": "P1", "ObjectType": "Windows"}],
+            )
+
+    def test_remote_recent_commits_sends_from_date(self) -> None:
+        source = self.module._AdoSource("org", "proj", "tok", None, "main")
+        seen: dict[str, str] = {}
+
+        def fake_get(path, params):
+            seen.update(params)
+            return {"value": []}
+
+        source._get = fake_get
+        client = self.module.AstralMcpClient(organization="org", project="proj", token="tok")
+        client._source = source
+        client.get_recent_drift("intune", hours=6)
+        self.assertIn("searchCriteria.fromDate", seen)
+
     def test_client_from_env_local_root(self) -> None:
         env_key = "ASTRAL_REPO_ROOT"
         original = os.environ.get(env_key)
@@ -110,3 +152,43 @@ class AstralMcpToolsTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class RemoteCloneTests(unittest.TestCase):
+    """ASTRAL_REPO_URL mode: any Git forge, kept fresh by sync_remote_clone."""
+
+    def _git(self, cwd, *args):
+        subprocess.run(["git", "-c", "user.email=t@t", "-c", "user.name=t", *args], cwd=cwd, check=True, capture_output=True)
+
+    def test_clone_then_refresh_sees_new_commit(self) -> None:
+        module = load_module()
+        with tempfile.TemporaryDirectory() as tmp:
+            origin, seed, dest = (os.path.join(tmp, n) for n in ("origin.git", "seed", "clone"))
+            subprocess.run(["git", "init", "-q", "--bare", "-b", "main", origin], check=True)
+            subprocess.run(["git", "clone", "-q", origin, seed], check=True, capture_output=True)
+            folder = Path(seed, "tenant-state", "intune", "Compliance Policies")
+            folder.mkdir(parents=True)
+            (folder / "A__1.json").write_text("{}")
+            self._git(seed, "add", ".")
+            self._git(seed, "commit", "-qm", "a")
+            self._git(seed, "push", "-q", "origin", "HEAD:main")
+
+            env = {"ASTRAL_REPO_URL": f"file://{origin}", "ASTRAL_REPO_CLONE_DIR": dest, "ASTRAL_REPO_REFRESH_SECONDS": "0"}
+            with unittest.mock.patch.dict(os.environ, env):
+                client = module.client_from_env()
+                self.assertEqual([p["name"] for p in client.list_policies("intune", "Compliance Policies")], ["A__1"])
+
+                (folder / "B__2.json").write_text("{}")
+                self._git(seed, "add", ".")
+                self._git(seed, "commit", "-qm", "b")
+                self._git(seed, "push", "-q", "origin", "HEAD:main")
+                module.refresh_remote_clone()
+                names = sorted(p["name"] for p in client.list_policies("intune", "Compliance Policies"))
+                self.assertEqual(names, ["A__1", "B__2"])
+                self.assertEqual(len(client.get_policy_history("intune", "Compliance Policies", "B__2")), 1)
+
+    def test_rejects_non_https_url(self) -> None:
+        module = load_module()
+        with unittest.mock.patch.dict(os.environ, {"ASTRAL_REPO_URL": "ssh://host/repo.git"}):
+            with self.assertRaises(RuntimeError):
+                module.sync_remote_clone(force=True)

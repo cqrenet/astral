@@ -48,14 +48,18 @@ The server reads configuration from environment variables:
 
 | Variable | Required | Default | Description |
 |----------|----------|---------|-------------|
-| `ASTRAL_REPO_ROOT` | No | — | Local Git repo path (overrides ADO) |
+| `ASTRAL_REPO_ROOT` | No | — | Local Git repo path (overrides everything else) |
+| `ASTRAL_REPO_URL` | No | — | HTTPS clone URL on any Git forge (Gitea, GitHub, Azure DevOps). The server keeps a clone and refreshes it before tool calls. |
+| `ASTRAL_REPO_TOKEN` | No | — | Read-only token for `ASTRAL_REPO_URL` (Container App secret). Passed per git command, never written to `.git/config`. |
+| `ASTRAL_REPO_BRANCH` | No | `main` | Branch to serve |
+| `ASTRAL_REPO_REFRESH_SECONDS` | No | `300` | Minimum time between refreshes |
 | `ADO_ORGANIZATION` | Yes* | — | Azure DevOps organization |
 | `ADO_PROJECT` | Yes* | — | Azure DevOps project |
 | `ADO_REPO_NAME` | No | — | Repository name (auto-detected if omitted) |
 | `ADO_BRANCH` | No | `main` | Git branch to read from |
-| `ADO_TOKEN` | Yes* | — | Azure DevOps PAT (Build read scope) |
+| `ADO_TOKEN` | Yes* | — | Azure DevOps PAT with **Code (Read)** scope; store as a Container App secret |
 
-\* Required when `ASTRAL_REPO_ROOT` is not set.
+\* Required when neither `ASTRAL_REPO_ROOT` nor `ASTRAL_REPO_URL` is set.
 
 ## Deployment (Standard)
 
@@ -138,12 +142,14 @@ python3 mcp_server.py --transport sse --host 127.0.0.1 --port 8080
 
 ### Configure Claude Desktop
 
-Add to your Claude Desktop config (`~/Library/Application Support/Claude/claude_desktop_config.json` on macOS):
+Claude Desktop config file: `~/Library/Application Support/Claude/claude_desktop_config.json` on macOS.
+
+**Option A — stdio (local repo, no auth needed)**
 
 ```json
 {
   "mcpServers": {
-    "astral-local": {
+    "astral": {
       "command": "python3",
       "args": [
         "/path/to/astral/infra/mcp-server/mcp_server.py",
@@ -151,6 +157,28 @@ Add to your Claude Desktop config (`~/Library/Application Support/Claude/claude_
       ],
       "env": {
         "ASTRAL_REPO_ROOT": "/path/to/astral-clone"
+      }
+    }
+  }
+}
+```
+
+**Option B — SSE with API key (local or remote server)**
+
+```bash
+# Start the server
+export ASTRAL_REPO_ROOT=/path/to/astral-clone
+export MCP_API_KEY=$(python3 -c "import secrets; print(secrets.token_urlsafe(32))")
+python3 mcp_server.py --transport sse --host 127.0.0.1 --port 8080
+```
+
+```json
+{
+  "mcpServers": {
+    "astral": {
+      "url": "http://127.0.0.1:8080/sse",
+      "headers": {
+        "Authorization": "Bearer <your-MCP_API_KEY-value>"
       }
     }
   }
@@ -205,50 +233,58 @@ az containerapp auth update \
 
 ### Authentication
 
-The MCP server supports two authentication modes:
+The MCP server supports two authentication modes, which can be active simultaneously.
 
-**1. API key (default, no Entra ID required)**
+**1. API key — recommended for Claude Desktop and AURORA**
 
-The provisioning script generates a random 32-character API key and injects it as the `MCP_API_KEY` environment variable. Pass the key via the `x-api-key` header:
+Set `MCP_API_KEY` to a random secret (the provisioning script does this automatically; you can also set it manually). Pass the key as a Bearer token or via `x-api-key`:
 
 ```json
 {
   "mcpServers": {
-    "astral-azure": {
-      "transport": "sse",
+    "astral": {
       "url": "https://astral-mcp.<region>.azurecontainerapps.io/sse",
       "headers": {
-        "x-api-key": "<api-key-from-script-output>"
+        "Authorization": "Bearer <your-mcp-api-key>"
       }
     }
   }
 }
 ```
 
-**2. Microsoft Entra ID (enterprise)**
+The `x-api-key: <key>` header is accepted as an alternative.
 
-Configure via the Azure Portal under **Container App → Authentication → Identity Provider → Microsoft**. Once enabled, pass the Entra bearer token:
+To generate a key manually:
+```bash
+python -c "import secrets; print(secrets.token_urlsafe(32))"
+```
+
+**2. Microsoft Entra ID (enterprise / human users)**
+
+The server can publish an OAuth 2.0 discovery document (`/.well-known/oauth-authorization-server`, RFC 8414) so that MCP clients discover the Entra auth endpoints automatically. Set `ENTRA_TENANT_ID` and `MCP_CLIENT_ID` to activate it. The server validates tokens itself (signature, audience, tenant, issuer, and the `user_impersonation` scope), so leave Container Apps built-in authentication off or set to allow anonymous requests; otherwise the discovery endpoint is not reachable.
+
+With discovery active, Claude Desktop initiates the OAuth flow on its own — no `headers` entry needed in the config:
 
 ```json
 {
   "mcpServers": {
-    "astral-azure": {
-      "transport": "sse",
-      "url": "https://astral-mcp.<region>.azurecontainerapps.io/sse",
-      "headers": {
-        "Authorization": "Bearer <entra-token>"
-      }
+    "astral": {
+      "url": "https://astral-mcp.<region>.azurecontainerapps.io/sse"
     }
   }
 }
 ```
+
+Both modes can be active at the same time — service clients use the key, human users go through Entra.
 
 ## Security Notes
 
 - **Never commit `ADO_TOKEN`** to Git. Use Azure Key Vault or Container Apps secrets.
 - Enable **Entra ID authentication** on the Container Apps ingress for production.
 - Consider placing the MCP server behind **Azure API Management** for rate limiting and additional policy governance.
-- The ADO token only needs **Build (read)** scope for reading repository contents.
+- The ADO token only needs **Code (Read)** scope for reading repository contents. Use a dedicated PAT from a low-privilege account; a PAT inherits its owner's permissions.
+- The server **fails closed**: with SSE transport it refuses to start unless `MCP_API_KEY` or `ENTRA_TENANT_ID` + `MCP_CLIENT_ID` is set. Use stdio for unauthenticated local development.
+- Entra tokens must carry the `user_impersonation` scope (app-only tokens are rejected). Provisioning sets **assignment required** on the MCP enterprise app; assign the users/groups that may use the server.
 
 ## Data Flow
 
