@@ -10,6 +10,7 @@ import pathlib
 import urllib.error
 import urllib.parse
 import urllib.request
+from typing import Any
 
 
 SPECIAL_APP_IDS = {
@@ -174,6 +175,52 @@ def resolve_id_list(
     return resolved
 
 
+def _resolve_section(section: Any, keys: tuple[str, ...], lookup: Any) -> bool:
+    """Add `<key>Resolved` next to each ID list in *section*; True when anything changed."""
+    if not isinstance(section, dict):
+        return False
+    changed = False
+    for key in keys:
+        value = section.get(key)
+        if not isinstance(value, list):
+            continue
+        resolved_key = f"{key}Resolved"
+        resolved_value = resolve_id_list(value, lookup)
+        if section.get(resolved_key) != resolved_value:
+            section[resolved_key] = resolved_value
+            changed = True
+    return changed
+
+
+def enrich_policy(payload: dict[str, Any], resolver: GraphResolver) -> bool:
+    """Resolve GUID references of one Conditional Access policy in place; True when it changed."""
+    conditions = payload.get("conditions")
+    if not isinstance(conditions, dict):
+        conditions = {}
+    users = conditions.get("users")
+    changed = _resolve_section(users, ("includeGroups", "excludeGroups"), resolver.group_name)
+    changed |= _resolve_section(users, ("includeRoles", "excludeRoles"), resolver.role_name)
+    changed |= _resolve_section(
+        conditions.get("applications"), ("includeApplications", "excludeApplications"), resolver.app_name
+    )
+    changed |= _resolve_section(
+        conditions.get("locations"), ("includeLocations", "excludeLocations"), resolver.location_name
+    )
+
+    grant_controls = payload.get("grantControls")
+    auth_strength = grant_controls.get("authenticationStrength") if isinstance(grant_controls, dict) else None
+    auth_strength_id = auth_strength.get("id") if isinstance(auth_strength, dict) else None
+    if isinstance(auth_strength_id, str) and auth_strength_id:
+        resolved = {
+            "id": auth_strength_id,
+            "displayName": resolver.auth_strength_name(auth_strength_id) or "Unresolved",
+        }
+        if grant_controls.get("authenticationStrengthResolved") != resolved:
+            grant_controls["authenticationStrengthResolved"] = resolved
+            changed = True
+    return changed
+
+
 def main() -> int:
     args = parse_args()
     root = pathlib.Path(args.root).resolve()
@@ -200,65 +247,7 @@ def main() -> int:
         if not isinstance(payload, dict):
             continue
         processed_files += 1
-        changed = False
-
-        conditions = payload.get("conditions")
-        if not isinstance(conditions, dict):
-            conditions = {}
-
-        users = conditions.get("users")
-        if isinstance(users, dict):
-            for key, lookup in (
-                ("includeGroups", resolver.group_name),
-                ("excludeGroups", resolver.group_name),
-                ("includeRoles", resolver.role_name),
-                ("excludeRoles", resolver.role_name),
-            ):
-                value = users.get(key)
-                if isinstance(value, list):
-                    resolved_key = f"{key}Resolved"
-                    resolved_value = resolve_id_list(value, lookup)
-                    if users.get(resolved_key) != resolved_value:
-                        users[resolved_key] = resolved_value
-                        changed = True
-
-        apps = conditions.get("applications")
-        if isinstance(apps, dict):
-            for key in ("includeApplications", "excludeApplications"):
-                value = apps.get(key)
-                if isinstance(value, list):
-                    resolved_key = f"{key}Resolved"
-                    resolved_value = resolve_id_list(value, resolver.app_name)
-                    if apps.get(resolved_key) != resolved_value:
-                        apps[resolved_key] = resolved_value
-                        changed = True
-
-        locations = conditions.get("locations")
-        if isinstance(locations, dict):
-            for key in ("includeLocations", "excludeLocations"):
-                value = locations.get(key)
-                if isinstance(value, list):
-                    resolved_key = f"{key}Resolved"
-                    resolved_value = resolve_id_list(value, resolver.location_name)
-                    if locations.get(resolved_key) != resolved_value:
-                        locations[resolved_key] = resolved_value
-                        changed = True
-
-        grant_controls = payload.get("grantControls")
-        if isinstance(grant_controls, dict):
-            auth_strength = grant_controls.get("authenticationStrength")
-            if isinstance(auth_strength, dict):
-                auth_strength_id = auth_strength.get("id")
-                if isinstance(auth_strength_id, str) and auth_strength_id:
-                    resolved = {
-                        "id": auth_strength_id,
-                        "displayName": resolver.auth_strength_name(auth_strength_id) or "Unresolved",
-                    }
-                    if grant_controls.get("authenticationStrengthResolved") != resolved:
-                        grant_controls["authenticationStrengthResolved"] = resolved
-                        changed = True
-
-        if changed:
+        if enrich_policy(payload, resolver):
             file_path.write_text(json.dumps(payload, indent=5, ensure_ascii=False) + "\n", encoding="utf-8")
             updated_files += 1
 
