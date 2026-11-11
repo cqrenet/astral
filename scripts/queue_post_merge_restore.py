@@ -188,6 +188,55 @@ def _find_candidate(
     return None
 
 
+def _queue_restore(
+    collection_uri: str, project: str, headers: dict[str, str], request: common.RestoreRequest
+) -> dict[str, Any] | None:
+    """Queue the restore; None (after explaining how to fix it) when the identity lacks permission."""
+    try:
+        return common.queue_restore_pipeline(collection_uri, project, headers, request)
+    except Exception as exc:
+        if not _is_permission_error(exc):
+            raise
+        print(
+            "WARNING: Post-merge remediation queue skipped due permissions. "
+            f"Definition={request.definition_id}. Details: {exc}"
+        )
+        _diagnose_queue_permission(collection_uri, project, headers, request.definition_id)
+        print(
+            "Grant 'Queue builds' permission for this pipeline identity on the restore pipeline "
+            "and ensure the pipeline has access to run it."
+        )
+        return None
+
+
+def _restore_scope(workload: str, rejected_paths: list[str]) -> tuple[str, str]:
+    """(restore mode, restore paths CSV): selective for Intune with rejected paths, otherwise full."""
+    if workload == "intune" and rejected_paths:
+        print(f"Post-merge remediation scope: selective ({len(rejected_paths)} rejected path(s)).")
+        for path in rejected_paths:
+            print(f" - {path}")
+        return "selective", ",".join(rejected_paths)
+    print("Post-merge remediation scope: full.")
+    return "full", ""
+
+
+def _marker_comment(
+    workload: str, pr_id: int, commit: str, is_abandoned: bool, definition_id: int | str, build_url: str
+) -> str:
+    """PR thread text that records the queued restore; its marker line prevents queueing twice."""
+    commit_label = "Source commit" if is_abandoned else "Merge commit"
+    return (
+        f"Auto-remediation queued after {'abandoned' if is_abandoned else 'merged'} rolling PR "
+        "with reviewer /reject decision(s).\n\n"
+        f"Workload: {workload}\n"
+        f"PR: #{pr_id}\n"
+        f"{commit_label}: {commit}\n"
+        f"Restore pipeline definition: {definition_id}\n"
+        f"Restore run: {build_url or '(queued)'}\n\n"
+        f"Automation marker: {MERGE_MARKER_PREFIX}{commit}"
+    )
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Queue restore after merged rolling PR with /reject decisions")
     parser.add_argument("--workload", required=True, choices=["intune", "entra"])
@@ -244,70 +293,35 @@ def main() -> int:
     pr_id = int(candidate.get("pullRequestId"))
     merge_commit, is_abandoned = _commit_of(candidate)
 
-    restore_mode = "full"
-    restore_paths_csv = ""
-    rejected_paths = _rejected_ticket_paths(candidate_threads, allowed)
-    if args.workload == "intune" and rejected_paths:
-        restore_mode = "selective"
-        restore_paths_csv = ",".join(rejected_paths)
-        print(f"Post-merge remediation scope: selective ({len(rejected_paths)} rejected path(s)).")
-        for path in rejected_paths:
-            print(f" - {path}")
-    else:
-        print("Post-merge remediation scope: full.")
+    restore_mode, restore_paths_csv = _restore_scope(args.workload, _rejected_ticket_paths(candidate_threads, allowed))
 
-    try:
-        queued = common.queue_restore_pipeline(
-            collection_uri,
-            project,
-            headers,
-            common.RestoreRequest(
-                definition_id=definition_id,
-                baseline_branch=args.baseline_branch,
-                include_entra_update=_env_bool("AUTO_REMEDIATE_INCLUDE_ENTRA_UPDATE", False),
-                dry_run=_env_bool("AUTO_REMEDIATE_DRY_RUN", True),  # fail safe: unset = dry run
-                update_assignments=_env_bool("AUTO_REMEDIATE_UPDATE_ASSIGNMENTS", True),
-                remove_unmanaged=_env_bool("AUTO_REMEDIATE_REMOVE_OBJECTS", False),
-                max_workers=max_workers,
-                exclude_csv=_env_text("AUTO_REMEDIATE_EXCLUDE_CSV", ""),
-                restore_mode=restore_mode,
-                restore_paths_csv=restore_paths_csv,
-            ),
-        )
-    except Exception as exc:
-        if not _is_permission_error(exc):
-            raise
-        print(
-            "WARNING: Post-merge remediation queue skipped due permissions. "
-            f"Definition={definition_id}. Details: {exc}"
-        )
-        _diagnose_queue_permission(collection_uri, project, headers, definition_id)
-        print(
-            "Grant 'Queue builds' permission for this pipeline identity on the restore pipeline "
-            "and ensure the pipeline has access to run it."
-        )
+    request = common.RestoreRequest(
+        definition_id=definition_id,
+        baseline_branch=args.baseline_branch,
+        include_entra_update=_env_bool("AUTO_REMEDIATE_INCLUDE_ENTRA_UPDATE", False),
+        dry_run=_env_bool("AUTO_REMEDIATE_DRY_RUN", True),  # fail safe: unset = dry run
+        update_assignments=_env_bool("AUTO_REMEDIATE_UPDATE_ASSIGNMENTS", True),
+        remove_unmanaged=_env_bool("AUTO_REMEDIATE_REMOVE_OBJECTS", False),
+        max_workers=max_workers,
+        exclude_csv=_env_text("AUTO_REMEDIATE_EXCLUDE_CSV", ""),
+        restore_mode=restore_mode,
+        restore_paths_csv=restore_paths_csv,
+    )
+    queued = _queue_restore(collection_uri, project, headers, request)
+    if queued is None:
         return 0
 
     build_id = queued.get("id")
     build_url = common.build_web_url(queued, collection_uri, project)
-    pr_state = "abandoned" if is_abandoned else "merged"
-    commit_label = "Source commit" if is_abandoned else "Merge commit"
-    comment = (
-        f"Auto-remediation queued after {pr_state} rolling PR with reviewer /reject decision(s).\n\n"
-        f"Workload: {args.workload}\n"
-        f"PR: #{pr_id}\n"
-        f"{commit_label}: {merge_commit}\n"
-        f"Restore pipeline definition: {definition_id}\n"
-        f"Restore run: {build_url or '(queued)'}\n\n"
-        f"Automation marker: {MERGE_MARKER_PREFIX}{merge_commit}"
-    )
+    comment = _marker_comment(args.workload, pr_id, merge_commit, is_abandoned, definition_id, build_url)
     try:
         common.post_pr_thread(repo_api, headers, pr_id, comment)
     except Exception as exc:
         print(f"WARNING: Restore queued, but failed posting marker comment on PR #{pr_id}: {exc}")
 
     print(
-        f"Queued post-merge remediation for PR #{pr_id} ({commit_label.lower()}={merge_commit}, buildId={build_id})."
+        f"Queued post-merge remediation for PR #{pr_id} "
+        f"({'source commit' if is_abandoned else 'merge commit'}={merge_commit}, buildId={build_id})."
     )
     return 0
 

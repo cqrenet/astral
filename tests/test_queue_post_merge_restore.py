@@ -100,6 +100,28 @@ class QueuePostMergeRestoreTests(unittest.TestCase):
         pr["reviewers"].append({"id": "ABC-123", "vote": -10})
         self.assertTrue(common.has_allowed_reject_vote(pr, ALLOWED))
 
+    def test_restore_scope_is_selective_only_for_intune_with_rejected_paths(self) -> None:
+        self.assertEqual(self.module._restore_scope("intune", ["a.json", "b.json"]), ("selective", "a.json,b.json"))
+        self.assertEqual(self.module._restore_scope("intune", []), ("full", ""))
+        self.assertEqual(self.module._restore_scope("entra", ["a.json"]), ("full", ""))
+
+    def test_marker_comment_carries_the_dedup_marker(self) -> None:
+        text = self.module._marker_comment("intune", 7, "abc123", True, 42, "")
+        self.assertIn("abandoned rolling PR", text)
+        self.assertIn("Source commit: abc123", text)
+        self.assertIn("Restore run: (queued)", text)
+        self.assertTrue(text.endswith(f"Automation marker: {self.module.MERGE_MARKER_PREFIX}abc123"))
+
+    def test_queue_restore_skips_on_permission_error_but_raises_others(self) -> None:
+        request = self.module.common.RestoreRequest(definition_id=42, baseline_branch="main")
+        with patch.object(self.module.common, "queue_restore_pipeline", side_effect=RuntimeError("HTTP 403 forbidden")), \
+                patch.object(self.module, "_diagnose_queue_permission") as diagnose:
+            self.assertIsNone(self.module._queue_restore("https://c", "p", {}, request))
+            diagnose.assert_called_once()
+        with patch.object(self.module.common, "queue_restore_pipeline", side_effect=RuntimeError("HTTP 500")):
+            with self.assertRaises(RuntimeError):
+                self.module._queue_restore("https://c", "p", {}, request)
+
     def test_queue_restore_pipeline_includes_selective_params(self) -> None:
         captured: dict[str, object] = {}
 

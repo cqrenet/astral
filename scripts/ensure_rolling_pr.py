@@ -353,6 +353,38 @@ def _fetch_branches(repo_root: str, baseline_branch: str, drift_branch: str) -> 
         # Drift branch may not exist yet; the caller falls back to HEAD.
 
 
+def _resolve_commitishes(repo_root: str, baseline_branch: str, drift_branch: str) -> tuple[str, str]:
+    """Fetch both branches; prefer origin/<branch>, falling back to the local baseline and to HEAD."""
+    _fetch_branches(repo_root, baseline_branch, drift_branch)
+    baseline = f"origin/{baseline_branch}" if _ref_has_commit(repo_root, f"origin/{baseline_branch}") else baseline_branch
+    drift = f"origin/{drift_branch}" if _ref_has_commit(repo_root, f"origin/{drift_branch}") else "HEAD"
+    return baseline, drift
+
+
+def _create_rolling_pr(
+    repo_api: str,
+    headers: dict[str, str],
+    source_ref: str,
+    target_ref: str,
+    title: str,
+    description: str,
+    merge_strategy: str,
+) -> dict[str, Any]:
+    return _request_json(
+        f"{repo_api}/pullrequests?api-version=7.1",
+        headers=headers,
+        method="POST",
+        body={
+            "sourceRefName": source_ref,
+            "targetRefName": target_ref,
+            "title": title,
+            "description": description,
+            "isDraft": _env_bool("ROLLING_PR_DELAY_REVIEWER_NOTIFICATIONS", False),
+            "completionOptions": {"mergeStrategy": merge_strategy},
+        },
+    )
+
+
 def _update_existing_pr(
     pr: dict[str, Any],
     repo_api: str,
@@ -489,13 +521,7 @@ def main() -> int:
         )
         return 0
 
-    _fetch_branches(args.repo_root, baseline_branch, drift_branch)
-    baseline_commitish = (
-        f"origin/{baseline_branch}" if _ref_has_commit(args.repo_root, f"origin/{baseline_branch}") else baseline_branch
-    )
-    drift_commitish = (
-        f"origin/{drift_branch}" if _ref_has_commit(args.repo_root, f"origin/{drift_branch}") else "HEAD"
-    )
+    baseline_commitish, drift_commitish = _resolve_commitishes(args.repo_root, baseline_branch, drift_branch)
     if not _workload_config_diff_exists(
         repo_root=args.repo_root,
         baseline_commitish=baseline_commitish,
@@ -545,18 +571,14 @@ def main() -> int:
             f"No abandoned PR snapshot match for current drift tree (checked {len(abandoned_prs)} abandoned PR(s)); "
             "creating/updating rolling PR."
         )
-    created = _request_json(
-        f"{repo_api}/pullrequests?api-version=7.1",
-        headers=headers,
-        method="POST",
-        body={
-            "sourceRefName": source_ref,
-            "targetRefName": target_ref,
-            "title": args.pr_title,
-            "description": description,
-            "isDraft": _env_bool("ROLLING_PR_DELAY_REVIEWER_NOTIFICATIONS", False),
-            "completionOptions": {"mergeStrategy": pr_merge_strategy},
-        },
+    created = _create_rolling_pr(
+        repo_api,
+        headers,
+        source_ref,
+        target_ref,
+        args.pr_title,
+        description,
+        pr_merge_strategy,
     )
     web_url = _pr_web_url(created)
     print(f"Created rolling {args.workload} PR #{created.get('pullRequestId')}: {web_url}")
