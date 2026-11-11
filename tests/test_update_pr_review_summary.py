@@ -1293,5 +1293,71 @@ class LoadPolicyExcerptTests(unittest.TestCase):
             self.assertEqual(load("/nonexistent-dir", "main", "a.json"), "")
 
 
+class RefreshSummaryFlowTests(unittest.TestCase):
+    """Orchestration of main(): which collaborators run, in which order, for each outcome."""
+
+    ENV = {
+        "SYSTEM_ACCESSTOKEN": "tok", "SYSTEM_COLLECTIONURI": "https://dev.azure.com/org/", "SYSTEM_TEAMPROJECT": "proj",
+        "BUILD_REPOSITORY_ID": "repo", "REQUIRE_CHANGE_TICKETS": "",
+    }
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.module = load_module()
+        _bind_pr_modules(cls)
+
+    def _run(self, *, pr=None, current=False, require_gate=False, fail_ai=False):
+        m = self.module
+        calls: list[str] = []
+        pr = {"pullRequestId": 7, "title": "T"} if pr is None else pr
+        full_pr = {"description": "old", "isDraft": True, "title": "T"}
+
+        def rec(name, result=None):
+            def fn(*a, **k):
+                calls.append(name)
+                if name == "ai" and fail_ai:
+                    raise RuntimeError("boom")
+                return result
+            return fn
+
+        update = self.pr_description.DescriptionUpdate(True, "new desc", False, False)
+        env = dict(self.ENV, REQUIRE_CHANGE_TICKETS="true" if require_gate else "")
+        argv = ["x", "--repo-root", "/r", "--workload", "intune", "--backup-folder", "ts",
+                "--reports-subdir", "reports", "--drift-branch", "drift/intune", "--baseline-branch", "main"]
+        with patch.dict(os.environ, env), patch.object(sys, "argv", argv), \
+                patch.object(m, "_find_active_rolling_pr", rec("find", pr or None)), \
+                patch.object(m, "_fetch_drift_branch", rec("fetch", True)), \
+                patch.object(m, "_collect_changes", rec("collect", ([], 0))), \
+                patch.object(m, "_request_json", rec("get_pr", full_pr)), \
+                patch.object(m, "_summary_is_current", rec("current?", current)), \
+                patch.object(m, "_call_azure_openai", rec("ai", ("ai text", None))), \
+                patch.object(m, "_publish_description", rec("description", update)), \
+                patch.object(m, "_sync_summary_threads", rec("threads")), \
+                patch.object(m, "_publish_draft_pr", rec("draft", True)), \
+                patch.object(m, "_run_ticket_gate", rec("gate")):
+            code = m.main()
+        return code, calls
+
+    def test_no_active_pr_does_nothing(self) -> None:
+        code, calls = self._run(pr={})
+        self.assertEqual((code, calls), (0, ["find"]))
+
+    def test_up_to_date_summary_skips_ai_and_description(self) -> None:
+        code, calls = self._run(current=True)
+        self.assertEqual(code, 0)
+        self.assertEqual(calls, ["find", "fetch", "collect", "get_pr", "current?", "draft", "gate"])
+
+    def test_changed_summary_runs_the_full_pipeline_in_order(self) -> None:
+        code, calls = self._run(current=False)
+        self.assertEqual(code, 0)
+        self.assertEqual(
+            calls, ["find", "fetch", "collect", "get_pr", "current?", "ai", "description", "threads", "draft", "gate"]
+        )
+
+    def test_failure_is_non_fatal_unless_ticket_gate_is_required(self) -> None:
+        self.assertEqual(self._run(fail_ai=True)[0], 0)
+        self.assertEqual(self._run(fail_ai=True, require_gate=True)[0], 1)
+
+
 if __name__ == "__main__":
     unittest.main()

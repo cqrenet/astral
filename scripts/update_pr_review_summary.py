@@ -13,6 +13,7 @@ from __future__ import annotations
 import argparse
 import os
 import sys
+from dataclasses import dataclass
 from typing import Any
 from urllib.parse import urlencode
 
@@ -210,6 +211,138 @@ def _collect_changes(args: argparse.Namespace, baseline_branch: str, drift_branc
     return changes, ignored
 
 
+@dataclass
+class _Run:
+    """One summary refresh of the active rolling PR."""
+
+    workload: str
+    repo_root: str
+    repo_api: str
+    token: str
+    pr_id: int
+    baseline_branch: str
+    drift_branch: str
+    changes: list[ChangeItem]
+    title: str
+    is_draft: bool
+    require_ticket_gate: bool
+
+    def publish_draft(self, description: str, reason: str) -> None:
+        published = _publish_draft_pr(
+            repo_api=self.repo_api,
+            token=self.token,
+            pr_id=self.pr_id,
+            title=self.title,
+            description=description,
+            is_draft=self.is_draft,
+        )
+        if published:
+            log.info(f"Published draft PR #{self.pr_id} {reason}.")
+
+    def run_ticket_gate(self) -> None:
+        _run_ticket_gate(
+            enabled=self.require_ticket_gate,
+            repo_api=self.repo_api,
+            pr_id=self.pr_id,
+            token=self.token,
+            repo_root=self.repo_root,
+            baseline_branch=self.baseline_branch,
+            drift_branch=self.drift_branch,
+            changes=self.changes,
+        )
+
+
+def _refresh_summary(args: argparse.Namespace, require_ticket_gate: bool) -> int:
+    baseline_branch = common.normalize_branch(args.baseline_branch)
+    drift_branch = common.normalize_branch(args.drift_branch)
+    token = _env("SYSTEM_ACCESSTOKEN")
+    repo_api = (
+        f"{_env('SYSTEM_COLLECTIONURI').rstrip('/')}/{_env('SYSTEM_TEAMPROJECT')}"
+        f"/_apis/git/repositories/{_env('BUILD_REPOSITORY_ID')}"
+    )
+    source_ref, target_ref = f"refs/heads/{drift_branch}", f"refs/heads/{baseline_branch}"
+
+    pr = _find_active_rolling_pr(repo_api, token, source_ref, target_ref)
+    if not pr:
+        log.info("No active rolling PR found; skipping summary update.")
+        return 0
+    pr_id = pr.get("pullRequestId")
+    if not pr_id:
+        log.info("Active PR without pullRequestId; skipping summary update.")
+        return 0
+    _debug(f"Active rolling PR detected: pr_id={pr_id}, source={source_ref}, target={target_ref}")
+
+    if not _fetch_drift_branch(args.repo_root, baseline_branch, drift_branch):
+        return 0
+    changes, ignored_operational_count = _collect_changes(args, baseline_branch, drift_branch)
+    deterministic = _build_deterministic_summary(
+        changes, drift_branch, baseline_branch, ignored_operational_count=ignored_operational_count
+    )
+
+    full_pr = _request_json(f"{repo_api}/pullrequests/{pr_id}?api-version=7.1", token=token)
+    current_description = full_pr.get("description") or ""
+    run = _Run(
+        workload=args.workload,
+        repo_root=args.repo_root,
+        repo_api=repo_api,
+        token=token,
+        pr_id=int(pr_id),
+        baseline_branch=baseline_branch,
+        drift_branch=drift_branch,
+        changes=changes,
+        title=full_pr.get("title") or pr.get("title") or f"{args.workload} drift review (rolling)",
+        is_draft=bool(full_pr.get("isDraft")),
+        require_ticket_gate=require_ticket_gate,
+    )
+
+    if _summary_is_current(
+        workload=args.workload,
+        pr_id=pr_id,
+        current_description=current_description,
+        changes_fingerprint=_changes_fingerprint(changes).lower(),
+        deterministic=deterministic,
+    ):
+        run.publish_draft(current_description, "after confirming summary was already up to date")
+        log.info(
+            f"Automated review summary fingerprint unchanged for PR #{pr_id} "
+            f"({args.workload}); skipping description update."
+        )
+        run.run_ticket_gate()
+        return 0
+
+    ai_summary, ai_error = _call_azure_openai(
+        changes, deterministic, args.workload, args.repo_root, baseline_branch, drift_branch
+    )
+    _debug(
+        f"summary: pr_id={pr_id} workload={args.workload} "
+        f"status={full_pr.get('status')} isDraft={full_pr.get('isDraft')} "
+        f"mergeStatus={full_pr.get('mergeStatus')} title_len={len(run.title)} "
+        f"current_desc_len={len(current_description)}"
+    )
+    update = _publish_description(
+        workload=args.workload,
+        deterministic=deterministic,
+        ai_summary=ai_summary,
+        ai_error=ai_error,
+        current_description=current_description,
+        patch_url=f"{repo_api}/pullrequests/{pr_id}?api-version=7.1",
+        patch_title=run.title,
+        token=token,
+    )
+    _sync_summary_threads(
+        repo_api=repo_api,
+        pr_id=run.pr_id,
+        token=token,
+        workload=args.workload,
+        deterministic=deterministic,
+        ai_summary=ai_summary,
+        update=update,
+    )
+    run.publish_draft(update.final_description, "after automated review summary update")
+    run.run_ticket_gate()
+    return 0
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Update rolling PR reviewer summary")
     parser.add_argument("--repo-root", required=True)
@@ -225,122 +358,8 @@ def main() -> int:
         f"REQUIRE_CHANGE_TICKETS={os.environ.get('REQUIRE_CHANGE_TICKETS', '')!r}, "
         f"effective={require_ticket_gate}"
     )
-
     try:
-        baseline_branch = common.normalize_branch(args.baseline_branch)
-        drift_branch = common.normalize_branch(args.drift_branch)
-
-        token = _env("SYSTEM_ACCESSTOKEN")
-        collection_uri = _env("SYSTEM_COLLECTIONURI").rstrip("/")
-        project = _env("SYSTEM_TEAMPROJECT")
-        repository_id = _env("BUILD_REPOSITORY_ID")
-
-        source_ref = f"refs/heads/{drift_branch}"
-        target_ref = f"refs/heads/{baseline_branch}"
-        repo_api = f"{collection_uri}/{project}/_apis/git/repositories/{repository_id}"
-
-        pr = _find_active_rolling_pr(repo_api, token, source_ref, target_ref)
-        if not pr:
-            log.info("No active rolling PR found; skipping summary update.")
-            return 0
-        pr_id = pr.get("pullRequestId")
-        if not pr_id:
-            log.info("Active PR without pullRequestId; skipping summary update.")
-            return 0
-        _debug(f"Active rolling PR detected: pr_id={pr_id}, source={source_ref}, target={target_ref}")
-
-        if not _fetch_drift_branch(args.repo_root, baseline_branch, drift_branch):
-            return 0
-        changes, ignored_operational_count = _collect_changes(args, baseline_branch, drift_branch)
-        deterministic = _build_deterministic_summary(
-            changes,
-            drift_branch,
-            baseline_branch,
-            ignored_operational_count=ignored_operational_count,
-        )
-
-        full_pr = _request_json(f"{repo_api}/pullrequests/{pr_id}?api-version=7.1", token=token)
-        current_description = full_pr.get("description") or ""
-        pr_is_draft = bool(full_pr.get("isDraft"))
-        patch_title = full_pr.get("title") or pr.get("title") or f"{args.workload} drift review (rolling)"
-        ticket_gate = dict(
-            enabled=require_ticket_gate,
-            repo_api=repo_api,
-            pr_id=pr_id,
-            token=token,
-            repo_root=args.repo_root,
-            baseline_branch=baseline_branch,
-            drift_branch=drift_branch,
-            changes=changes,
-        )
-
-        if _summary_is_current(
-            workload=args.workload,
-            pr_id=pr_id,
-            current_description=current_description,
-            changes_fingerprint=_changes_fingerprint(changes).lower(),
-            deterministic=deterministic,
-        ):
-            if _publish_draft_pr(
-                repo_api=repo_api,
-                token=token,
-                pr_id=int(pr_id),
-                title=patch_title,
-                description=current_description,
-                is_draft=pr_is_draft,
-            ):
-                log.info(f"Published draft PR #{pr_id} after confirming summary was already up to date.")
-            log.info(
-                f"Automated review summary fingerprint unchanged for PR #{pr_id} "
-                f"({args.workload}); skipping description update."
-            )
-            _run_ticket_gate(**ticket_gate)
-            return 0
-
-        ai_summary, ai_error = _call_azure_openai(
-            changes,
-            deterministic,
-            args.workload,
-            args.repo_root,
-            baseline_branch,
-            drift_branch,
-        )
-        _debug(
-            f"summary: pr_id={pr_id} workload={args.workload} "
-            f"status={full_pr.get('status')} isDraft={full_pr.get('isDraft')} "
-            f"mergeStatus={full_pr.get('mergeStatus')} title_len={len(patch_title)} "
-            f"current_desc_len={len(current_description)}"
-        )
-        update = _publish_description(
-            workload=args.workload,
-            deterministic=deterministic,
-            ai_summary=ai_summary,
-            ai_error=ai_error,
-            current_description=current_description,
-            patch_url=f"{repo_api}/pullrequests/{pr_id}?api-version=7.1",
-            patch_title=patch_title,
-            token=token,
-        )
-        _sync_summary_threads(
-            repo_api=repo_api,
-            pr_id=int(pr_id),
-            token=token,
-            workload=args.workload,
-            deterministic=deterministic,
-            ai_summary=ai_summary,
-            update=update,
-        )
-        if _publish_draft_pr(
-            repo_api=repo_api,
-            token=token,
-            pr_id=int(pr_id),
-            title=patch_title,
-            description=update.final_description,
-            is_draft=pr_is_draft,
-        ):
-            log.info(f"Published draft PR #{pr_id} after automated review summary update.")
-        _run_ticket_gate(**ticket_gate)
-        return 0
+        return _refresh_summary(args, require_ticket_gate)
     except Exception as exc:
         # Non-fatal on purpose: backup and PR flow should continue even if summary generation fails.
         log.warning(f"Failed to update automated review summary: {exc}")
