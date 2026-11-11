@@ -1197,5 +1197,51 @@ class PublishDescriptionTests(unittest.TestCase):
             self._publish([RuntimeError("HTTP 500 boom")])
 
 
+class EnforceTicketThreadsTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.module = load_module()
+
+    def _change(self, path: str):
+        return self.module.ChangeItem(
+            operation="Modified", path=path, risk_score=2, risk_label="MEDIUM",
+            reason="r", policy_type="device_configuration", severity="MEDIUM",
+        )
+
+    def _thread(self, thread_id: int, path: str, status: int = 1, extra: tuple[str, ...] = ()):
+        marker = self.module._ticket_marker_for_path(path)
+        comments = [{"id": 1, "content": marker}] + [{"id": 2 + i, "content": c} for i, c in enumerate(extra)]
+        return {"id": thread_id, "status": status, "comments": comments}
+
+    def test_creates_closes_and_reopens_threads(self) -> None:
+        new_path = "tenant-state/intune/Scripts/new.json"
+        again_path = "tenant-state/intune/Scripts/again.json"
+        stale_path = "tenant-state/intune/Scripts/stale.json"
+        threads = [
+            self._thread(10, again_path, status=self.module.common.THREAD_STATUS_FIXED),
+            self._thread(11, stale_path),
+        ]
+        calls = {"created": [], "status": [], "comments": []}
+        with patch.object(self.module, "_request_json", return_value={"value": threads}), patch.object(
+            self.module, "_create_ticket_thread", side_effect=lambda **kw: calls["created"].append(kw["path"])
+        ), patch.object(
+            self.module, "_set_thread_status", side_effect=lambda *a: calls["status"].append((a[2], a[4]))
+        ), patch.object(
+            self.module, "_add_thread_comment", side_effect=lambda **kw: calls["comments"].append(kw["thread_id"])
+        ):
+            created, closed = self.module._enforce_change_ticket_threads(
+                "https://x/repo", 5, "tok",
+                [self._change(new_path), self._change(again_path), self._change("tenant-state/reports/a.md")],
+                r"[A-Z]+-\d+",
+                {},
+            )
+        common = self.module.common
+        self.assertEqual((created, closed), (1, 1))
+        self.assertEqual(calls["created"], [new_path])
+        self.assertIn((11, common.THREAD_STATUS_CLOSED), calls["status"])  # stale thread closed
+        self.assertIn((10, common.THREAD_STATUS_ACTIVE), calls["status"])  # resolved thread re-opened
+        self.assertEqual(calls["comments"].count(10), 2)  # reopen note + latest detected change
+
+
 if __name__ == "__main__":
     unittest.main()

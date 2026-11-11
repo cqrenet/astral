@@ -1137,6 +1137,38 @@ def _summarize_app_security_fields(excerpt: str) -> str:
     return "; ".join(signals)
 
 
+def _is_volatile_key_name(key: str) -> bool:
+    lowered = key.lower()
+    # Metadata suffix/prefix variants are volatile too.
+    return lowered in VOLATILE_KEY_NAMES or lowered.endswith("datetime") or lowered.startswith("@odata.")
+
+
+def _format_scalar(value: Any) -> str:
+    if value is None:
+        return "null"
+    text = str(value).strip()
+    if not text:
+        return '""'
+    return text[:77] + "..." if len(text) > 80 else text
+
+
+def _flatten_json(obj: Any, prefix: str = "") -> dict[str, Any]:
+    """Flatten nested JSON into dotted keys, dropping volatile keys."""
+    flat: dict[str, Any] = {}
+    if isinstance(obj, dict):
+        for key, value in obj.items():
+            if not _is_volatile_key_name(key):
+                flat.update(_flatten_json(value, f"{prefix}.{key}" if prefix else key))
+    elif isinstance(obj, list):
+        # Include a lightweight content hash so list item edits (for example
+        # assignment filters) are detected even when list length is unchanged.
+        preview = json.dumps(obj, sort_keys=True, ensure_ascii=True, separators=(",", ":"))
+        flat[prefix] = f"list[{len(obj)}]#{hashlib.sha256(preview.encode('utf-8')).hexdigest()[:8]}"
+    else:
+        flat[prefix] = obj
+    return flat
+
+
 def _extract_semantic_change(old_excerpt: str, new_excerpt: str, path: str = "") -> str:
     """
     Derive a semantic description of configuration changes by flattening JSON
@@ -1144,93 +1176,39 @@ def _extract_semantic_change(old_excerpt: str, new_excerpt: str, path: str = "")
     for nested policy settings such as Conditional Access conditions or
     Defender settings.
     """
-    is_app_path = any(
-        marker in path.lower() for marker in ("/app registrations/", "/enterprise applications/")
-    )
-
     if not old_excerpt and new_excerpt:
-        if is_app_path:
-            app_signals = _summarize_app_security_fields(new_excerpt)
-            if app_signals:
-                return f"New configuration object added ({app_signals})"
-        return "New configuration object added"
+        is_app_path = any(m in path.lower() for m in ("/app registrations/", "/enterprise applications/"))
+        app_signals = _summarize_app_security_fields(new_excerpt) if is_app_path else ""
+        return f"New configuration object added ({app_signals})" if app_signals else "New configuration object added"
     if old_excerpt and not new_excerpt:
         return "Configuration object removed"
-
-    def _is_volatile_key_name(key: str) -> bool:
-        lowered = key.lower()
-        if lowered in VOLATILE_KEY_NAMES:
-            return True
-        # Common metadata suffix/prefix variants.
-        if lowered.endswith("datetime") or lowered.startswith("@odata."):
-            return True
-        return False
-
-    def _format_scalar(value: Any) -> str:
-        if value is None:
-            return "null"
-        text = str(value).strip()
-        if not text:
-            return '""'
-        if len(text) > 80:
-            return text[:77] + "..."
-        return text
-
-    def _flatten(obj: Any, prefix: str = "") -> dict[str, Any]:
-        flat: dict[str, Any] = {}
-        if isinstance(obj, dict):
-            for k, v in obj.items():
-                if _is_volatile_key_name(k):
-                    continue
-                new_key = f"{prefix}.{k}" if prefix else k
-                flat.update(_flatten(v, new_key))
-        elif isinstance(obj, list):
-            # Include a lightweight content hash so list item edits (for example
-            # assignment filters) are detected even when list length is unchanged.
-            preview = json.dumps(obj, sort_keys=True, ensure_ascii=True, separators=(",", ":"))
-            flat[prefix] = f"list[{len(obj)}]#{hashlib.sha256(preview.encode('utf-8')).hexdigest()[:8]}"
-        else:
-            flat[prefix] = obj
-        return flat
 
     try:
         old_json = json.loads(old_excerpt) if old_excerpt else {}
         new_json = json.loads(new_excerpt) if new_excerpt else {}
+        old_flat = _flatten_json(old_json)
+        new_flat = _flatten_json(new_json)
 
-        old_flat = _flatten(old_json)
-        new_flat = _flatten(new_json)
-
-        keys = set(old_flat.keys()) | set(new_flat.keys())
         state_changes: list[str] = []
         value_changes: list[str] = []
         structure_changes: list[str] = []
-        assignment_changes = _describe_assignment_changes(old_json, new_json)
+        for key in sorted(set(old_flat) | set(new_flat)):
+            old_val, new_val = old_flat.get(key), new_flat.get(key)
+            if old_val == new_val:
+                continue
+            if key not in old_flat:
+                structure_changes.append(f"{key} added")
+            elif key not in new_flat:
+                structure_changes.append(f"{key} removed")
+            else:
+                change_text = f"{key}: {_format_scalar(old_val)} -> {_format_scalar(new_val)}"
+                is_state = key.lower().endswith(".state") or key.lower() == "state"
+                (state_changes if is_state else value_changes).append(change_text)
 
-        for key in sorted(keys):
-            old_val = old_flat.get(key)
-            new_val = new_flat.get(key)
-
-            if old_val != new_val:
-                if key not in old_flat:
-                    structure_changes.append(f"{key} added")
-                elif key not in new_flat:
-                    structure_changes.append(f"{key} removed")
-                else:
-                    change_text = f"{key}: {_format_scalar(old_val)} -> {_format_scalar(new_val)}"
-                    if key.lower().endswith(".state") or key.lower() == "state":
-                        state_changes.append(change_text)
-                    else:
-                        value_changes.append(change_text)
-
-        ordered_changes = assignment_changes + state_changes + value_changes + structure_changes
-        if not ordered_changes:
-            return "No semantic key changes detected"
-
-        return "; ".join(ordered_changes[:8])
+        ordered = _describe_assignment_changes(old_json, new_json) + state_changes + value_changes + structure_changes
+        return "; ".join(ordered[:8]) if ordered else "No semantic key changes detected"
     except Exception:
-        if old_excerpt != new_excerpt:
-            return "Configuration content modified"
-        return ""
+        return "Configuration content modified" if old_excerpt != new_excerpt else ""
 
 
 def _policy_fingerprint(json_excerpt: str) -> str:
@@ -2468,6 +2446,71 @@ def _build_ticket_change_context(
     return context
 
 
+def _thread_comments(thread: dict[str, Any]) -> list[dict[str, Any]]:
+    comments = thread.get("comments")
+    return comments if isinstance(comments, list) else []
+
+
+def _index_auto_threads(threads: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    """Map policy path -> its auto change-ticket thread (identified by the marker comment)."""
+    by_path: dict[str, dict[str, Any]] = {}
+    for thread in threads:
+        marker_path = next(
+            (
+                path
+                for comment in _thread_comments(thread)
+                if (path := _path_from_ticket_marker(str(comment.get("content", "") or "")))
+            ),
+            None,
+        )
+        if marker_path:
+            by_path[marker_path] = thread
+    return by_path
+
+
+def _refresh_ticket_thread(
+    thread: dict[str, Any],
+    path: str,
+    change_summary: str,
+    risk_summary: str,
+    *,
+    repo_api: str,
+    pr_id: int,
+    token: str,
+) -> None:
+    """Re-open a resolved thread whose path drifted again and post the latest change if it is new."""
+    thread_id = _thread_id(thread)
+    if common.is_thread_resolved(thread) and thread_id > 0:
+        _debug(f"Re-opening resolved auto thread for changed path: thread_id={thread_id}, path={path}")
+        _set_thread_status(repo_api, pr_id, thread_id, token, common.THREAD_STATUS_ACTIVE)
+        _add_thread_comment(
+            repo_api=repo_api,
+            pr_id=pr_id,
+            thread_id=thread_id,
+            token=token,
+            content=(
+                "Policy drift changed again for this path; re-opening thread for fresh review. "
+                "Use `/accept` or `/reject` and resolve after decision."
+            ),
+        )
+    if thread_id > 0 and not _has_matching_detected_change_comment(
+        comments=_thread_comments(thread),
+        change_summary=change_summary,
+        risk_summary=risk_summary,
+    ):
+        _add_thread_comment(
+            repo_api=repo_api,
+            pr_id=pr_id,
+            thread_id=thread_id,
+            token=token,
+            content=f"Detected change (auto): {change_summary}\n\nRisk context: {risk_summary}",
+        )
+    _debug(
+        f"Auto thread already exists for path={path} "
+        f"(thread_id={thread_id}, resolved={common.is_thread_resolved(thread)})"
+    )
+
+
 def _enforce_change_ticket_threads(
     repo_api: str,
     pr_id: int,
@@ -2476,102 +2519,50 @@ def _enforce_change_ticket_threads(
     ticket_pattern: str,
     change_context: dict[str, tuple[str, str]],
 ) -> tuple[int, int]:
+    """Make sure every changed policy path has an open review thread; returns (created, closed_stale)."""
     tracked_paths = sorted(
         {item.path for item in changes if not common.is_doc_like(item.path) and not common.is_report_like(item.path)}
     )
-    tracked_set = set(tracked_paths)
     _debug(f"Tracked changed paths: count={len(tracked_paths)}")
     if tracked_paths:
-        preview = "; ".join(tracked_paths[:10])
-        _debug(f"Tracked paths preview: {preview}")
+        _debug(f"Tracked paths preview: {'; '.join(tracked_paths[:10])}")
 
-    threads_payload = _request_json(
-        f"{repo_api}/pullrequests/{pr_id}/threads?api-version=7.1",
-        token=token,
-    )
-    threads = threads_payload.get("value", [])
+    threads = _request_json(f"{repo_api}/pullrequests/{pr_id}/threads?api-version=7.1", token=token).get("value", [])
     _debug(f"Fetched PR threads: total={len(threads)}")
-
-    auto_threads_by_path: dict[str, dict[str, Any]] = {}
-    for thread in threads:
-        comments = thread.get("comments", []) if isinstance(thread.get("comments"), list) else []
-        marker_path: str | None = None
-        for comment in comments:
-            content = str(comment.get("content", "") or "")
-            marker_path = _path_from_ticket_marker(content)
-            if marker_path:
-                break
-        if marker_path:
-            auto_threads_by_path[marker_path] = thread
+    auto_threads_by_path = _index_auto_threads(threads)
     _debug(f"Detected auto ticket threads: total={len(auto_threads_by_path)}")
 
     # Close stale auto-generated threads when file is no longer part of drift.
     closed_count = 0
+    tracked_set = set(tracked_paths)
     for path, thread in auto_threads_by_path.items():
-        if path in tracked_set:
-            continue
-        if not common.is_thread_resolved(thread):
-            thread_id = _thread_id(thread)
-            if thread_id > 0:
-                _debug(f"Closing stale auto thread: thread_id={thread_id}, path={path}")
-                _set_thread_status(repo_api, pr_id, thread_id, token, common.THREAD_STATUS_CLOSED)
-                closed_count += 1
+        thread_id = _thread_id(thread)
+        if path not in tracked_set and not common.is_thread_resolved(thread) and thread_id > 0:
+            _debug(f"Closing stale auto thread: thread_id={thread_id}, path={path}")
+            _set_thread_status(repo_api, pr_id, thread_id, token, common.THREAD_STATUS_CLOSED)
+            closed_count += 1
 
     created_count = 0
     for path in tracked_paths:
+        change_summary, risk_summary = change_context.get(
+            path, ("`Modified` configuration content modified", "n/a")
+        )
         thread = auto_threads_by_path.get(path)
-        summary_tuple = change_context.get(path, ("`Modified` configuration content modified", "n/a"))
-        change_summary, risk_summary = summary_tuple
-        if not thread:
-            _create_ticket_thread(
-                repo_api=repo_api,
-                pr_id=pr_id,
-                token=token,
-                path=path,
-                ticket_pattern=ticket_pattern,
-                change_summary=change_summary,
-                risk_summary=risk_summary,
+        if thread:
+            _refresh_ticket_thread(
+                thread, path, change_summary, risk_summary, repo_api=repo_api, pr_id=pr_id, token=token
             )
-            created_count += 1
-        else:
-            if common.is_thread_resolved(thread):
-                thread_id = _thread_id(thread)
-                if thread_id > 0:
-                    _debug(f"Re-opening resolved auto thread for changed path: thread_id={thread_id}, path={path}")
-                    _set_thread_status(repo_api, pr_id, thread_id, token, common.THREAD_STATUS_ACTIVE)
-                    _add_thread_comment(
-                        repo_api=repo_api,
-                        pr_id=pr_id,
-                        thread_id=thread_id,
-                        token=token,
-                        content=(
-                            "Policy drift changed again for this path; re-opening thread for fresh review. "
-                            "Use `/accept` or `/reject` and resolve after decision."
-                        ),
-                    )
-            comments = thread.get("comments", []) if isinstance(thread.get("comments"), list) else []
-            has_matching_change = _has_matching_detected_change_comment(
-                comments=comments,
-                change_summary=change_summary,
-                risk_summary=risk_summary,
-            )
-            if not has_matching_change:
-                thread_id = _thread_id(thread)
-                if thread_id > 0:
-                    _add_thread_comment(
-                        repo_api=repo_api,
-                        pr_id=pr_id,
-                        thread_id=thread_id,
-                        token=token,
-                        content=(
-                            f"Detected change (auto): {change_summary}\n\n"
-                            f"Risk context: {risk_summary}"
-                        ),
-                    )
-            _debug(
-                f"Auto thread already exists for path={path} "
-                f"(thread_id={_thread_id(thread)}, resolved={common.is_thread_resolved(thread)})"
-            )
+            continue
+        _create_ticket_thread(
+            repo_api=repo_api,
+            pr_id=pr_id,
+            token=token,
+            path=path,
+            ticket_pattern=ticket_pattern,
+            change_summary=change_summary,
+            risk_summary=risk_summary,
+        )
+        created_count += 1
 
     return (created_count, closed_count)
 
