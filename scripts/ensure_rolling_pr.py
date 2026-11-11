@@ -21,28 +21,6 @@ _request_json = common.request_json
 _run_git = common.run_git
 
 
-def _query_prs(
-    repo_api: str,
-    headers: dict[str, str],
-    source_ref: str,
-    target_ref: str,
-    status: str,
-) -> list[dict[str, Any]]:
-    query = urllib.parse.urlencode(
-        {
-            "searchCriteria.status": status,
-            "searchCriteria.sourceRefName": source_ref,
-            "searchCriteria.targetRefName": target_ref,
-            "api-version": "7.1",
-        },
-        quote_via=urllib.parse.quote,
-        safe="/",
-    )
-    url = f"{repo_api}/pullrequests?{query}"
-    payload = _request_json(url, headers=headers)
-    return payload.get("value", []) if isinstance(payload, dict) else []
-
-
 def _pr_web_url(pr_payload: dict[str, Any]) -> str:
     pr_id = pr_payload.get("pullRequestId")
     return (
@@ -70,13 +48,6 @@ def _ref_has_commit(repo_root: str, ref: str) -> bool:
         text=True,
     )
     return proc.returncode == 0
-
-
-def _commit_tree_id(repo_api: str, headers: dict[str, str], commit_id: str) -> str:
-    url = f"{repo_api}/commits/{commit_id}?api-version=7.1"
-    payload = _request_json(url, headers=headers)
-    tree_id = payload.get("treeId", "") if isinstance(payload, dict) else ""
-    return tree_id.strip()
 
 
 def _latest_pr_by_creation(prs: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -140,21 +111,88 @@ def _config_fingerprint_from_local_tree(repo_root: str, commitish: str, scope: _
     return _fingerprint(pairs)
 
 
-def _config_fingerprint_from_tree_api(repo_api: str, headers: dict[str, str], tree_id: str, scope: _WorkloadScope) -> str:
-    if not tree_id:
-        return ""
-    payload = _request_json(f"{repo_api}/trees/{tree_id}?recursive=true&api-version=7.1", headers=headers)
-    entries = payload.get("treeEntries", []) if isinstance(payload, dict) else []
+@dataclass(frozen=True)
+class _Ado:
+    """The Azure DevOps repository the rolling PR lives in, with the calls this script makes on it."""
 
-    pairs: list[str] = []
-    for entry in entries:
-        if not isinstance(entry, dict) or str(entry.get("gitObjectType", "")).lower() != "blob":
-            continue
-        rel_path = str(entry.get("relativePath", ""))
-        blob_id = str(entry.get("objectId", "")).strip()
-        if blob_id and scope.contains(rel_path):
-            pairs.append(f"{common.normalize_repo_path(rel_path)}\t{blob_id}")
-    return _fingerprint(pairs)
+    collection_uri: str
+    project: str
+    repo_id: str
+    headers: dict[str, str]
+
+    @property
+    def repo_api(self) -> str:
+        return f"{self.collection_uri}/{self.project}/_apis/git/repositories/{self.repo_id}"
+
+    def query_prs(self, source_ref: str, target_ref: str, status: str) -> list[dict[str, Any]]:
+        query = urllib.parse.urlencode(
+            {
+                "searchCriteria.status": status,
+                "searchCriteria.sourceRefName": source_ref,
+                "searchCriteria.targetRefName": target_ref,
+                "api-version": "7.1",
+            },
+            quote_via=urllib.parse.quote,
+            safe="/",
+        )
+        payload = _request_json(f"{self.repo_api}/pullrequests?{query}", headers=self.headers)
+        return payload.get("value", []) if isinstance(payload, dict) else []
+
+    def commit_tree_id(self, commit_id: str) -> str:
+        payload = _request_json(f"{self.repo_api}/commits/{commit_id}?api-version=7.1", headers=self.headers)
+        return (payload.get("treeId", "") if isinstance(payload, dict) else "").strip()
+
+    def config_fingerprint(self, tree_id: str, scope: _WorkloadScope) -> str:
+        """Fingerprint of the workload configuration files in a Git tree, read through the REST API."""
+        if not tree_id:
+            return ""
+        payload = _request_json(f"{self.repo_api}/trees/{tree_id}?recursive=true&api-version=7.1", headers=self.headers)
+        entries = payload.get("treeEntries", []) if isinstance(payload, dict) else []
+        pairs: list[str] = []
+        for entry in entries:
+            if not isinstance(entry, dict) or str(entry.get("gitObjectType", "")).lower() != "blob":
+                continue
+            rel_path = str(entry.get("relativePath", ""))
+            blob_id = str(entry.get("objectId", "")).strip()
+            if blob_id and scope.contains(rel_path):
+                pairs.append(f"{common.normalize_repo_path(rel_path)}\t{blob_id}")
+        return _fingerprint(pairs)
+
+    def threads_with_marker(self, pr_id: int, marker: str) -> bool:
+        payload = _request_json(f"{self.repo_api}/pullrequests/{pr_id}/threads?api-version=7.1", headers=self.headers)
+        threads = payload.get("value", []) if isinstance(payload, dict) else []
+        return any(marker in str(c.get("content", "")) for t in threads for c in t.get("comments", []))
+
+    def create_pr(
+        self, source_ref: str, target_ref: str, title: str, description: str, merge_strategy: str
+    ) -> dict[str, Any]:
+        return _request_json(
+            f"{self.repo_api}/pullrequests?api-version=7.1",
+            headers=self.headers,
+            method="POST",
+            body={
+                "sourceRefName": source_ref,
+                "targetRefName": target_ref,
+                "title": title,
+                "description": description,
+                "isDraft": _env_bool("ROLLING_PR_DELAY_REVIEWER_NOTIFICATIONS", False),
+                "completionOptions": {"mergeStrategy": merge_strategy},
+            },
+        )
+
+    def update_pr(self, pr_id: Any, title: str, description: str, merge_strategy: str) -> None:
+        _request_json(
+            f"{self.repo_api}/pullrequests/{pr_id}?api-version=7.1",
+            headers=self.headers,
+            method="PATCH",
+            body={"title": title, "description": description, "completionOptions": {"mergeStrategy": merge_strategy}},
+        )
+
+    def queue_restore(self, request: common.RestoreRequest) -> dict[str, Any]:
+        return common.queue_restore_pipeline(self.collection_uri, self.project, self.headers, request)
+
+    def post_thread(self, pr_id: int, content: str) -> None:
+        common.post_pr_thread(self.repo_api, self.headers, pr_id, content)
 
 
 def _workload_config_diff_exists(
@@ -180,8 +218,7 @@ def _abandoned_pr_commit(pr: dict[str, Any]) -> str:
 
 
 def _find_matching_abandoned_pr(
-    repo_api: str,
-    headers: dict[str, str],
+    ado: _Ado,
     abandoned_prs: list[dict[str, Any]],
     drift_tree: str,
     repo_root: str,
@@ -197,7 +234,7 @@ def _find_matching_abandoned_pr(
         if not commit_id:
             continue
         try:
-            pr_tree = _commit_tree_id(repo_api, headers, commit_id)
+            pr_tree = ado.commit_tree_id(commit_id)
         except Exception:
             continue
         if pr_tree and pr_tree == drift_tree:
@@ -206,7 +243,7 @@ def _find_matching_abandoned_pr(
             continue
         if pr_tree not in fingerprint_by_tree:
             try:
-                fingerprint_by_tree[pr_tree] = _config_fingerprint_from_tree_api(repo_api, headers, pr_tree, scope)
+                fingerprint_by_tree[pr_tree] = ado.config_fingerprint(pr_tree, scope)
             except Exception:
                 fingerprint_by_tree[pr_tree] = ""
         if fingerprint_by_tree[pr_tree] == current_fingerprint:
@@ -236,18 +273,6 @@ def _build_description(workload: str, drift_branch: str, baseline_branch: str, b
         f"{lead} run `{build_number}` (build {build_id})\n\n"
         f"Source: `{drift_branch}` → Target: `{baseline_branch}`\n"
     )
-
-
-def _threads_with_marker(repo_api: str, headers: dict[str, str], pr_id: int, marker: str) -> bool:
-    url = f"{repo_api}/pullrequests/{pr_id}/threads?api-version=7.1"
-    payload = _request_json(url, headers=headers)
-    threads = payload.get("value", []) if isinstance(payload, dict) else []
-    for thread in threads:
-        for comment in thread.get("comments", []):
-            content = str(comment.get("content", ""))
-            if marker in content:
-                return True
-    return False
 
 
 @dataclass
@@ -319,38 +344,8 @@ def _resolve_commitishes(repo_root: str, baseline_branch: str, drift_branch: str
     return baseline, drift
 
 
-def _create_rolling_pr(
-    repo_api: str,
-    headers: dict[str, str],
-    source_ref: str,
-    target_ref: str,
-    title: str,
-    description: str,
-    merge_strategy: str,
-) -> dict[str, Any]:
-    return _request_json(
-        f"{repo_api}/pullrequests?api-version=7.1",
-        headers=headers,
-        method="POST",
-        body={
-            "sourceRefName": source_ref,
-            "targetRefName": target_ref,
-            "title": title,
-            "description": description,
-            "isDraft": _env_bool("ROLLING_PR_DELAY_REVIEWER_NOTIFICATIONS", False),
-            "completionOptions": {"mergeStrategy": merge_strategy},
-        },
-    )
-
-
 def _update_existing_pr(
-    pr: dict[str, Any],
-    repo_api: str,
-    headers: dict[str, str],
-    title: str,
-    description: str,
-    merge_strategy: str,
-    workload: str,
+    pr: dict[str, Any], ado: _Ado, title: str, description: str, merge_strategy: str, workload: str
 ) -> None:
     pr_id = pr.get("pullRequestId")
     current_description = str(pr.get("description") or "")
@@ -361,16 +356,7 @@ def _update_existing_pr(
     )
     web_url = _pr_web_url(pr)
     if needs_patch:
-        _request_json(
-            f"{repo_api}/pullrequests/{pr_id}?api-version=7.1",
-            headers=headers,
-            method="PATCH",
-            body={
-                "title": title,
-                "description": current_description if current_description.strip() else description,
-                "completionOptions": {"mergeStrategy": merge_strategy},
-            },
-        )
+        ado.update_pr(pr_id, title, current_description if current_description.strip() else description, merge_strategy)
         log.info(f"Updated rolling {workload} PR #{pr_id}: {web_url}")
     else:
         log.info(f"Rolling {workload} PR #{pr_id} already up to date: {web_url}")
@@ -380,11 +366,7 @@ def _update_existing_pr(
 def _remediate_rejected_pr(
     rejected_pr: dict[str, Any],
     remediation: _Remediation,
-    *,
-    repo_api: str,
-    collection_uri: str,
-    project: str,
-    headers: dict[str, str],
+    ado: _Ado,
     workload: str,
     drift_tree: str,
 ) -> None:
@@ -403,12 +385,12 @@ def _remediate_rejected_pr(
         )
         return
     marker = f"Automation marker: AUTO-REMEDIATE-TREE:{drift_tree}"
-    if _threads_with_marker(repo_api, headers, pr_id, marker):
+    if ado.threads_with_marker(pr_id, marker):
         log.info("Suppressed PR recreation: latest drift matches a previously rejected PR and remediation was already queued.")
         return
 
-    queued = common.queue_restore_pipeline(collection_uri, project, headers, remediation.request)
-    build_url = common.build_web_url(queued, collection_uri, project)
+    queued = ado.queue_restore(remediation.request)
+    build_url = common.build_web_url(queued, ado.collection_uri, ado.project)
     comment = (
         "Auto-remediation queued because the latest drift matches a rejected PR.\n\n"
         f"Workload: {workload}\n"
@@ -419,7 +401,7 @@ def _remediate_rejected_pr(
         f"{marker}"
     )
     try:
-        common.post_pr_thread(repo_api, headers, pr_id, comment)
+        ado.post_thread(pr_id, comment)
     except Exception as exc:
         log.warning(f"Remediation queued, but failed to post PR thread on #{pr_id}: {exc}")
     log.info(
@@ -441,14 +423,16 @@ def main() -> int:
     if not token:
         raise SystemExit("SYSTEM_ACCESSTOKEN is empty. Enable OAuth token access for this pipeline.")
 
-    collection_uri = os.environ["SYSTEM_COLLECTIONURI"].rstrip("/")
-    project = os.environ["SYSTEM_TEAMPROJECT"]
-    repo_api = f"{collection_uri}/{project}/_apis/git/repositories/{os.environ['BUILD_REPOSITORY_ID']}"
-    headers = {
-        "Authorization": f"Bearer {token}",
-        "Content-Type": "application/json",
-        "Accept": "application/json",
-    }
+    ado = _Ado(
+        collection_uri=os.environ["SYSTEM_COLLECTIONURI"].rstrip("/"),
+        project=os.environ["SYSTEM_TEAMPROJECT"],
+        repo_id=os.environ["BUILD_REPOSITORY_ID"],
+        headers={
+            "Authorization": f"Bearer {token}",
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+        },
+    )
 
     pr_merge_strategy = common.normalize_merge_strategy(_env_text("ROLLING_PR_MERGE_STRATEGY", "rebase"))
     drift_branch = common.normalize_branch(args.drift_branch)
@@ -471,11 +455,9 @@ def main() -> int:
     )
     log.info(f"Rolling PR completion merge strategy: {pr_merge_strategy}")
 
-    active_prs = _query_prs(repo_api, headers, source_ref, target_ref, "active")
+    active_prs = ado.query_prs(source_ref, target_ref, "active")
     if active_prs:
-        _update_existing_pr(
-            active_prs[0], repo_api, headers, args.pr_title, description, pr_merge_strategy, args.workload
-        )
+        _update_existing_pr(active_prs[0], ado, args.pr_title, description, pr_merge_strategy, args.workload)
         return 0
 
     baseline_commitish, drift_commitish = _resolve_commitishes(args.repo_root, baseline_branch, drift_branch)
@@ -488,10 +470,9 @@ def main() -> int:
         return 0
 
     drift_tree = _tree_id_for_commitish(args.repo_root, drift_commitish)
-    abandoned_prs = _query_prs(repo_api, headers, source_ref, target_ref, "abandoned")
+    abandoned_prs = ado.query_prs(source_ref, target_ref, "abandoned")
     matching_abandoned, match_reason = _find_matching_abandoned_pr(
-        repo_api=repo_api,
-        headers=headers,
+        ado=ado,
         abandoned_prs=abandoned_prs,
         drift_tree=drift_tree,
         repo_root=args.repo_root,
@@ -501,16 +482,7 @@ def main() -> int:
     if matching_abandoned:
         if match_reason == "config-fingerprint":
             log.info("Matched abandoned PR using configuration fingerprint (ignoring docs/reports churn).")
-        _remediate_rejected_pr(
-            matching_abandoned,
-            remediation,
-            repo_api=repo_api,
-            collection_uri=collection_uri,
-            project=project,
-            headers=headers,
-            workload=args.workload,
-            drift_tree=drift_tree,
-        )
+        _remediate_rejected_pr(matching_abandoned, remediation, ado, args.workload, drift_tree)
         _report_pr(None, "", suppressed=True)
         return 0
 
@@ -519,15 +491,7 @@ def main() -> int:
             f"No abandoned PR snapshot match for current drift tree (checked {len(abandoned_prs)} abandoned PR(s)); "
             "creating/updating rolling PR."
         )
-    created = _create_rolling_pr(
-        repo_api,
-        headers,
-        source_ref,
-        target_ref,
-        args.pr_title,
-        description,
-        pr_merge_strategy,
-    )
+    created = ado.create_pr(source_ref, target_ref, args.pr_title, description, pr_merge_strategy)
     web_url = _pr_web_url(created)
     log.info(f"Created rolling {args.workload} PR #{created.get('pullRequestId')}: {web_url}")
     _report_pr(created.get("pullRequestId"), web_url)

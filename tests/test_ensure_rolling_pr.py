@@ -41,6 +41,34 @@ class EnsureRollingPrTests(unittest.TestCase):
     def setUpClass(cls) -> None:
         cls.module = load_module()
 
+    def _ado(self):
+        return self.module._Ado("https://dev.azure.com/org", "proj", "repo", {"Authorization": "Bearer t"})
+
+    def test_ado_gateway_builds_the_expected_requests(self) -> None:
+        ado = self._ado()
+        self.assertEqual(ado.repo_api, "https://dev.azure.com/org/proj/_apis/git/repositories/repo")
+        seen = []
+
+        def fake(url, headers, method="GET", body=None):
+            seen.append((method, url, body))
+            if "threads" in url:
+                return {"value": [{"comments": [{"content": "x"}, {"content": "has MARK inside"}]}]}
+            return {"value": [{"pullRequestId": 1}], "treeId": " tree "}
+
+        with patch.object(self.module, "_request_json", side_effect=fake):
+            self.assertEqual(ado.query_prs("refs/heads/drift/entra", "refs/heads/main", "abandoned"), [{"pullRequestId": 1}])
+            self.assertEqual(ado.commit_tree_id("abc"), "tree")
+            self.assertTrue(ado.threads_with_marker(5, "MARK"))
+            self.assertFalse(ado.threads_with_marker(5, "OTHER"))
+            ado.update_pr(5, "T", "D", "squash")
+            ado.create_pr("refs/heads/d", "refs/heads/main", "T", "D", "rebase")
+        query_url = seen[0][1]
+        self.assertIn("searchCriteria.status=abandoned", query_url)
+        self.assertIn("searchCriteria.sourceRefName=refs/heads/drift/entra", query_url)  # slashes stay readable
+        self.assertEqual(seen[1][1].split("?")[0].rsplit("/", 2)[-2:], ["commits", "abc"])
+        self.assertEqual((seen[4][0], seen[4][2]["completionOptions"]), ("PATCH", {"mergeStrategy": "squash"}))
+        self.assertEqual((seen[5][0], seen[5][2]["sourceRefName"], seen[5][2]["isDraft"]), ("POST", "refs/heads/d", False))
+
     def test_workload_scope_contains_only_workload_configuration_files(self) -> None:
         scope = self.module._WorkloadScope("entra", "tenant-state", "reports")
         self.assertTrue(scope.contains("tenant-state/entra/Conditional Access/policy.json"))
@@ -59,13 +87,14 @@ class EnsureRollingPrTests(unittest.TestCase):
             {"gitObjectType": "tree", "relativePath": "tenant-state/entra/CA", "objectId": "t1"},
             {"gitObjectType": "blob", "relativePath": "tenant-state/entra/CA/q.json", "objectId": ""},  # no blob id
         ]
+        ado = self._ado()
         with patch.object(self.module, "_request_json", return_value={"treeEntries": entries}):
-            with_docs = self.module._config_fingerprint_from_tree_api("https://r", {}, "tree1", scope)
+            with_docs = ado.config_fingerprint("tree1", scope)
         with patch.object(self.module, "_request_json", return_value={"treeEntries": entries[:1]}):
-            only_config = self.module._config_fingerprint_from_tree_api("https://r", {}, "tree1", scope)
+            only_config = ado.config_fingerprint("tree1", scope)
         self.assertTrue(with_docs)
         self.assertEqual(with_docs, only_config)
-        self.assertEqual(self.module._config_fingerprint_from_tree_api("https://r", {}, "", scope), "")
+        self.assertEqual(ado.config_fingerprint("", scope), "")
 
     def test_find_matching_abandoned_pr_by_tree_then_by_config_fingerprint(self) -> None:
         scope = self.module._WorkloadScope("entra", "tenant-state", "reports")
@@ -74,19 +103,20 @@ class EnsureRollingPrTests(unittest.TestCase):
         no_commit = {"pullRequestId": 1, "creationDate": "2026-01"}
         trees = {"c3": "treeX", "c2": "treeY"}
 
+        ado = self._ado()
         with patch.object(self.module, "_config_fingerprint_from_local_tree", return_value="fp"), \
-                patch.object(self.module, "_commit_tree_id", side_effect=lambda api, h, c: trees[c]):
+                patch.object(self.module._Ado, "commit_tree_id", side_effect=lambda c: trees[c]):
             # exact tree match wins and prefers the most recently created PR
-            pr, reason = self.module._find_matching_abandoned_pr("r", {}, [older, newest, no_commit], "treeY", "/repo", scope, "HEAD")
+            pr, reason = self.module._find_matching_abandoned_pr(ado, [older, newest, no_commit], "treeY", "/repo", scope, "HEAD")
             self.assertEqual((pr["pullRequestId"], reason), (2, "exact-tree"))
 
-            with patch.object(self.module, "_config_fingerprint_from_tree_api", side_effect=lambda *a: "fp" if a[2] == "treeY" else "other") as api:
-                pr, reason = self.module._find_matching_abandoned_pr("r", {}, [older, newest], "no-match", "/repo", scope, "HEAD")
+            with patch.object(self.module._Ado, "config_fingerprint", side_effect=lambda tree, _scope: "fp" if tree == "treeY" else "other") as api:
+                pr, reason = self.module._find_matching_abandoned_pr(ado, [older, newest], "no-match", "/repo", scope, "HEAD")
                 self.assertEqual((pr["pullRequestId"], reason), (2, "config-fingerprint"))
                 self.assertEqual(api.call_count, 2)  # newest checked first, then the older match
 
-            with patch.object(self.module, "_config_fingerprint_from_tree_api", side_effect=RuntimeError("api down")):
-                self.assertEqual(self.module._find_matching_abandoned_pr("r", {}, [newest], "no-match", "/repo", scope, "HEAD"), (None, ""))
+            with patch.object(self.module._Ado, "config_fingerprint", side_effect=RuntimeError("api down")):
+                self.assertEqual(self.module._find_matching_abandoned_pr(ado, [newest], "no-match", "/repo", scope, "HEAD"), (None, ""))
 
     def test_config_fingerprint_ignores_docs_and_reports(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -242,7 +272,7 @@ class EnsureRollingPrTests(unittest.TestCase):
                     "Intune drift review (rolling)",
                 ],
             ):
-                with patch.object(self.module, "_query_prs", return_value=[]):
+                with patch.object(self.module._Ado, "query_prs", return_value=[]):
                     with patch.object(self.module, "_run_git"):
                         with patch.object(self.module, "_ref_has_commit", return_value=True):
                             with patch.object(self.module, "_workload_config_diff_exists", return_value=False):
@@ -288,7 +318,7 @@ class EnsureRollingPrTests(unittest.TestCase):
                     "Intune drift review (rolling)",
                 ],
             ):
-                with patch.object(self.module, "_query_prs", side_effect=[[], []]):
+                with patch.object(self.module._Ado, "query_prs", side_effect=[[], []]):
                     with patch.object(self.module, "_run_git"):
                         with patch.object(self.module, "_ref_has_commit", return_value=True):
                             with patch.object(self.module, "_workload_config_diff_exists", return_value=True):
@@ -328,8 +358,8 @@ class EnsureRollingPrTests(unittest.TestCase):
                 ],
             ):
                 with patch.object(
-                    self.module,
-                    "_query_prs",
+                    self.module._Ado,
+                    "query_prs",
                     return_value=[
                         {
                             "pullRequestId": 123,
