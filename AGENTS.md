@@ -70,6 +70,7 @@ Workflow at a high level:
 - `ensure_rolling_pr.py`: creates or updates one rolling drift PR per workload.
 - `report_utils.py`: helpers shared by the report generators.
 - `update_pr_review_summary.py`: refreshes PR descriptions with change counts, risk assessment, and optional AI narrative.
+  Split into the entry script (orchestration) and sibling modules: `pr_base` (env/HTTP), `pr_changes` (change model, risk, deterministic summary), `pr_semantic` (policy JSON diff), `pr_change_source` (admin vs platform drift), `pr_ai` (Azure OpenAI client, narratives), `pr_description` (description blocks and size fallback), `pr_threads` (review threads).
 - `apply_reviewer_rejections.py`: processes `/reject` and `/accept` reviewer thread commands.
 - `queue_post_merge_restore.py`: queues restore pipeline after merged PRs that contained `/reject` decisions.
 - `probe_tenant_changes.py`: polls Intune/Entra audit logs via Graph, implements debouncer (idle → armed → cooldown), and decides whether to trigger a backup.

@@ -5,6 +5,7 @@ import importlib.util
 import json
 import os
 import sys
+import time
 import unittest
 from pathlib import Path
 from urllib.error import HTTPError
@@ -12,6 +13,15 @@ from unittest.mock import patch
 
 
 MODULE_PATH = Path(__file__).resolve().parents[1] / "scripts" / "update_pr_review_summary.py"
+sys.path.insert(0, str(MODULE_PATH.parent))  # the script imports its pr_* sibling modules
+
+PR_MODULES = ("pr_base", "pr_changes", "pr_semantic", "pr_change_source", "pr_ai", "pr_description", "pr_threads")
+
+
+def _bind_pr_modules(cls) -> None:
+    """Expose the pr_* modules as cls.pr_ai etc. so tests patch the module that owns each name."""
+    for name in PR_MODULES:
+        setattr(cls, name, sys.modules[name])
 
 
 def load_module():
@@ -37,11 +47,12 @@ class UpdatePrReviewSummaryTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
         cls.module = load_module()
+        _bind_pr_modules(cls)
 
     def test_semantic_change_ignores_resolution_status_noise(self) -> None:
         old_excerpt = '{"displayName":"App","resolutionStatus":{"owners":{"error":"Temporary failure resolving"}}}'
         new_excerpt = '{"displayName":"App","resolutionStatus":{"owners":{"error":""}}}'
-        semantic = self.module._extract_semantic_change(old_excerpt, new_excerpt)
+        semantic = self.pr_semantic._extract_semantic_change(old_excerpt, new_excerpt)
         self.assertEqual(semantic, "No semantic key changes detected")
 
     def test_existing_change_fingerprint_parses_auto_block(self) -> None:
@@ -52,12 +63,12 @@ class UpdatePrReviewSummaryTests(unittest.TestCase):
             "- **Change Fingerprint:** `A1B2c3D4e5F6`\n"
             "<!-- AUTO-REVIEW-SUMMARY:END -->\n"
         )
-        fingerprint = self.module._existing_change_fingerprint(description)
+        fingerprint = self.pr_description._existing_change_fingerprint(description)
         self.assertEqual(fingerprint, "a1b2c3d4e5f6")
 
     def test_existing_change_fingerprint_returns_empty_when_missing(self) -> None:
         description = "## Automated Review Summary\n- **Change Fingerprint:** `abcdef012345`"
-        fingerprint = self.module._existing_change_fingerprint(description)
+        fingerprint = self.pr_description._existing_change_fingerprint(description)
         self.assertEqual(fingerprint, "")
 
     def test_existing_summary_version_parses_auto_block(self) -> None:
@@ -69,7 +80,7 @@ class UpdatePrReviewSummaryTests(unittest.TestCase):
             "- **Change Fingerprint:** `A1B2c3D4e5F6`\n"
             "<!-- AUTO-REVIEW-SUMMARY:END -->\n"
         )
-        version = self.module._existing_summary_version(description)
+        version = self.pr_description._existing_summary_version(description)
         self.assertEqual(version, "2026-03-19b")
 
     def test_existing_summary_version_returns_empty_when_missing(self) -> None:
@@ -78,7 +89,7 @@ class UpdatePrReviewSummaryTests(unittest.TestCase):
             "## Automated Review Summary (intune)\n"
             "<!-- AUTO-REVIEW-SUMMARY:END -->\n"
         )
-        self.assertEqual(self.module._existing_summary_version(description), "")
+        self.assertEqual(self.pr_description._existing_summary_version(description), "")
 
     def test_auto_block_body_extracts_marked_content(self) -> None:
         description = (
@@ -87,12 +98,12 @@ class UpdatePrReviewSummaryTests(unittest.TestCase):
             "Line A\nLine B\n"
             "<!-- AUTO-REVIEW-SUMMARY:END -->\n"
         )
-        body = self.module._auto_block_body(description)
+        body = self.pr_description._auto_block_body(description)
         self.assertIn("Line A", body)
         self.assertIn("Line B", body)
 
     def test_auto_block_body_empty_when_markers_missing(self) -> None:
-        self.assertEqual(self.module._auto_block_body("no markers"), "")
+        self.assertEqual(self.pr_description._auto_block_body("no markers"), "")
 
     def test_upsert_auto_block_places_summary_before_reviewer_actions(self) -> None:
         description = (
@@ -108,7 +119,7 @@ class UpdatePrReviewSummaryTests(unittest.TestCase):
             "## Automated Review Summary (intune)\n"
             "<!-- AUTO-REVIEW-SUMMARY:END -->"
         )
-        updated = self.module._upsert_auto_block(description, block)
+        updated = self.pr_description._upsert_auto_block(description, block)
         summary_pos = updated.find("## Automated Review Summary")
         actions_pos = updated.find("## Reviewer Quick Actions")
         self.assertGreaterEqual(summary_pos, 0)
@@ -132,7 +143,7 @@ class UpdatePrReviewSummaryTests(unittest.TestCase):
             "## Automated Review Summary (intune)\n"
             "<!-- AUTO-REVIEW-SUMMARY:END -->"
         )
-        updated = self.module._upsert_auto_block(description, block)
+        updated = self.pr_description._upsert_auto_block(description, block)
         summary_pos = updated.find("## Automated Review Summary")
         actions_pos = updated.find("## Reviewer Quick Actions")
         self.assertLess(summary_pos, actions_pos)
@@ -178,54 +189,54 @@ class UpdatePrReviewSummaryTests(unittest.TestCase):
 
     def test_auto_block_contains_ai_fallback_true_for_fallback_marker(self) -> None:
         body = "...\n_AI fallback used: Azure OpenAI unavailable (timeout)_\n..."
-        self.assertTrue(self.module._auto_block_contains_ai_fallback(body))
+        self.assertTrue(self.pr_description._auto_block_contains_ai_fallback(body))
 
     def test_auto_block_contains_ai_fallback_true_for_unavailable_marker(self) -> None:
         body = "...\n_AI summary unavailable: Azure OpenAI is not configured_\n..."
-        self.assertTrue(self.module._auto_block_contains_ai_fallback(body))
+        self.assertTrue(self.pr_description._auto_block_contains_ai_fallback(body))
 
     def test_auto_block_contains_ai_fallback_false_for_normal_ai_text(self) -> None:
         body = "### AI Reviewer Narrative\nEverything looks consistent."
-        self.assertFalse(self.module._auto_block_contains_ai_fallback(body))
+        self.assertFalse(self.pr_description._auto_block_contains_ai_fallback(body))
 
     def test_preferred_aoai_token_param_uses_max_completion_tokens_for_gpt5(self) -> None:
         with patch.dict(os.environ, {}, clear=False):
-            token_param = self.module._preferred_aoai_token_param("gpt-5.3-chat")
+            token_param = self.pr_ai._preferred_aoai_token_param("gpt-5.3-chat")
         self.assertEqual(token_param, "max_completion_tokens")
 
     def test_preferred_aoai_token_param_uses_max_tokens_for_non_gpt5(self) -> None:
         with patch.dict(os.environ, {}, clear=False):
-            token_param = self.module._preferred_aoai_token_param("gpt-4.1")
+            token_param = self.pr_ai._preferred_aoai_token_param("gpt-4.1")
         self.assertEqual(token_param, "max_tokens")
 
     def test_preferred_aoai_token_param_honors_override(self) -> None:
         with patch.dict(os.environ, {"AZURE_OPENAI_TOKEN_PARAM": "max_tokens"}, clear=False):
-            token_param = self.module._preferred_aoai_token_param("gpt-5.3-chat")
+            token_param = self.pr_ai._preferred_aoai_token_param("gpt-5.3-chat")
         self.assertEqual(token_param, "max_tokens")
 
     def test_preferred_aoai_temperature_omits_for_gpt5(self) -> None:
         with patch.dict(os.environ, {}, clear=False):
-            temperature = self.module._preferred_aoai_temperature("gpt-5.3-chat")
+            temperature = self.pr_ai._preferred_aoai_temperature("gpt-5.3-chat")
         self.assertEqual(temperature, None)
 
     def test_preferred_aoai_temperature_defaults_to_zero_for_non_gpt5(self) -> None:
         with patch.dict(os.environ, {}, clear=False):
-            temperature = self.module._preferred_aoai_temperature("gpt-4.1")
+            temperature = self.pr_ai._preferred_aoai_temperature("gpt-4.1")
         self.assertEqual(temperature, 0.0)
 
     def test_preferred_aoai_temperature_honors_override(self) -> None:
         with patch.dict(os.environ, {"AZURE_OPENAI_TEMPERATURE": "0.7"}, clear=False):
-            temperature = self.module._preferred_aoai_temperature("gpt-5.3-chat")
+            temperature = self.pr_ai._preferred_aoai_temperature("gpt-5.3-chat")
         self.assertEqual(temperature, 0.7)
 
     def test_reviewer_instruction_requests_infrastructure_vs_admin_distinction(self) -> None:
-        instruction = self.module._reviewer_instruction()
+        instruction = self.pr_ai._reviewer_instruction()
         self.assertIn("platform-managed or vendor-driven infrastructure drift", instruction)
         self.assertIn("tenant-admin changes", instruction)
         self.assertIn("mixed or insufficient", instruction)
 
     def test_minimal_reviewer_instruction_requests_change_source_classification(self) -> None:
-        instruction = self.module._minimal_reviewer_instruction()
+        instruction = self.pr_ai._minimal_reviewer_instruction()
         self.assertIn("infrastructure/platform-driven", instruction)
         self.assertIn("admin-driven", instruction)
         self.assertIn("mixed/uncertain", instruction)
@@ -243,7 +254,7 @@ class UpdatePrReviewSummaryTests(unittest.TestCase):
             + "\nRollback considerations\n"
             + ("Rollback text. " * 20)
         )
-        compact = self.module._compact_ai_narrative_markdown(text, 420)
+        compact = self.pr_ai._compact_ai_narrative_markdown(text, 420)
         self.assertLessEqual(len(compact), 420)
         self.assertIn("#### Plain-Language Summary", compact)
         self.assertIn("#### Operational Impact", compact)
@@ -252,7 +263,7 @@ class UpdatePrReviewSummaryTests(unittest.TestCase):
         self.assertIn("#### Rollback Considerations", compact)
 
     def test_extract_ai_text_from_payload_rejects_truncated_response(self) -> None:
-        text, error = self.module._extract_ai_text_from_payload(
+        text, error = self.pr_ai._extract_ai_text_from_payload(
             {
                 "choices": [
                     {
@@ -267,7 +278,7 @@ class UpdatePrReviewSummaryTests(unittest.TestCase):
         self.assertIn("partial content suppressed", error)
 
     def test_classify_change_source_marks_enterprise_app_add_as_infrastructure(self) -> None:
-        change = self.module.ChangeItem(
+        change = self.pr_changes.ChangeItem(
             operation="Added",
             path="tenant-state/entra/Enterprise Applications/Microsoft Foo__id.json",
             risk_score=3,
@@ -276,11 +287,11 @@ class UpdatePrReviewSummaryTests(unittest.TestCase):
             policy_type="identity_security",
             severity="HIGH",
         )
-        source = self.module._classify_change_source(change, "New configuration object added")
+        source = self.pr_change_source._classify_change_source(change, "New configuration object added")
         self.assertEqual(source["label"], "likely_infrastructure_driven")
 
     def test_classify_change_source_marks_assignment_change_as_admin(self) -> None:
-        change = self.module.ChangeItem(
+        change = self.pr_changes.ChangeItem(
             operation="Modified",
             path="tenant-state/entra/Conditional Access/CA Policy__id.json",
             risk_score=3,
@@ -289,7 +300,7 @@ class UpdatePrReviewSummaryTests(unittest.TestCase):
             policy_type="conditional_access",
             severity="HIGH",
         )
-        source = self.module._classify_change_source(
+        source = self.pr_change_source._classify_change_source(
             change,
             "assignment scope: likely broader (fewer exclusion targets)",
         )
@@ -307,7 +318,7 @@ class UpdatePrReviewSummaryTests(unittest.TestCase):
                 "signInAudience": "AzureADMultipleOrgs",
             }
         )
-        semantic = self.module._extract_semantic_change(
+        semantic = self.pr_semantic._extract_semantic_change(
             "", new_excerpt, "tenant-state/entra/App Registrations/Headless.json"
         )
         self.assertIn("New configuration object added", semantic)
@@ -318,13 +329,13 @@ class UpdatePrReviewSummaryTests(unittest.TestCase):
 
     def test_extract_semantic_change_new_app_without_security_fields_is_generic(self) -> None:
         new_excerpt = json.dumps({"displayName": "Headless"})
-        semantic = self.module._extract_semantic_change(
+        semantic = self.pr_semantic._extract_semantic_change(
             "", new_excerpt, "tenant-state/entra/App Registrations/Headless.json"
         )
         self.assertEqual(semantic, "New configuration object added")
 
     def test_classify_change_source_app_reg_permission_changes_are_admin_driven(self) -> None:
-        change = self.module.ChangeItem(
+        change = self.pr_changes.ChangeItem(
             operation="Modified",
             path="tenant-state/entra/App Registrations/App.json",
             risk_score=3,
@@ -333,11 +344,11 @@ class UpdatePrReviewSummaryTests(unittest.TestCase):
             policy_type="identity_security",
             severity="HIGH",
         )
-        source = self.module._classify_change_source(change, "requiredResourceAccess present")
+        source = self.pr_change_source._classify_change_source(change, "requiredResourceAccess present")
         self.assertEqual(source["label"], "likely_admin_driven")
 
     def test_classify_change_source_enterprise_app_permission_changes_are_admin_driven(self) -> None:
-        change = self.module.ChangeItem(
+        change = self.pr_changes.ChangeItem(
             operation="Modified",
             path="tenant-state/entra/Enterprise Applications/App.json",
             risk_score=3,
@@ -346,17 +357,17 @@ class UpdatePrReviewSummaryTests(unittest.TestCase):
             policy_type="identity_security",
             severity="HIGH",
         )
-        source = self.module._classify_change_source(change, "oauth2PermissionScopes changed")
+        source = self.pr_change_source._classify_change_source(change, "oauth2PermissionScopes changed")
         self.assertEqual(source["label"], "likely_admin_driven")
 
     def test_reviewer_instruction_warns_against_downgrading_app_identity_risk(self) -> None:
-        instruction = self.module._reviewer_instruction()
+        instruction = self.pr_ai._reviewer_instruction()
         self.assertIn("App Registrations and Enterprise Applications", instruction)
         self.assertIn("do not downgrade risk to LOW", instruction)
         self.assertIn("passwordCredentials", instruction)
 
     def test_build_change_source_assessment_marks_split_signals_as_mixed(self) -> None:
-        assessment = self.module._build_change_source_assessment(
+        assessment = self.pr_change_source._build_change_source_assessment(
             [
                 {
                     "change_source": "likely_admin_driven",
@@ -386,7 +397,7 @@ class UpdatePrReviewSummaryTests(unittest.TestCase):
             def read(self) -> bytes:
                 return json.dumps(self._payload).encode("utf-8")
 
-        change = self.module.ChangeItem(
+        change = self.pr_changes.ChangeItem(
             operation="Modified",
             path="tenant-state/intune/Device Configurations/P1__id.json",
             risk_score=2,
@@ -423,7 +434,7 @@ class UpdatePrReviewSummaryTests(unittest.TestCase):
 
         with patch.dict(os.environ, env, clear=False), patch.object(
             self.module, "_load_policy_excerpt", return_value="{}"
-        ), patch.object(self.module, "urlopen", side_effect=_fake_urlopen):
+        ), patch.object(self.pr_ai, "urlopen", side_effect=_fake_urlopen):
             content, error = self.module._call_azure_openai(
                 changes=[change],
                 deterministic_summary="deterministic",
@@ -457,7 +468,7 @@ class UpdatePrReviewSummaryTests(unittest.TestCase):
             def read(self) -> bytes:
                 return json.dumps(self._payload).encode("utf-8")
 
-        change = self.module.ChangeItem(
+        change = self.pr_changes.ChangeItem(
             operation="Modified",
             path="tenant-state/intune/Device Configurations/P1__id.json",
             risk_score=3,
@@ -505,7 +516,7 @@ class UpdatePrReviewSummaryTests(unittest.TestCase):
 
         with patch.dict(os.environ, env, clear=False), patch.object(
             self.module, "_load_policy_excerpt", return_value="{}"
-        ), patch.object(self.module, "urlopen", side_effect=_fake_urlopen):
+        ), patch.object(self.pr_ai, "urlopen", side_effect=_fake_urlopen):
             content, error = self.module._call_azure_openai(
                 changes=[change],
                 deterministic_summary="deterministic",
@@ -524,7 +535,7 @@ class UpdatePrReviewSummaryTests(unittest.TestCase):
         self.assertTrue("sampled_changes" in second_payload or "changes" in second_payload)
 
     def test_build_full_ai_review_thread_content_includes_marker(self) -> None:
-        content = self.module._build_full_ai_review_thread_content(
+        content = self.pr_threads._build_full_ai_review_thread_content(
             "intune",
             "Plain-language summary\nEverything looks consistent.",
         )
@@ -532,7 +543,7 @@ class UpdatePrReviewSummaryTests(unittest.TestCase):
         self.assertIn("Automation marker: AUTO-AI-REVIEW:intune", content)
 
     def test_sync_full_ai_review_thread_skips_duplicate_comment(self) -> None:
-        existing_content = self.module._build_full_ai_review_thread_content(
+        existing_content = self.pr_threads._build_full_ai_review_thread_content(
             "intune",
             "Plain-language summary\nEverything looks consistent.",
         )
@@ -552,8 +563,8 @@ class UpdatePrReviewSummaryTests(unittest.TestCase):
                 }
             raise AssertionError(f"Unexpected request: {method} {url}")
 
-        with patch.object(self.module, "_request_json", side_effect=request_json):
-            updated = self.module._sync_full_ai_review_thread(
+        with patch.object(self.pr_threads, "_request_json", side_effect=request_json):
+            updated = self.pr_threads._sync_full_ai_review_thread(
                 repo_api="https://dev.azure.com/org/project/_apis/git/repositories/repo",
                 pr_id=77,
                 token="token",
@@ -575,8 +586,8 @@ class UpdatePrReviewSummaryTests(unittest.TestCase):
                 return {"id": 10}
             raise AssertionError(f"Unexpected request: {method} {url}")
 
-        with patch.object(self.module, "_request_json", side_effect=request_json):
-            updated = self.module._sync_full_ai_review_thread(
+        with patch.object(self.pr_threads, "_request_json", side_effect=request_json):
+            updated = self.pr_threads._sync_full_ai_review_thread(
                 repo_api="https://dev.azure.com/org/project/_apis/git/repositories/repo",
                 pr_id=77,
                 token="token",
@@ -605,9 +616,9 @@ class UpdatePrReviewSummaryTests(unittest.TestCase):
                 }
             ]
         }
-        entries = self.module._assignment_entries(payload)
+        entries = self.pr_semantic._assignment_entries(payload)
         self.assertEqual(len(entries), 1)
-        signature = self.module._assignment_signature(entries[0])
+        signature = self.pr_semantic._assignment_signature(entries[0])
         self.assertIn("group=Intune_U_TK_Test (9d7195ed-f42e-4cbe-9659-2c3c9f55cdd9)", signature)
 
     def test_has_matching_detected_change_comment_true_when_change_and_risk_match(self) -> None:
@@ -619,7 +630,7 @@ class UpdatePrReviewSummaryTests(unittest.TestCase):
                 )
             }
         ]
-        matched = self.module._has_matching_detected_change_comment(
+        matched = self.pr_threads._has_matching_detected_change_comment(
             comments=comments,
             change_summary="Modified: assignment targets added: group=Intune_U_TK_Test",
             risk_summary="MEDIUM (device_configuration): Workload configuration area",
@@ -635,7 +646,7 @@ class UpdatePrReviewSummaryTests(unittest.TestCase):
                 )
             }
         ]
-        matched = self.module._has_matching_detected_change_comment(
+        matched = self.pr_threads._has_matching_detected_change_comment(
             comments=comments,
             change_summary="Modified: assignment targets added: group=Intune_U_TK_Test (9d7195ed-f42e)\n",
             risk_summary="MEDIUM (device_configuration): Workload configuration area",
@@ -661,7 +672,7 @@ class UpdatePrReviewSummaryTests(unittest.TestCase):
           "resolutionStatus": {"requiredResourceAccess": {"unresolvedPermissionCount": 6}}
         }
         """
-        self.assertTrue(self.module._is_entra_enrichment_only_json_change(old_excerpt, new_excerpt))
+        self.assertTrue(self.pr_semantic._is_entra_enrichment_only_json_change(old_excerpt, new_excerpt))
 
     def test_entra_enrichment_only_json_change_false_when_config_changes(self) -> None:
         old_excerpt = """
@@ -676,10 +687,10 @@ class UpdatePrReviewSummaryTests(unittest.TestCase):
           "requiredResourceAccess": [{"resourceAppId": "11111111-0000-0000-c000-000000000000"}]
         }
         """
-        self.assertFalse(self.module._is_entra_enrichment_only_json_change(old_excerpt, new_excerpt))
+        self.assertFalse(self.pr_semantic._is_entra_enrichment_only_json_change(old_excerpt, new_excerpt))
 
     def test_filter_operational_noise_changes_ignores_entra_enrichment_only_paths(self) -> None:
-        change = self.module.ChangeItem(
+        change = self.pr_changes.ChangeItem(
             operation="Modified",
             path="tenant-state/entra/App Registrations/Test App__id.json",
             risk_score=3,
@@ -715,7 +726,7 @@ class UpdatePrReviewSummaryTests(unittest.TestCase):
         self.assertEqual(filtered, [])
 
     def test_deterministic_summary_includes_operational_ignore_count(self) -> None:
-        change = self.module.ChangeItem(
+        change = self.pr_changes.ChangeItem(
             operation="Modified",
             path="tenant-state/intune/Device Configurations/P1__id.json",
             risk_score=3,
@@ -724,7 +735,7 @@ class UpdatePrReviewSummaryTests(unittest.TestCase):
             policy_type="device_configuration",
             severity="HIGH",
         )
-        summary = self.module._build_deterministic_summary(
+        summary = self.pr_changes._build_deterministic_summary(
             [change],
             drift_branch="drift/intune",
             baseline_branch="main",
@@ -769,7 +780,7 @@ class UpdatePrReviewSummaryTests(unittest.TestCase):
                 }
             ]
         }
-        changes = self.module._describe_assignment_changes(old_payload, new_payload)
+        changes = self.pr_semantic._describe_assignment_changes(old_payload, new_payload)
         self.assertIn("assignment scope: likely broader (fewer exclusion targets)", changes)
 
     def test_assignment_scope_when_exclusion_target_added_is_narrower(self) -> None:
@@ -808,7 +819,7 @@ class UpdatePrReviewSummaryTests(unittest.TestCase):
                 },
             ]
         }
-        changes = self.module._describe_assignment_changes(old_payload, new_payload)
+        changes = self.pr_semantic._describe_assignment_changes(old_payload, new_payload)
         self.assertIn("assignment scope: likely narrower (more exclusion targets)", changes)
 
     def test_call_azure_openai_retries_timeout_then_succeeds(self) -> None:
@@ -825,7 +836,7 @@ class UpdatePrReviewSummaryTests(unittest.TestCase):
             def read(self) -> bytes:
                 return json.dumps(self._payload).encode("utf-8")
 
-        change = self.module.ChangeItem(
+        change = self.pr_changes.ChangeItem(
             operation="Modified",
             path="tenant-state/intune/Device Configurations/P1__id.json",
             risk_score=2,
@@ -847,7 +858,7 @@ class UpdatePrReviewSummaryTests(unittest.TestCase):
         with patch.dict(os.environ, env, clear=False), patch.object(
             self.module, "_load_policy_excerpt", return_value="{}"
         ), patch.object(
-            self.module,
+            self.pr_ai,
             "urlopen",
             side_effect=[
                 TimeoutError("The read operation timed out"),
@@ -863,7 +874,7 @@ class UpdatePrReviewSummaryTests(unittest.TestCase):
                     }
                 ),
             ],
-        ), patch.object(self.module.time, "sleep", return_value=None):
+        ), patch("time.sleep", return_value=None):
             content, error = self.module._call_azure_openai(
                 changes=[change],
                 deterministic_summary="deterministic",
@@ -877,7 +888,7 @@ class UpdatePrReviewSummaryTests(unittest.TestCase):
         self.assertEqual(content, "AI summary ready")
 
     def test_call_azure_openai_falls_back_after_timeout_retries(self) -> None:
-        change = self.module.ChangeItem(
+        change = self.pr_changes.ChangeItem(
             operation="Modified",
             path="tenant-state/intune/Device Configurations/P1__id.json",
             risk_score=2,
@@ -899,7 +910,7 @@ class UpdatePrReviewSummaryTests(unittest.TestCase):
         with patch.dict(os.environ, env, clear=False), patch.object(
             self.module, "_load_policy_excerpt", return_value="{}"
         ), patch.object(
-            self.module,
+            self.pr_ai,
             "urlopen",
             side_effect=[
                 TimeoutError("The read operation timed out"),
@@ -911,7 +922,7 @@ class UpdatePrReviewSummaryTests(unittest.TestCase):
                 TimeoutError("The read operation timed out"),
                 TimeoutError("The read operation timed out"),
             ],
-        ), patch.object(self.module.time, "sleep", return_value=None):
+        ), patch("time.sleep", return_value=None):
             content, error = self.module._call_azure_openai(
                 changes=[change],
                 deterministic_summary="deterministic",
@@ -940,7 +951,7 @@ class UpdatePrReviewSummaryTests(unittest.TestCase):
             def read(self) -> bytes:
                 return json.dumps(self._payload).encode("utf-8")
 
-        change = self.module.ChangeItem(
+        change = self.pr_changes.ChangeItem(
             operation="Modified",
             path="tenant-state/intune/Device Configurations/P1__id.json",
             risk_score=2,
@@ -981,8 +992,8 @@ class UpdatePrReviewSummaryTests(unittest.TestCase):
         with patch.dict(os.environ, env, clear=False), patch.object(
             self.module, "_load_policy_excerpt", return_value="{}"
         ), patch.object(
-            self.module, "urlopen", side_effect=side_effects
-        ), patch.object(self.module.time, "sleep", return_value=None):
+            self.pr_ai, "urlopen", side_effect=side_effects
+        ), patch("time.sleep", return_value=None):
             content, error = self.module._call_azure_openai(
                 changes=[change],
                 deterministic_summary="deterministic",
@@ -1009,7 +1020,7 @@ class UpdatePrReviewSummaryTests(unittest.TestCase):
             def read(self) -> bytes:
                 return json.dumps(self._payload).encode("utf-8")
 
-        change = self.module.ChangeItem(
+        change = self.pr_changes.ChangeItem(
             operation="Modified",
             path="tenant-state/intune/Device Configurations/P1__id.json",
             risk_score=2,
@@ -1054,8 +1065,8 @@ class UpdatePrReviewSummaryTests(unittest.TestCase):
         with patch.dict(os.environ, env, clear=False), patch.object(
             self.module, "_load_policy_excerpt", return_value="{}"
         ), patch.object(
-            self.module, "urlopen", side_effect=_fake_urlopen
-        ), patch.object(self.module.time, "sleep", return_value=None):
+            self.pr_ai, "urlopen", side_effect=_fake_urlopen
+        ), patch("time.sleep", return_value=None):
             content, error = self.module._call_azure_openai(
                 changes=[change],
                 deterministic_summary="deterministic",
@@ -1085,7 +1096,7 @@ class UpdatePrReviewSummaryTests(unittest.TestCase):
         changes: list = []
         for idx in range(13):
             changes.append(
-                self.module.ChangeItem(
+                self.pr_changes.ChangeItem(
                     operation="Modified",
                     path=f"tenant-state/intune/Device Configurations/P{idx}__id.json",
                     risk_score=2,
@@ -1127,8 +1138,8 @@ class UpdatePrReviewSummaryTests(unittest.TestCase):
         with patch.dict(os.environ, env, clear=False), patch.object(
             self.module, "_load_policy_excerpt", return_value="{}"
         ), patch.object(
-            self.module, "urlopen", side_effect=side_effects
-        ), patch.object(self.module.time, "sleep", return_value=None):
+            self.pr_ai, "urlopen", side_effect=side_effects
+        ), patch("time.sleep", return_value=None):
             content, error = self.module._call_azure_openai(
                 changes=changes,
                 deterministic_summary="deterministic",
@@ -1148,6 +1159,7 @@ class PublishDescriptionTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
         cls.module = load_module()
+        _bind_pr_modules(cls)
 
     def _publish(self, patch_side_effect, deterministic="D" * 50, current=""):
         calls: list[str] = []
@@ -1159,8 +1171,8 @@ class PublishDescriptionTests(unittest.TestCase):
                 raise effect
             return {}
 
-        with patch.object(self.module, "_request_json", side_effect=fake_request):
-            update = self.module._publish_description(
+        with patch.object(self.pr_description, "_request_json", side_effect=fake_request):
+            update = self.pr_description._publish_description(
                 workload="intune",
                 deterministic=deterministic,
                 ai_summary=None,
@@ -1190,7 +1202,7 @@ class PublishDescriptionTests(unittest.TestCase):
         update, calls = self._publish([limit, limit, {}], deterministic="D" * 3000)
         self.assertTrue(update.summary_updated)
         self.assertEqual(len(calls), 3)
-        self.assertIn(self.module.COMPACT_AI_THREAD_NOTE, calls[2])
+        self.assertIn(self.pr_description.COMPACT_AI_THREAD_NOTE, calls[2])
 
     def test_non_limit_error_propagates(self) -> None:
         with self.assertRaises(RuntimeError):
@@ -1201,15 +1213,16 @@ class EnforceTicketThreadsTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
         cls.module = load_module()
+        _bind_pr_modules(cls)
 
     def _change(self, path: str):
-        return self.module.ChangeItem(
+        return self.pr_changes.ChangeItem(
             operation="Modified", path=path, risk_score=2, risk_label="MEDIUM",
             reason="r", policy_type="device_configuration", severity="MEDIUM",
         )
 
     def _thread(self, thread_id: int, path: str, status: int = 1, extra: tuple[str, ...] = ()):
-        marker = self.module._ticket_marker_for_path(path)
+        marker = self.pr_threads._ticket_marker_for_path(path)
         comments = [{"id": 1, "content": marker}] + [{"id": 2 + i, "content": c} for i, c in enumerate(extra)]
         return {"id": thread_id, "status": status, "comments": comments}
 
@@ -1222,14 +1235,11 @@ class EnforceTicketThreadsTests(unittest.TestCase):
             self._thread(11, stale_path),
         ]
         calls = {"created": [], "status": [], "comments": []}
-        with patch.object(self.module, "_request_json", return_value={"value": threads}), patch.object(
-            self.module, "_create_ticket_thread", side_effect=lambda **kw: calls["created"].append(kw["path"])
-        ), patch.object(
-            self.module, "_set_thread_status", side_effect=lambda *a: calls["status"].append((a[2], a[4]))
-        ), patch.object(
-            self.module, "_add_thread_comment", side_effect=lambda **kw: calls["comments"].append(kw["thread_id"])
+        with patch.object(self.pr_threads, "_request_json", return_value={"value": threads}), patch.object(self.pr_threads, "_create_ticket_thread", side_effect=lambda **kw: calls["created"].append(kw["path"])
+        ), patch.object(self.pr_threads, "_set_thread_status", side_effect=lambda *a: calls["status"].append((a[2], a[4]))
+        ), patch.object(self.pr_threads, "_add_thread_comment", side_effect=lambda **kw: calls["comments"].append(kw["thread_id"])
         ):
-            created, closed = self.module._enforce_change_ticket_threads(
+            created, closed = self.pr_threads._enforce_change_ticket_threads(
                 "https://x/repo", 5, "tok",
                 [self._change(new_path), self._change(again_path), self._change("tenant-state/reports/a.md")],
                 r"[A-Z]+-\d+",
