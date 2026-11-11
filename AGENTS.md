@@ -109,14 +109,20 @@ python3 -m unittest discover -s tests -v
 
 ### Test Coverage Areas
 
-- `test_ensure_rolling_pr.py`: rolling PR creation, draft publishing, merge strategy logic.
-- `test_export_entra_baseline.py`: Entra export parsing, concurrent export behavior, error handling.
-- `test_filter_entra_enrichment_noise.py`: enrichment-only churn detection and reversion.
-- `test_filter_intune_partial_settings_noise.py`: partial Settings Catalog export filtering.
-- `test_queue_post_merge_restore.py`: post-merge restore queueing logic.
-- `test_update_pr_review_summary.py`: semantic diffing, AI thread management, PR description upserts.
-- `test_validate_backup_outputs.py`: validation rules for Intune and Entra outputs.
-- `test_astral_mcp_tools.py`: MCP client behavior for local and remote data sources.
+- `test_common.py`: shared helpers, the `common.log` contract, `request_json` retry and error paths.
+- `test_forge_compat.py`: Azure DevOps to GitHub/Gitea API translation, thread paging, pipeline id parsing.
+- `test_ensure_rolling_pr.py`: rolling PR creation, draft publishing, merge strategy, workload scope, abandoned-PR matching, the `_Ado` gateway.
+- `test_queue_post_merge_restore.py`: post-merge restore queueing, restore scope and request building.
+- `test_apply_reviewer_rejections.py`: `/reject` handling, including `main()` against real local git repositories.
+- `test_commit_entra_drift.py`: author attribution and `main()` against real local git repositories.
+- `test_update_pr_review_summary.py`: semantic diffing, AI client routes and retries, narrative compaction, description size fallback, thread management, and the `main()` flow.
+- `test_export_entra_baseline.py`: Entra export parsing, enrichment (sequential and parallel), resource-access and role-assignment resolution.
+- `test_resolve_ca_references.py`, `test_restore_normalize_payload.py`: Conditional Access reference resolution and restore payload normalization.
+- `test_generate_assignment_report.py`, `test_generate_app_inventory_report.py`: report row building.
+- `test_filter_*.py`, `test_validate_backup_outputs.py`: noise filters and output validation.
+- `test_probe_tenant_changes.py`: the full debouncer state table.
+- `test_change_probe_function.py`: the Function App entry points (Azure SDKs stubbed).
+- `test_astral_mcp_tools.py`, `test_mcp_server.py`: MCP client for local and remote sources; server auth middleware and Entra claim rules.
 
 ## Build and Runtime Architecture
 
