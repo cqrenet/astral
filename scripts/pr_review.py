@@ -29,6 +29,8 @@ from pr_changes import (
 from pr_description import _compact_deterministic_summary
 from pr_semantic import _extract_semantic_change, _policy_fingerprint
 
+log = common.log
+
 _MINIMAL_CHANGE_KEYS = ("operation", "path", "risk", "semantic_change", "change_source", "change_source_reasons")
 _AUTH_ERROR_MARKERS = ("401", "403", "unauthorized", "forbidden")
 
@@ -258,7 +260,7 @@ def _call_azure_openai(
     if content:
         return (content, None)
 
-    print(f"WARNING: Azure OpenAI summary fallback triggered: {last_error}")
+    log.warning(f"Azure OpenAI summary fallback triggered: {last_error}")
     return (
         _build_fallback_narrative(
             workload=workload,

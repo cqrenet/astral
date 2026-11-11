@@ -18,6 +18,9 @@ from __future__ import annotations
 import argparse
 import json
 from typing import Any
+import common
+
+log = common.log
 
 try:
     from scripts.common import request_json
@@ -65,7 +68,7 @@ def main() -> int:
     encoded = base64.b64encode(f":{args.token}".encode("utf-8")).decode("utf-8")
     auth_header = f"Basic {encoded}"
 
-    print(f"Triggering pipeline {args.pipeline_id} on branch {args.branch} ...")
+    log.info(f"Triggering pipeline {args.pipeline_id} on branch {args.branch} ...")
     response = request_json(
         base_url,
         method="POST",
@@ -77,7 +80,7 @@ def main() -> int:
 
     run_id = response.get("id")
     run_url = response.get("url")
-    print(f"Queued run id={run_id} url={run_url}")
+    log.info(f"Queued run id={run_id} url={run_url}")
     return 0
 
 

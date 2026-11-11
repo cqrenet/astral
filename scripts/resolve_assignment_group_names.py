@@ -14,15 +14,18 @@ import re
 import urllib.error
 import urllib.parse
 import urllib.request
+import common
+
+log = common.log
 
 root = pathlib.Path(os.environ["BUILD_SOURCESDIRECTORY"]) / os.environ["BACKUP_FOLDER"]
 token = os.environ.get("ACCESS_TOKEN", "").strip()
 if not token:
-  print("No Graph token available. Skipping assignment group name enrichment.")
+  log.info("No Graph token available. Skipping assignment group name enrichment.")
   raise SystemExit(0)
 
 if not root.exists():
-  print(f"Backup folder not found: {root}. Skipping assignment group name enrichment.")
+  log.info(f"Backup folder not found: {root}. Skipping assignment group name enrichment.")
   raise SystemExit(0)
 
 group_target_type = "#microsoft.graph.groupAssignmentTarget"
@@ -88,10 +91,10 @@ def resolve_group_name(group_id: str):
       payload = json.loads(resp.read().decode("utf-8"))
       name = payload.get("displayName")
   except urllib.error.HTTPError as exc:
-    print(f"Warning: unable to resolve group {group_id} (HTTP {exc.code})")
+    log.warning(f"unable to resolve group {group_id} (HTTP {exc.code})")
     name = None
   except Exception as exc:
-    print(f"Warning: unable to resolve group {group_id} ({exc})")
+    log.warning(f"unable to resolve group {group_id} ({exc})")
     name = None
   cache[group_id] = name
   return name
@@ -130,10 +133,10 @@ def fetch_assignments(object_id: str):
     except urllib.error.HTTPError as exc:
       if exc.code in (400, 404):
         continue
-      print(f"Warning: assignment query failed for object {object_id} at {url} (HTTP {exc.code})")
+      log.warning(f"assignment query failed for object {object_id} at {url} (HTTP {exc.code})")
       continue
     except Exception as exc:
-      print(f"Warning: assignment query failed for object {object_id} at {url} ({exc})")
+      log.warning(f"assignment query failed for object {object_id} at {url} ({exc})")
       continue
 
     value = payload.get("value")
@@ -269,7 +272,7 @@ for file_path in json_files:
     updated_files += 1
 
   looked_up = nonlocal_vars["looked_up"]
-print(
+log.info(
   "Assignment group name enrichment complete. "
   + f"Files updated: {updated_files}. "
   + f"Group lookups performed: {looked_up}. "
@@ -277,7 +280,7 @@ print(
   + f"Group IDs restored from Graph assignments: {restored_group_ids}."
 )
 if files_with_missing_group_targets > 0:
-  print(
+  log.info(
     "Assignment targets missing groupId before fallback: "
     + str(group_targets_without_id_before)
     + " across "
@@ -285,17 +288,17 @@ if files_with_missing_group_targets > 0:
     + " files."
   )
 if files_with_restored_group_ids > 0:
-  print(
+  log.info(
     "Assignment targets restored from endpoint fallback in "
     + str(files_with_restored_group_ids)
     + " files."
   )
 if group_targets_seen > 0 and group_targets_without_id_after > 0:
-  print(
-    "Warning: "
+  log.warning(
+    ""
     + str(group_targets_without_id_after)
     + " of "
     + str(group_targets_seen)
     + " group assignment targets still do not include groupId after fallback."
   )
-  print("Warning: when groupId is unavailable from source APIs, groupDisplayName cannot be resolved.")
+  log.warning("when groupId is unavailable from source APIs, groupDisplayName cannot be resolved.")

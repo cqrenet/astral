@@ -6,11 +6,12 @@ from __future__ import annotations
 import argparse
 import datetime as dt
 import os
-import sys
 import urllib.parse
 from typing import Any
 
 import common  # same directory as this script
+
+log = common.log
 
 _env_text = common.env_text
 _env_bool = common.env_bool
@@ -129,20 +130,20 @@ def _diagnose_queue_permission(
     try:
         payload = _request_json(definition_url, headers=headers)
         definition_name = str(payload.get("name", "") or "").strip()
-        print(
+        log.info(
             "Diagnostic: restore pipeline definition is readable "
             f"(id={definition_id}, name='{definition_name or 'n/a'}')."
         )
-        print(
+        log.info(
             "Diagnostic: queue call was forbidden, so missing permission is likely "
             "'Queue builds' on that restore pipeline (or pipeline is not authorized to use it)."
         )
     except Exception as diag_exc:
-        print(
+        log.info(
             "Diagnostic: unable to read restore pipeline definition "
             f"id={definition_id}. Details: {diag_exc}"
         )
-        print(
+        log.info(
             "Diagnostic: likely wrong definition ID, wrong project, or missing 'View builds' permission "
             "for the calling pipeline identity."
         )
@@ -197,12 +198,12 @@ def _queue_restore(
     except Exception as exc:
         if not _is_permission_error(exc):
             raise
-        print(
-            "WARNING: Post-merge remediation queue skipped due permissions. "
+        log.warning(
+            "Post-merge remediation queue skipped due permissions. "
             f"Definition={request.definition_id}. Details: {exc}"
         )
         _diagnose_queue_permission(collection_uri, project, headers, request.definition_id)
-        print(
+        log.info(
             "Grant 'Queue builds' permission for this pipeline identity on the restore pipeline "
             "and ensure the pipeline has access to run it."
         )
@@ -212,11 +213,11 @@ def _queue_restore(
 def _restore_scope(workload: str, rejected_paths: list[str]) -> tuple[str, str]:
     """(restore mode, restore paths CSV): selective for Intune with rejected paths, otherwise full."""
     if workload == "intune" and rejected_paths:
-        print(f"Post-merge remediation scope: selective ({len(rejected_paths)} rejected path(s)).")
+        log.info(f"Post-merge remediation scope: selective ({len(rejected_paths)} rejected path(s)).")
         for path in rejected_paths:
-            print(f" - {path}")
+            log.info(f" - {path}")
         return "selective", ",".join(rejected_paths)
-    print("Post-merge remediation scope: full.")
+    log.info("Post-merge remediation scope: full.")
     return "full", ""
 
 
@@ -245,7 +246,7 @@ def main() -> int:
     args = parser.parse_args()
 
     if not _env_bool("AUTO_REMEDIATE_AFTER_MERGE", False):
-        print("Post-merge auto-remediation disabled (set AUTO_REMEDIATE_AFTER_MERGE=true).")
+        log.info("Post-merge auto-remediation disabled (set AUTO_REMEDIATE_AFTER_MERGE=true).")
         return 0
 
     token = os.environ.get("SYSTEM_ACCESSTOKEN", "").strip()
@@ -263,7 +264,7 @@ def main() -> int:
 
     definition_raw = _env_text("AUTO_REMEDIATE_RESTORE_PIPELINE_ID", "")
     if not definition_raw:
-        print("Post-merge auto-remediation queue skipped: AUTO_REMEDIATE_RESTORE_PIPELINE_ID is empty.")
+        log.info("Post-merge auto-remediation queue skipped: AUTO_REMEDIATE_RESTORE_PIPELINE_ID is empty.")
         return 0
     definition_id = common.parse_pipeline_id(definition_raw, "AUTO_REMEDIATE_RESTORE_PIPELINE_ID")
     max_workers = _int_env("AUTO_REMEDIATE_MAX_WORKERS", "10")
@@ -287,7 +288,7 @@ def main() -> int:
     cutoff = dt.datetime.now(dt.timezone.utc) - dt.timedelta(hours=lookback_hours)
     found = _find_candidate(completed, repo_api, headers, allowed, cutoff)
     if not found:
-        print("No completed rolling PR requiring post-merge remediation was found.")
+        log.info("No completed rolling PR requiring post-merge remediation was found.")
         return 0
     candidate, candidate_threads = found
     pr_id = int(candidate.get("pullRequestId"))
@@ -317,9 +318,9 @@ def main() -> int:
     try:
         common.post_pr_thread(repo_api, headers, pr_id, comment)
     except Exception as exc:
-        print(f"WARNING: Restore queued, but failed posting marker comment on PR #{pr_id}: {exc}")
+        log.warning(f"Restore queued, but failed posting marker comment on PR #{pr_id}: {exc}")
 
-    print(
+    log.info(
         f"Queued post-merge remediation for PR #{pr_id} "
         f"({'source commit' if is_abandoned else 'merge commit'}={merge_commit}, buildId={build_id})."
     )
@@ -330,5 +331,5 @@ if __name__ == "__main__":
     try:
         raise SystemExit(main())
     except Exception as exc:
-        print(f"WARNING: Failed post-merge remediation check: {exc}", file=sys.stderr)
+        log.warning(f"Failed post-merge remediation check: {exc}")
         raise

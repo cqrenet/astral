@@ -32,6 +32,8 @@ from pr_review import _call_azure_openai
 from pr_semantic import _extract_semantic_change, _is_entra_enrichment_only_json_change
 from pr_threads import _enforce_change_ticket_threads, _sync_summary_threads
 
+log = common.log
+
 
 def _run_diff_name_status(repo_root: str, baseline_branch: str, drift_branch: str) -> str:
     three_dot = f"origin/{baseline_branch}...origin/{drift_branch}"
@@ -42,8 +44,8 @@ def _run_diff_name_status(repo_root: str, baseline_branch: str, drift_branch: st
         err = str(exc).lower()
         if "no merge base" not in err:
             raise
-        print(
-            "WARNING: No merge base for rolling branches "
+        log.warning(
+            "No merge base for rolling branches "
             f"(origin/{baseline_branch}, origin/{drift_branch}); using direct diff."
         )
         return _run_git(repo_root, ["diff", "--name-status", "--find-renames", two_dot])
@@ -139,7 +141,7 @@ def _run_ticket_gate(
     changes: list[ChangeItem],
 ) -> None:
     if not enabled:
-        print("Change-needed thread sync disabled (set REQUIRE_CHANGE_TICKETS=true).")
+        log.info("Change-needed thread sync disabled (set REQUIRE_CHANGE_TICKETS=true).")
         return
     ticket_pattern = _env("CHANGE_TICKET_REGEX", required=False, default=r"[A-Z][A-Z0-9]+-\d+")
     change_context = _build_ticket_change_context(
@@ -156,7 +158,7 @@ def _run_ticket_gate(
         ticket_pattern=ticket_pattern,
         change_context=change_context,
     )
-    print(
+    log.info(
         "Change-needed thread sync complete: "
         f"created={created_count}, closed_stale={closed_count}. "
         "Merge policy should enforce unresolved thread handling."
@@ -171,7 +173,7 @@ def _fetch_drift_branch(repo_root: str, baseline_branch: str, drift_branch: str)
     except RuntimeError as exc:
         message = str(exc).lower()
         if "couldn't find remote ref" in message or "could not find remote ref" in message:
-            print(f"Drift branch '{drift_branch}' not found on origin; skipping summary update.")
+            log.info(f"Drift branch '{drift_branch}' not found on origin; skipping summary update.")
             return False
         raise
     return True
@@ -204,7 +206,7 @@ def _collect_changes(args: argparse.Namespace, baseline_branch: str, drift_branc
         changes=changes,
     )
     if ignored > 0:
-        print(f"Ignored operational-only drift changes from summary/ticket scope: {ignored}")
+        log.info(f"Ignored operational-only drift changes from summary/ticket scope: {ignored}")
     return changes, ignored
 
 
@@ -239,11 +241,11 @@ def main() -> int:
 
         pr = _find_active_rolling_pr(repo_api, token, source_ref, target_ref)
         if not pr:
-            print("No active rolling PR found; skipping summary update.")
+            log.info("No active rolling PR found; skipping summary update.")
             return 0
         pr_id = pr.get("pullRequestId")
         if not pr_id:
-            print("Active PR without pullRequestId; skipping summary update.")
+            log.info("Active PR without pullRequestId; skipping summary update.")
             return 0
         _debug(f"Active rolling PR detected: pr_id={pr_id}, source={source_ref}, target={target_ref}")
 
@@ -287,8 +289,8 @@ def main() -> int:
                 description=current_description,
                 is_draft=pr_is_draft,
             ):
-                print(f"Published draft PR #{pr_id} after confirming summary was already up to date.")
-            print(
+                log.info(f"Published draft PR #{pr_id} after confirming summary was already up to date.")
+            log.info(
                 f"Automated review summary fingerprint unchanged for PR #{pr_id} "
                 f"({args.workload}); skipping description update."
             )
@@ -303,8 +305,8 @@ def main() -> int:
             baseline_branch,
             drift_branch,
         )
-        print(
-            f"DEBUG summary: pr_id={pr_id} workload={args.workload} "
+        _debug(
+            f"summary: pr_id={pr_id} workload={args.workload} "
             f"status={full_pr.get('status')} isDraft={full_pr.get('isDraft')} "
             f"mergeStatus={full_pr.get('mergeStatus')} title_len={len(patch_title)} "
             f"current_desc_len={len(current_description)}"
@@ -336,12 +338,12 @@ def main() -> int:
             description=update.final_description,
             is_draft=pr_is_draft,
         ):
-            print(f"Published draft PR #{pr_id} after automated review summary update.")
+            log.info(f"Published draft PR #{pr_id} after automated review summary update.")
         _run_ticket_gate(**ticket_gate)
         return 0
     except Exception as exc:
         # Non-fatal on purpose: backup and PR flow should continue even if summary generation fails.
-        print(f"WARNING: Failed to update automated review summary: {exc}", file=sys.stderr)
+        log.warning(f"Failed to update automated review summary: {exc}")
         return 1 if require_ticket_gate else 0
 
 

@@ -7,12 +7,13 @@ import argparse
 import hashlib
 import os
 import subprocess
-import sys
 import urllib.parse
 from dataclasses import dataclass
 from typing import Any
 
 import common  # same directory as this script
+
+log = common.log
 
 _env_text = common.env_text
 _env_bool = common.env_bool
@@ -304,10 +305,9 @@ def _load_remediation(baseline_branch: str) -> _Remediation:
     enabled = _env_bool("AUTO_REMEDIATE_ON_PR_REJECTION", False)
     definition_raw = _env_text("AUTO_REMEDIATE_RESTORE_PIPELINE_ID", "")
     if enabled and not definition_raw:
-        print(
-            "WARNING: AUTO_REMEDIATE_ON_PR_REJECTION=true but AUTO_REMEDIATE_RESTORE_PIPELINE_ID is empty; "
+        log.warning(
+            "AUTO_REMEDIATE_ON_PR_REJECTION=true but AUTO_REMEDIATE_RESTORE_PIPELINE_ID is empty; "
             "remediation queueing disabled for this run.",
-            file=sys.stderr,
         )
         enabled = False
     max_workers_raw = _env_text("AUTO_REMEDIATE_MAX_WORKERS", "10")
@@ -413,9 +413,9 @@ def _update_existing_pr(
                 "completionOptions": {"mergeStrategy": merge_strategy},
             },
         )
-        print(f"Updated rolling {workload} PR #{pr_id}: {web_url}")
+        log.info(f"Updated rolling {workload} PR #{pr_id}: {web_url}")
     else:
-        print(f"Rolling {workload} PR #{pr_id} already up to date: {web_url}")
+        log.info(f"Rolling {workload} PR #{pr_id} already up to date: {web_url}")
     _report_pr(pr_id, web_url)
 
 
@@ -433,20 +433,20 @@ def _remediate_rejected_pr(
     """The latest drift equals a rejected PR: queue the restore once, never recreate the PR."""
     pr_id = int(rejected_pr["pullRequestId"])
     if not _pr_has_reject_vote(rejected_pr):
-        print(
+        log.info(
             "Matched abandoned PR without reviewer Reject vote; "
             "skipping remediation and suppressing PR recreation for this unchanged drift snapshot."
         )
         return
     if not remediation.enabled:
-        print(
+        log.info(
             "Suppressed PR recreation: latest drift matches a rejected PR, "
             "but AUTO_REMEDIATE_ON_PR_REJECTION is disabled."
         )
         return
     marker = f"Automation marker: AUTO-REMEDIATE-TREE:{drift_tree}"
     if _threads_with_marker(repo_api, headers, pr_id, marker):
-        print("Suppressed PR recreation: latest drift matches a previously rejected PR and remediation was already queued.")
+        log.info("Suppressed PR recreation: latest drift matches a previously rejected PR and remediation was already queued.")
         return
 
     queued = common.queue_restore_pipeline(collection_uri, project, headers, remediation.request)
@@ -463,8 +463,8 @@ def _remediate_rejected_pr(
     try:
         common.post_pr_thread(repo_api, headers, pr_id, comment)
     except Exception as exc:
-        print(f"WARNING: Remediation queued, but failed to post PR thread on #{pr_id}: {exc}")
-    print(
+        log.warning(f"Remediation queued, but failed to post PR thread on #{pr_id}: {exc}")
+    log.info(
         f"Queued remediation pipeline run (definition={remediation.definition_id}, "
         f"buildId={queued.get('id')}) and suppressed PR recreation."
     )
@@ -512,7 +512,7 @@ def main() -> int:
         os.environ.get("BUILD_BUILDNUMBER", ""),
         os.environ.get("BUILD_BUILDID", ""),
     )
-    print(f"Rolling PR completion merge strategy: {pr_merge_strategy}")
+    log.info(f"Rolling PR completion merge strategy: {pr_merge_strategy}")
 
     active_prs = _query_prs(repo_api, headers, source_ref, target_ref, "active")
     if active_prs:
@@ -530,7 +530,7 @@ def main() -> int:
         backup_folder=backup_folder,
         reports_subdir=reports_subdir,
     ):
-        print(
+        log.info(
             "Suppressed PR recreation: drift branch has no effective workload configuration diff "
             f"against {baseline_branch}."
         )
@@ -552,7 +552,7 @@ def main() -> int:
     )
     if matching_abandoned:
         if match_reason == "config-fingerprint":
-            print("Matched abandoned PR using configuration fingerprint (ignoring docs/reports churn).")
+            log.info("Matched abandoned PR using configuration fingerprint (ignoring docs/reports churn).")
         _remediate_rejected_pr(
             matching_abandoned,
             remediation,
@@ -567,7 +567,7 @@ def main() -> int:
         return 0
 
     if abandoned_prs:
-        print(
+        log.info(
             f"No abandoned PR snapshot match for current drift tree (checked {len(abandoned_prs)} abandoned PR(s)); "
             "creating/updating rolling PR."
         )
@@ -581,7 +581,7 @@ def main() -> int:
         pr_merge_strategy,
     )
     web_url = _pr_web_url(created)
-    print(f"Created rolling {args.workload} PR #{created.get('pullRequestId')}: {web_url}")
+    log.info(f"Created rolling {args.workload} PR #{created.get('pullRequestId')}: {web_url}")
     _report_pr(created.get("pullRequestId"), web_url)
     return 0
 
@@ -590,5 +590,5 @@ if __name__ == "__main__":
     try:
         raise SystemExit(main())
     except Exception as exc:
-        print(f"ERROR: Failed to ensure rolling PR: {exc}", file=sys.stderr)
+        log.error(f"Failed to ensure rolling PR: {exc}")
         raise

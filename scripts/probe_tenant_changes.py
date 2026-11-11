@@ -28,16 +28,18 @@ import datetime as dt
 import json
 import os
 import pathlib
-import sys
 import urllib.parse
 from typing import Any
 
 # scripts/ is not guaranteed to be on PYTHONPATH when loaded by the Function wrapper,
 # so we tolerate a relative import failure and fall back to an absolute import.
 try:
-    from scripts.common import request_json
+    from scripts import common
 except ImportError:
-    from common import request_json  # type: ignore[no-redef]
+    import common  # type: ignore[no-redef]
+
+log = common.log
+request_json = common.request_json
 
 
 # ---------------------------------------------------------------------------
@@ -205,7 +207,7 @@ def _fetch_latest_event(url: str, token: str) -> dict[str, Any] | None:
     except Exception as exc:
         # Defensive: log and treat as no event so a transient Graph failure does
         # not wedge the debouncer in an armed state forever.
-        print(f"Warning: Graph query failed ({exc})", file=sys.stderr)
+        log.warning(f"Graph query failed ({exc})")
         return None
 
     value = payload.get("value")
@@ -358,9 +360,8 @@ def main() -> int:
         if args.client_id and args.client_secret and args.tenant_id:
             token = _acquire_graph_token(args.client_id, args.client_secret, args.tenant_id)
         else:
-            print(
-                "ERROR: Provide --token, or all three of --client-id, --client-secret, --tenant-id.",
-                file=sys.stderr,
+            log.error(
+                "Provide --token, or all three of --client-id, --client-secret, --tenant-id.",
             )
             raise SystemExit(1)
 

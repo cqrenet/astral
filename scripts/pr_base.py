@@ -8,6 +8,8 @@ from typing import Any
 
 import common
 
+log = common.log
+
 _env_bool = common.env_bool
 _run_git = common.run_git
 
@@ -35,7 +37,7 @@ def _debug_enabled() -> bool:
 
 def _debug(msg: str) -> None:
     if _debug_enabled():
-        print(f"[change-ticket-debug] {msg}")
+        log.info(f"[change-ticket-debug] {msg}")
 
 
 def _request_json(url: str, token: str, method: str = "GET", body: dict[str, Any] | None = None) -> dict[str, Any]:

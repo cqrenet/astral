@@ -8,6 +8,8 @@ from pathlib import Path
 
 import common
 
+log = common.log
+
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
@@ -51,7 +53,7 @@ def _validate_intune(root: Path, reports_root: Path, errors: list[str]) -> None:
 
     if errors:
         return
-    print(f"Intune output validation passed: jsonFiles={json_count}")
+    log.info(f"Intune output validation passed: jsonFiles={json_count}")
 
 
 def _validate_entra(root: Path, reports_root: Path, args: argparse.Namespace, errors: list[str]) -> None:
@@ -94,7 +96,7 @@ def _validate_entra(root: Path, reports_root: Path, args: argparse.Namespace, er
         return
 
     json_count = _json_count(root)
-    print(
+    log.info(
         "Entra output validation passed: "
         f"jsonFiles={json_count}, "
         f"mode={args.mode}, "
@@ -117,9 +119,9 @@ def main() -> int:
         _validate_entra(root=root, reports_root=reports_root, args=args, errors=errors)
 
     if errors:
-        print("Backup output validation failed:")
+        log.info("Backup output validation failed:")
         for item in errors:
-            print(f" - {item}")
+            log.info(f" - {item}")
         return 1
     return 0
 

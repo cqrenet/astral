@@ -11,6 +11,8 @@ from pathlib import Path
 import common
 from typing import Any
 
+log = common.log
+
 
 def _is_settings_catalog_json(file_path: Path, backup_root: Path) -> bool:
     if file_path.suffix.lower() != ".json":
@@ -110,16 +112,16 @@ def main() -> int:
     )
 
     if restored:
-        print(f"Restored partial Intune Settings Catalog exports from baseline: {len(restored)}")
+        log.info(f"Restored partial Intune Settings Catalog exports from baseline: {len(restored)}")
         for path in restored:
-            print(f" - {path}")
+            log.info(f" - {path}")
     else:
-        print("No partial Intune Settings Catalog exports detected.")
+        log.info("No partial Intune Settings Catalog exports detected.")
 
     if unresolved:
-        print(f"Unresolved partial Intune Settings Catalog exports: {len(unresolved)}")
+        log.info(f"Unresolved partial Intune Settings Catalog exports: {len(unresolved)}")
         for path in unresolved:
-            print(f" - {path}")
+            log.info(f" - {path}")
         if common.to_bool(args.fail_on_unresolved_partial_exports):
             return 2
     return 0

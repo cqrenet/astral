@@ -10,6 +10,9 @@ from pathlib import Path
 from typing import Any
 
 from report_utils import safe_text
+import common
+
+log = common.log
 
 
 def parse_args() -> argparse.Namespace:
@@ -220,7 +223,7 @@ def main() -> int:
         writer.writeheader()
         writer.writerows(rows)
 
-    print(
+    log.info(
         "Generated apps inventory report: "
         + f"{output_path} "
         + f"(rows={len(rows)}, appRegistrations={len(app_reg_items)}, enterpriseApps={len(ent_app_items)})"

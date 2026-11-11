@@ -12,11 +12,12 @@ from __future__ import annotations
 
 import argparse
 import os
-import sys
 import urllib.parse
 from typing import Any
 
 import common  # same directory as this script
+
+log = common.log
 
 _request_json = common.request_json
 _run_git = common.run_git
@@ -33,8 +34,8 @@ def _run_diff_name_only(repo_root: str, baseline_branch: str, drift_branch: str)
         stderr = str(exc).lower()
         if "no merge base" not in stderr:
             raise
-        print(
-            "WARNING: No merge base for rolling branches "
+        log.warning(
+            "No merge base for rolling branches "
             f"(origin/{baseline_branch}, origin/{drift_branch}); using direct diff."
         )
         return _run_git(repo_root, ["diff", "--name-only", two_dot])
@@ -138,7 +139,7 @@ def main() -> int:
     payload = _request_json(f"{repo_api}/pullrequests?{query}", token=token)
     prs = payload.get("value", []) if isinstance(payload, dict) else []
     if not prs:
-        print("No active rolling PR found; skipping reviewer reject sync.")
+        log.info("No active rolling PR found; skipping reviewer reject sync.")
         return 0
     pr_id = int(prs[0].get("pullRequestId"))
 
@@ -147,31 +148,31 @@ def main() -> int:
         _run_git(args.repo_root, ["fetch", "--quiet", "origin", drift_branch])
     except RuntimeError as exc:
         if "couldn't find remote ref" in str(exc).lower() or "could not find remote ref" in str(exc).lower():
-            print(f"Drift branch '{drift_branch}' not found on origin; nothing to reject.")
+            log.info(f"Drift branch '{drift_branch}' not found on origin; nothing to reject.")
             return 0
         raise
     changed_paths = _changed_policy_paths(args.repo_root, baseline_branch, drift_branch)
     if not changed_paths:
-        print("No changed policy paths in rolling PR; nothing to auto-reject.")
+        log.info("No changed policy paths in rolling PR; nothing to auto-reject.")
         return 0
 
     threads_payload = _request_json(f"{repo_api}/pullrequests/{pr_id}/threads?api-version=7.1", token=token)
     threads = threads_payload.get("value", []) if isinstance(threads_payload, dict) else []
     rejections, examined = _find_rejections(threads, changed_paths, allowed)
     if not rejections:
-        print(
+        log.info(
             "No /reject decisions found in auto policy threads "
             f"(examined={examined}, changed_paths={len(changed_paths)})."
         )
         return 0
-    print(f"Detected /reject decisions in auto policy threads: {len(rejections)} (examined={examined}).")
+    log.info(f"Detected /reject decisions in auto policy threads: {len(rejections)} (examined={examined}).")
 
     _run_git(args.repo_root, ["checkout", "--quiet", "--force", "-B", drift_branch, f"origin/{drift_branch}"])
     changed = _reset_paths_to_baseline(
         args.repo_root, f"origin/{baseline_branch}", sorted({path for path, _ in rejections})
     )
     if common.git_proc(args.repo_root, ["diff", "--cached", "--quiet"], check=False).returncode == 0:
-        print("Reviewer /reject decisions found, but no effective diff remained after baseline reset.")
+        log.info("Reviewer /reject decisions found, but no effective diff remained after baseline reset.")
         return 0
 
     _configure_git_identity(args.repo_root)
@@ -193,7 +194,7 @@ def main() -> int:
             ),
         )
 
-    print(
+    log.info(
         f"Applied reviewer /reject decisions for {changed} path(s) in PR #{pr_id}; "
         f"drift branch '{drift_branch}' updated."
     )
@@ -204,5 +205,5 @@ if __name__ == "__main__":
     try:
         raise SystemExit(main())
     except Exception as exc:
-        print(f"WARNING: Failed to apply reviewer /reject decisions: {exc}", file=sys.stderr)
+        log.warning(f"Failed to apply reviewer /reject decisions: {exc}")
         raise

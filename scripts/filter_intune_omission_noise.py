@@ -16,6 +16,8 @@ from pathlib import Path
 
 import common
 
+log = common.log
+
 
 # Path fragments (relative to backup root) that are known to be intermittently
 # omitted by IntuneCD.  Checked with simple "in" containment against the
@@ -96,7 +98,7 @@ def main() -> int:
     backup_root = backup_root.resolve()
 
     if not backup_root.exists():
-        print(f"Backup root not found: {backup_root}")
+        log.info(f"Backup root not found: {backup_root}")
         return 0
 
     restored, skipped = restore_omitted_files(
@@ -106,16 +108,16 @@ def main() -> int:
     )
 
     if restored:
-        print(f"Restored {len(restored)} intermittently omitted file(s) from baseline:")
+        log.info(f"Restored {len(restored)} intermittently omitted file(s) from baseline:")
         for path in restored:
-            print(f"  + {path}")
+            log.info(f"  + {path}")
     else:
-        print("No intermittently omitted files detected.")
+        log.info("No intermittently omitted files detected.")
 
     if skipped:
-        print(f"Files that could not be restored (skipped): {len(skipped)}")
+        log.info(f"Files that could not be restored (skipped): {len(skipped)}")
         for path in skipped:
-            print(f"  ! {path}")
+            log.info(f"  ! {path}")
 
     return 0
 

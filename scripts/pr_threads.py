@@ -13,6 +13,8 @@ from pr_base import _debug, _request_json
 from pr_changes import ChangeItem
 from pr_description import DescriptionUpdate
 
+log = common.log
+
 AUTO_TICKET_THREAD_PREFIX = "AUTO-CHANGE-TICKET:"
 
 
@@ -567,9 +569,9 @@ def _enforce_change_ticket_threads(
 
 def _log_thread_sync(synced: bool, pr_id: Any, workload: str, what: str, up_to_date_msg: str = "") -> None:
     if synced:
-        print(f"Updated {what} for PR #{pr_id} ({workload}).")
+        log.info(f"Updated {what} for PR #{pr_id} ({workload}).")
     elif up_to_date_msg:
-        print(f"{up_to_date_msg} for PR #{pr_id} ({workload}).")
+        log.info(f"{up_to_date_msg} for PR #{pr_id} ({workload}).")
 
 
 def _sync_summary_threads(
@@ -592,18 +594,18 @@ def _sync_summary_threads(
                 "Full deterministic summary thread already up to date",
             )
         except Exception as exc:
-            print(f"WARNING: Failed to sync full deterministic summary thread for PR #{pr_id}: {exc}")
+            log.warning(f"Failed to sync full deterministic summary thread for PR #{pr_id}: {exc}")
     else:
         try:
             if _close_deterministic_thread(**common_args):
-                print(
+                log.info(
                     f"Closed full deterministic summary thread for PR #{pr_id} ({workload}) "
                     "because description now fits."
                 )
         except Exception as exc:
-            print(f"WARNING: Failed to close deterministic summary thread for PR #{pr_id}: {exc}")
+            log.warning(f"Failed to close deterministic summary thread for PR #{pr_id}: {exc}")
 
-    print(
+    log.info(
         f"Updated automated review summary for PR #{pr_id} ({workload})."
         if update.summary_updated
         else f"Automated review summary already up to date for PR #{pr_id} ({workload})."
@@ -616,9 +618,9 @@ def _sync_summary_threads(
                 "Full AI reviewer narrative thread already up to date",
             )
         except Exception as exc:
-            print(f"WARNING: Failed to sync full AI reviewer narrative thread for PR #{pr_id}: {exc}")
+            log.warning(f"Failed to sync full AI reviewer narrative thread for PR #{pr_id}: {exc}")
     try:
         synced = _sync_reviewer_guide_thread(**common_args)
         _log_thread_sync(synced, pr_id, workload, "reviewer guide thread", "Reviewer guide thread already up to date")
     except Exception as exc:
-        print(f"WARNING: Failed to sync reviewer guide thread for PR #{pr_id}: {exc}")
+        log.warning(f"Failed to sync reviewer guide thread for PR #{pr_id}: {exc}")

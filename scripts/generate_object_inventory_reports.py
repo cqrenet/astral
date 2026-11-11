@@ -10,6 +10,9 @@ import re
 from pathlib import Path
 
 from report_utils import resolve_assignment_target, safe_text
+import common
+
+log = common.log
 
 
 
@@ -187,12 +190,12 @@ def main() -> int:
         write_csv(per_type_report, type_rows)
         per_type_counts[policy_type] = len(type_rows)
 
-    print(
+    log.info(
         f"Generated object inventory reports: all={all_report}, "
         f"perTypeCount={len(per_type_counts)}, rows={len(rows)}"
     )
     for policy_type, count in sorted(per_type_counts.items(), key=lambda item: item[0].lower()):
-        print(f" - {policy_type}: {count} rows")
+        log.info(f" - {policy_type}: {count} rows")
     return 0
 
 

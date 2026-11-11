@@ -14,6 +14,8 @@ import shutil
 
 import common
 
+log = common.log
+
 repo_root = pathlib.Path(os.environ.get("BUILD_SOURCESDIRECTORY") or os.environ["GITHUB_WORKSPACE"]).resolve()
 backup_folder = os.environ["BACKUP_FOLDER"]
 intune_subdir = os.environ["INTUNE_BACKUP_SUBDIR"]
@@ -27,7 +29,7 @@ if not intune_root.is_dir():
   raise SystemExit(1)
 
 if restore_mode == "full":
-  print(f"Restore mode: full (source={intune_root})")
+  log.info(f"Restore mode: full (source={intune_root})")
   common.ci_set_env("RESTORE_SOURCE_PATH", intune_root)
   raise SystemExit(0)
 
@@ -89,7 +91,7 @@ if not copied:
   common.ci_log("error", f"No files were prepared for selective restore.")
   raise SystemExit(1)
 
-print(f"Restore mode: selective (files={len(copied)})")
+log.info(f"Restore mode: selective (files={len(copied)})")
 for rel in copied:
-  print(f" - {backup_folder}/{intune_subdir}/{rel}")
+  log.info(f" - {backup_folder}/{intune_subdir}/{rel}")
 common.ci_set_env("RESTORE_SOURCE_PATH", temp_root)

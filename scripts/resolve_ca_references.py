@@ -11,6 +11,9 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from typing import Any
+import common
+
+log = common.log
 
 
 SPECIAL_APP_IDS = {
@@ -42,7 +45,7 @@ class GraphResolver:
         if key in self._warned:
             return
         self._warned.add(key)
-        print(f"Warning: {message}")
+        log.warning(f"{message}")
 
     def _get(self, url: str) -> dict | None:
         req = urllib.request.Request(
@@ -227,12 +230,12 @@ def main() -> int:
     token = args.token.strip()
 
     if not token:
-        print("No Graph token provided. Skipping Conditional Access reference enrichment.")
+        log.info("No Graph token provided. Skipping Conditional Access reference enrichment.")
         return 0
 
     ca_dir = root / "Conditional Access"
     if not ca_dir.exists():
-        print(f"Conditional Access folder not found at {ca_dir}. Skipping.")
+        log.info(f"Conditional Access folder not found at {ca_dir}. Skipping.")
         return 0
 
     resolver = GraphResolver(token)
@@ -251,7 +254,7 @@ def main() -> int:
             file_path.write_text(json.dumps(payload, indent=5, ensure_ascii=False) + "\n", encoding="utf-8")
             updated_files += 1
 
-    print(
+    log.info(
         "Conditional Access GUID enrichment complete. "
         + f"Processed files: {processed_files}. "
         + f"Updated files: {updated_files}."

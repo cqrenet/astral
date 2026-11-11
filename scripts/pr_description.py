@@ -9,6 +9,9 @@ from typing import Any
 
 from pr_ai import _format_ai_narrative_markdown
 from pr_base import _env_bool, _request_json
+import common
+
+log = common.log
 
 AUTO_BLOCK_START = "<!-- AUTO-REVIEW-SUMMARY:START -->"
 
@@ -303,12 +306,12 @@ def _publish_description(
         compact = _description("compact_thread")
 
     if ai_moved_to_thread:
-        print(
+        log.info(
             "INFO: Full PR summary exceeds Azure DevOps description limit; "
             "using compact summary in description and posting full details to PR threads."
         )
     else:
-        print(
+        log.info(
             "INFO: Full PR summary exceeds Azure DevOps description limit; "
             "using compact deterministic summary in description, keeping AI narrative inline, "
             "and posting full deterministic details to a PR thread."
@@ -319,7 +322,7 @@ def _publish_description(
     except RuntimeError as exc:
         if not _is_description_limit_error(exc):
             raise
-    print("WARNING: Compact summary still too large; retrying with ultra-compact block.")
+    log.warning("Compact summary still too large; retrying with ultra-compact block.")
     ultra = _description("ultra")
     _patch(ultra)
     return DescriptionUpdate(True, ultra, True, ai_moved_to_thread)
@@ -351,12 +354,12 @@ def _summary_is_current(
     if deterministic_present and version_matches and not (refresh_on_fallback and ai_fallback_present):
         return True
     if retry_ai:
-        print(f"{prefix}, but prior AI fallback marker detected; retrying AI narrative refresh.")
+        log.info(f"{prefix}, but prior AI fallback marker detected; retrying AI narrative refresh.")
     elif not version_matches:
-        print(
+        log.info(
             f"{prefix}, but summary version changed "
             f"({existing_summary_version or 'unversioned'} -> {AUTO_SUMMARY_VERSION}); refreshing description."
         )
     else:
-        print(f"{prefix}, but summary format/content changed; refreshing description.")
+        log.info(f"{prefix}, but summary format/content changed; refreshing description.")
     return False

@@ -20,6 +20,8 @@ import urllib.request
 
 import common
 
+log = common.log
+
 
 TRANSIENT_RESOLUTION_ERROR_MARKERS = (
     "temporary failure in name resolution",
@@ -83,10 +85,6 @@ def parse_args() -> argparse.Namespace:
         help="Optional git branch/ref used as fallback source for resolution backfill (for example origin/drift/entra).",
     )
     return parser.parse_args()
-
-
-def log(message: str) -> None:
-    print(message, flush=True)
 
 
 def sanitize_filename(value: str) -> str:
@@ -917,7 +915,7 @@ def _enterprise_app_failure(
 
 def _log_progress(label: str, done: int, total: int) -> None:
     if done == 1 or done % 25 == 0 or done == total:
-        log(f"{label} progress: {done}/{total}")
+        log.info(f"{label} progress: {done}/{total}")
 
 
 def _enrich_enterprise_apps(
@@ -936,7 +934,7 @@ def _enrich_enterprise_apps(
     """
     apps = [item for item in items if isinstance(item, dict)]
     total = len(apps)
-    log(f"Resolving Enterprise Applications details for {total} objects using {workers} worker(s)...")
+    log.info(f"Resolving Enterprise Applications details for {total} objects using {workers} worker(s)...")
     for item in apps:
         app_id = str(item.get("appId") or "").strip()
         object_id = str(item.get("id") or "").strip()
@@ -986,7 +984,7 @@ def _enrich_app_registrations(
     previous_lookup: PreviousSnapshotLookup | None,
 ) -> None:
     total = len(items)
-    log(f"Resolving App Registrations details for {total} objects...")
+    log.info(f"Resolving App Registrations details for {total} objects...")
     for idx, item in enumerate(items, start=1):
         if not isinstance(item, dict):
             continue
@@ -1076,10 +1074,10 @@ def _previous_snapshot_ref(repo_root: pathlib.Path, requested_ref: str) -> str:
 
 def _local_org_names(client: GraphClient) -> tuple[dict[str, str], int]:
     """Map organization id -> display name for the local tenant; returns (names, warnings)."""
-    log("Resolving local organization details...")
+    log.info("Resolving local organization details...")
     payload, error = client.get_object("https://graph.microsoft.com/v1.0/organization?$select=id,displayName")
     if error:
-        log(f"Warning: unable to resolve local organization details ({error})")
+        log.warning(f"unable to resolve local organization details ({error})")
         return {}, 1
     names: dict[str, str] = {}
     values = payload.get("value") if isinstance(payload, dict) else None
@@ -1106,7 +1104,7 @@ def _prime_resource_sp_caches(
         object_id = str(sp.get("id") or "").strip()
         if object_id:
             by_id[object_id] = sp
-    log(f"Primed resource service-principal cache from local Enterprise Applications export: {len(cached)} objects")
+    log.info(f"Primed resource service-principal cache from local Enterprise Applications export: {len(cached)} objects")
 
 
 def _previous_snapshot_lookups(root: pathlib.Path, requested_ref: str) -> dict[str, PreviousSnapshotLookup]:
@@ -1115,9 +1113,9 @@ def _previous_snapshot_lookups(root: pathlib.Path, requested_ref: str) -> dict[s
     snapshot_ref = _previous_snapshot_ref(repo_root, requested_ref) if repo_root else ""
     root_repo_rel = _repo_relative_posix(repo_root, root) if repo_root is not None else ""
     if repo_root is None or not snapshot_ref or not root_repo_rel:
-        log("No previous snapshot reference found for resolution backfill; unresolved placeholders may cause drift noise.")
+        log.info("No previous snapshot reference found for resolution backfill; unresolved placeholders may cause drift noise.")
         return {}
-    log(f"Using previous snapshot reference for resolution backfill: {snapshot_ref}")
+    log.info(f"Using previous snapshot reference for resolution backfill: {snapshot_ref}")
     return {
         title: PreviousSnapshotLookup(
             repo_root=repo_root,
@@ -1142,7 +1140,7 @@ def main() -> int:
         if common.to_bool(getattr(args, flag))
     ]
     if not exports:
-        log("All Entra export categories are disabled. Skipping Entra baseline export.")
+        log.info("All Entra export categories are disabled. Skipping Entra baseline export.")
         return 0
 
     client = GraphClient(token)
@@ -1157,10 +1155,10 @@ def main() -> int:
     failed_exports: list[tuple[str, str]] = []
     for export in exports:
         title = export["title"]
-        log(f"Starting export: {title}")
+        log.info(f"Starting export: {title}")
         items, error = client.get_collection(export["url"])
         if error:
-            log(f"Warning: unable to export {title} from {export['url']} ({error})")
+            log.warning(f"unable to export {title} from {export['url']} ({error})")
             warnings += 1
             failed_exports.append((title, str(error)))
             continue
@@ -1186,16 +1184,16 @@ def main() -> int:
             source_url=export["url"],
         )
         total_written += written
-        log(f"Exported {written} objects: {title}")
+        log.info(f"Exported {written} objects: {title}")
 
     if failed_exports and common.to_bool(args.fail_on_export_error):
-        log("Entra baseline export failed because one or more requested categories could not be exported:")
+        log.error("Entra baseline export failed because one or more requested categories could not be exported:")
         for title, error in failed_exports:
-            log(f" - {title}: {error}")
-        log("Requested category failures are treated as fatal to avoid committing a partial or stale backup snapshot.")
+            log.error(f" - {title}: {error}")
+        log.error("Requested category failures are treated as fatal to avoid committing a partial or stale backup snapshot.")
         return 2
 
-    log(f"Entra baseline export complete. Total objects written: {total_written}. Warnings: {warnings}.")
+    log.info(f"Entra baseline export complete. Total objects written: {total_written}. Warnings: {warnings}.")
     return 0
 
 

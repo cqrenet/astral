@@ -10,6 +10,8 @@ from pathlib import Path
 
 import common
 
+log = common.log
+
 
 def revert_formatting_only_changes(
     repo_root: Path,
@@ -65,7 +67,7 @@ def main() -> int:
     backup_root = backup_root.resolve()
 
     if not backup_root.exists():
-        print(f"Backup root not found: {backup_root}")
+        log.info(f"Backup root not found: {backup_root}")
         return 0
 
     reverted, kept = revert_formatting_only_changes(
@@ -75,14 +77,14 @@ def main() -> int:
     )
 
     if reverted:
-        print(f"Reverted {len(reverted)} formatting-only Intune JSON export(s) to baseline:")
+        log.info(f"Reverted {len(reverted)} formatting-only Intune JSON export(s) to baseline:")
         for path in reverted:
-            print(f"  - {path}")
+            log.info(f"  - {path}")
     else:
-        print("No formatting-only Intune JSON exports detected.")
+        log.info("No formatting-only Intune JSON exports detected.")
 
     if kept:
-        print(f"Files with actual semantic changes (kept): {len(kept)}")
+        log.info(f"Files with actual semantic changes (kept): {len(kept)}")
 
     return 0
 

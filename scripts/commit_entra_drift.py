@@ -8,7 +8,6 @@ import os
 import datetime as dt
 import json
 import pathlib
-import sys
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -16,6 +15,8 @@ import urllib.request
 import common
 from collections import defaultdict
 from dataclasses import dataclass
+
+log = common.log
 
 
 def _set_output_var(name: str, value: str, is_output: bool = True) -> None:
@@ -274,16 +275,16 @@ def _commit_group(
     backup_start: dt.datetime,
 ) -> None:
     for path in files:
-        print(f"\t- Adding {repo_root / path}")
+        log.info(f"\t- Adding {repo_root / path}")
         common.git_proc(repo_root, ["add", "--all", "--", path])
     author_name = ", ".join(identity.name for identity in identities)
     author_email = ", ".join(identity.value for identity in identities)
-    print(f"\t- Setting commit author(s): {author_name}")
+    log.info(f"\t- Setting commit author(s): {author_name}")
     common.git_proc(repo_root, ["config", "user.name", author_name])
     common.git_proc(repo_root, ["config", "user.email", author_email])
     commit_date = backup_start.astimezone(dt.timezone.utc).strftime("%Y.%m.%d_%H.%M")
     commit_name = f"{commit_date} -- {author_name} (Entra)"
-    print(f"\t- Creating commit '{commit_name}'")
+    log.info(f"\t- Creating commit '{commit_name}'")
     common.git_proc(repo_root, ["commit", "-m", commit_name])
 
 
@@ -319,13 +320,13 @@ def main() -> int:
 
     changed_files = _changed_files(repo_root, workload_root)
     if not changed_files:
-        print("No Entra change detected")
+        log.info("No Entra change detected")
         _set_output_var("CHANGE_DETECTED", "0")
         _set_output_var("ROLLING_PR_SYNC_REQUIRED", "0")
         return 0
 
     if _remote_diff_is_empty(repo_root, args.drift_branch, workload_root):
-        print("No Entra change detected (snapshot identical to existing drift branch)")
+        log.info("No Entra change detected (snapshot identical to existing drift branch)")
         _set_output_var("CHANGE_DETECTED", "0")
         _set_output_var("ROLLING_PR_SYNC_REQUIRED", "1")
         return 0
@@ -337,8 +338,8 @@ def main() -> int:
 
     audits: list[dict] = []
     try:
-        print("Getting Entra directory audit logs")
-        print(f"\t- from: '{last_commit_date}' (UTC) to: '{backup_start}' (UTC)")
+        log.info("Getting Entra directory audit logs")
+        log.info(f"\t- from: '{last_commit_date}' (UTC) to: '{backup_start}' (UTC)")
         audits = _fetch_directory_audits(args.access_token, last_commit_date, backup_start)
     except urllib.error.HTTPError as exc:
         if exc.code in (401, 403):
@@ -355,7 +356,7 @@ def main() -> int:
         )
 
     common.git_proc(repo_root, ["reset", "--quiet", "--", workload_root])
-    print("\nCommit changes")
+    log.info("\nCommit changes")
     for group in groups.values():
         files = group["files"]
         identities = group["identities"]
@@ -384,5 +385,5 @@ if __name__ == "__main__":
     try:
         raise SystemExit(main())
     except Exception as exc:
-        print(str(exc), file=sys.stderr)
+        log.info(str(exc))
         raise

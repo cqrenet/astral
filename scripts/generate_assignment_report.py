@@ -12,6 +12,9 @@ from pathlib import Path
 from typing import Iterable
 
 from report_utils import resolve_assignment_target, safe_text
+import common
+
+log = common.log
 
 
 DEFAULT_POLICY_TYPES = {
@@ -329,19 +332,19 @@ def main() -> int:
     write_markdown(rows, markdown_path)
     write_csv(rows, csv_path)
 
-    print(
+    log.info(
         f"Generated assignment report with {len(rows)} rows: "
         f"{markdown_path} and {csv_path}"
     )
     if using_default_policy_scope:
-        print(
+        log.info(
             "Applied default policy scope: "
             + ", ".join(sorted(DEFAULT_POLICY_TYPES))
         )
     elif policy_type_filter:
-        print(f"Applied policy type filter: {', '.join(sorted(policy_type_filter))}")
+        log.info(f"Applied policy type filter: {', '.join(sorted(policy_type_filter))}")
     if graph_type_filter:
-        print(f"Applied graph type filter: {', '.join(sorted(graph_type_filter))}")
+        log.info(f"Applied graph type filter: {', '.join(sorted(graph_type_filter))}")
     return 0
 
 

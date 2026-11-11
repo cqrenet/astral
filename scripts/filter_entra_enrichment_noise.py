@@ -11,6 +11,8 @@ from typing import Any
 
 import common
 
+log = common.log
+
 
 # Who owns an app and which app roles are granted to it are real, security-relevant
 # config (owner add / permission grant = classic persistence). Only their resolved
@@ -149,17 +151,17 @@ def main() -> int:
     repo_root = Path(args.repo_root).resolve()
     reverted = filter_enrichment_only_files(repo_root=repo_root, workload_root=args.workload_root)
     if reverted:
-        print(f"Reverted enrichment-only Entra file changes: {len(reverted)}")
+        log.info(f"Reverted enrichment-only Entra file changes: {len(reverted)}")
         for path in reverted:
-            print(f" - {path}")
+            log.info(f" - {path}")
     else:
-        print("No enrichment-only Entra file changes detected.")
+        log.info("No enrichment-only Entra file changes detected.")
 
     residual = find_enrichment_only_modified_files(repo_root=repo_root, workload_root=args.workload_root)
     if residual:
-        print(f"Residual enrichment-only Entra file changes still present: {len(residual)}")
+        log.info(f"Residual enrichment-only Entra file changes still present: {len(residual)}")
         for path in residual:
-            print(f" - {path}")
+            log.info(f" - {path}")
         if common.to_bool(args.fail_on_residual_enrichment_drift):
             return 2
     return 0

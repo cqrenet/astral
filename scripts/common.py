@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import base64
 import json
+import logging
 import os
 import re
 import subprocess
@@ -14,6 +15,36 @@ import urllib.error
 import urllib.request
 from dataclasses import dataclass
 from typing import Any
+
+
+class _LogFormatter(logging.Formatter):
+    """Plain message for INFO (pipeline logs stay as before); 'LEVEL: message' for warnings and above."""
+
+    def format(self, record: logging.LogRecord) -> str:
+        message = record.getMessage()
+        return message if record.levelno <= logging.INFO else f"{record.levelname}: {message}"
+
+
+def _build_logger() -> logging.Logger:
+    logger = logging.getLogger("astral")
+    if logger.handlers:
+        return logger
+    formatter = _LogFormatter()
+    out = logging.StreamHandler(sys.stdout)
+    out.addFilter(lambda record: record.levelno < logging.WARNING)
+    err = logging.StreamHandler(sys.stderr)
+    err.setLevel(logging.WARNING)
+    for handler in (out, err):
+        handler.setFormatter(formatter)
+        logger.addHandler(handler)
+    logger.setLevel(os.environ.get("LOG_LEVEL", "INFO").strip().upper() or "INFO")
+    logger.propagate = False
+    return logger
+
+
+# Shared diagnostic logger: INFO to stdout, WARNING and above to stderr. Machine-readable output
+# (CI commands, JSON results) is still printed directly, never logged.
+log = _build_logger()
 
 
 def env_text(name: str, default: str = "") -> str:

@@ -15,10 +15,13 @@ import pathlib
 import re
 import urllib.parse
 import urllib.request
+import common
+
+log = common.log
 
 root = pathlib.Path(os.environ["RESTORE_PATH_ENV"]).resolve()
 if not root.exists():
-    print(f"Restore source folder not found; payload normalization skipped: {root}")
+    log.info(f"Restore source folder not found; payload normalization skipped: {root}")
     raise SystemExit(0)
 
 graph_token = os.environ.get("GRAPH_TOKEN", "").strip()
@@ -207,7 +210,7 @@ for path in sorted(root.rglob("*.json")):
         path.write_text(json.dumps(data, indent=4, ensure_ascii=False) + "\n", encoding="utf-8")
         files_changed += 1
 
-print(
+log.info(
     "Restore payload normalization complete: "
     f"filesChanged={files_changed}, "
     f"appConfigPayloadJsonNormalized={normalized_payload_json}, "
