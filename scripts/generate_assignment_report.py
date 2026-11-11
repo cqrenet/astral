@@ -11,11 +11,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterable
 
+from report_utils import resolve_assignment_target, safe_text
 
-GROUP_TARGET_TYPES = {
-    "#microsoft.graph.groupAssignmentTarget",
-    "#microsoft.graph.exclusionGroupAssignmentTarget",
-}
 
 DEFAULT_POLICY_TYPES = {
     "app configuration",
@@ -77,12 +74,6 @@ class AssignmentRow:
     source_file: str
 
 
-def safe_text(value: object) -> str:
-    if value is None:
-        return ""
-    return str(value).strip()
-
-
 def normalize_intent(intent: str) -> str:
     normalized = safe_text(intent).lower()
     if normalized in {"apply", "include"}:
@@ -102,28 +93,6 @@ def infer_intent(assignment: dict, target_type: str) -> str:
     if explicit:
         return normalize_intent(explicit)
     return "Include"
-
-
-def resolve_assignment_target(target: dict) -> str:
-    target_type = safe_text(target.get("@odata.type"))
-    if target_type == "#microsoft.graph.allDevicesAssignmentTarget":
-        return "All devices"
-    if target_type == "#microsoft.graph.allLicensedUsersAssignmentTarget":
-        return "All users"
-    if target_type in GROUP_TARGET_TYPES:
-        return (
-            safe_text(target.get("groupDisplayName"))
-            or safe_text(target.get("groupName"))
-            or safe_text(target.get("groupId"))
-            or "Unresolved group"
-        )
-    return (
-        safe_text(target.get("groupDisplayName"))
-        or safe_text(target.get("groupName"))
-        or safe_text(target.get("displayName"))
-        or safe_text(target.get("id"))
-        or "Unknown target"
-    )
 
 
 def escape_md_cell(value: str) -> str:

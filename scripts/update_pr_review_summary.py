@@ -20,26 +20,14 @@ import sys
 import hashlib
 import time
 from collections import Counter
+from collections.abc import Callable
 from dataclasses import dataclass
-from pathlib import Path
 from typing import Any
-from urllib.error import HTTPError, URLError
+from urllib.error import HTTPError
 from urllib.parse import quote, urlencode, urlsplit
 from urllib.request import Request, urlopen
 
-# common.py lives in the same directory; ensure it can be imported when the
-# script is executed directly.
-_sys_path_inserted = False
-if __file__:
-    _script_dir = str(Path(__file__).resolve().parent)
-    if _script_dir not in sys.path:
-        sys.path.insert(0, _script_dir)
-        _sys_path_inserted = True
-
-import common
-
-if _sys_path_inserted:
-    sys.path.pop(0)
+import common  # same directory as this script
 
 _env_bool = common.env_bool
 _run_git = common.run_git
@@ -62,13 +50,6 @@ COMPACT_DETERMINISTIC_THREAD_NOTE = (
 ADO_PR_DESCRIPTION_MAX_LEN = 4000
 AUTO_REVIEWER_GUIDE_THREAD_PREFIX = "AUTO-REVIEWER-GUIDE:"
 COMPACT_REVIEWER_GUIDE_NOTE = "> 📋 Full **reviewer guide** is posted in a dedicated PR thread."
-
-THREAD_STATUS_ACTIVE = 1
-THREAD_STATUS_FIXED = 2
-THREAD_STATUS_WONT_FIX = 3
-THREAD_STATUS_CLOSED = 4
-THREAD_STATUS_BY_DESIGN = 5
-THREAD_STATUS_PENDING = 6
 
 VOLATILE_KEY_NAMES = {
     "id",
@@ -168,21 +149,6 @@ class ChangeItem:
     old_path: str | None = None
 
 
-def _is_doc_like(path: str) -> bool:
-    lp = path.lower()
-    doc_suffixes = (".md", ".html", ".htm", ".pdf", ".csv", ".txt")
-    if lp.endswith(doc_suffixes):
-        return True
-    if "/docs/" in lp or "/object inventory/" in lp:
-        return True
-    return False
-
-
-def _is_report_like(path: str) -> bool:
-    lp = path.lower().replace("\\", "/")
-    return "/reports/" in lp or "/assignment report/" in lp
-
-
 def _env(name: str, required: bool = True, default: str = "") -> str:
     value = os.environ.get(name, "").strip()
     if value:
@@ -190,17 +156,6 @@ def _env(name: str, required: bool = True, default: str = "") -> str:
     if required:
         raise RuntimeError(f"Required environment variable is missing: {name}")
     return default
-
-
-def _env_int(name: str, default: int) -> int:
-    raw = os.environ.get(name, "").strip()
-    if not raw:
-        return default
-    try:
-        return int(raw)
-    except ValueError:
-        return default
-
 
 
 def _delay_reviewer_notifications_enabled() -> bool:
@@ -251,16 +206,6 @@ def _run_diff_name_status(repo_root: str, baseline_branch: str, drift_branch: st
             f"(origin/{baseline_branch}, origin/{drift_branch}); using direct diff."
         )
         return _run_git(repo_root, ["diff", "--name-status", "--find-renames", two_dot])
-
-
-def _retry_after_seconds(exc: HTTPError) -> float | None:
-    retry_after = exc.headers.get("Retry-After")
-    if not retry_after:
-        return None
-    try:
-        return max(0.0, float(retry_after))
-    except ValueError:
-        return None
 
 
 def _request_json(url: str, token: str, method: str = "GET", body: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -345,7 +290,7 @@ def _classify_risk(path: str, operation: str, backup_folder: str, reports_subdir
     p = path.replace("\\", "/")
     lp = p.lower()
 
-    if _is_doc_like(p):
+    if common.is_doc_like(p):
         return (1, "Documentation/report artifact")
 
     if lp.startswith(f"{backup_folder.lower()}/{reports_subdir.lower()}/") or "/assignment report/" in lp:
@@ -447,7 +392,7 @@ def _parse_changes(diff_output: str, backup_folder: str, reports_subdir: str) ->
         in_scope = _is_policy_scope_path(path) or (old_path is not None and _is_policy_scope_path(old_path))
         if not in_scope:
             continue
-        if _is_doc_like(path) or _is_report_like(path):
+        if common.is_doc_like(path) or common.is_report_like(path):
             continue
         risk_score, reason = _classify_risk(path, operation, backup_folder, reports_subdir)
         if old_path:
@@ -470,16 +415,6 @@ def _parse_changes(diff_output: str, backup_folder: str, reports_subdir: str) ->
             )
         )
     return changes
-
-
-def _normalize_branch_name(branch: str) -> str:
-    normalized = branch.strip()
-    for _ in range(2):
-        if normalized.startswith("origin/"):
-            normalized = normalized[len("origin/") :]
-        if normalized.startswith("refs/heads/"):
-            normalized = normalized[len("refs/heads/") :]
-    return normalized
 
 
 def _changes_fingerprint(changes: list[ChangeItem]) -> str:
@@ -587,101 +522,126 @@ def _normalized_assignment_signatures(payload: Any) -> list[str]:
     return sorted(signatures)
 
 
+def _assignment_base_key(entry: dict[str, str]) -> tuple[str, str, str, str, str]:
+    """Identity of an assignment target, ignoring its filter."""
+    group_identity = str(entry.get("group_id", "") or "").strip()
+    if not group_identity:
+        group_identity = str(entry.get("group_name", "") or "").strip().casefold()
+    return (
+        entry.get("target_type", ""),
+        group_identity,
+        entry.get("collection_id", ""),
+        entry.get("intent", ""),
+        entry.get("source", ""),
+    )
+
+
+def _has_assignment_filter(entry: dict[str, str]) -> bool:
+    return bool((entry.get("filter_type", "") or "").strip()) or bool((entry.get("filter_id", "") or "").strip())
+
+
+def _filter_scope_hint(old_entry: dict[str, str], new_entry: dict[str, str]) -> str:
+    old_has = _has_assignment_filter(old_entry)
+    new_has = _has_assignment_filter(new_entry)
+    if old_has and not new_has:
+        return "scope likely broader (unfiltered base target)"
+    if not old_has and new_has:
+        return "scope likely narrower (filtered subset of base target)"
+    old_type = (old_entry.get("filter_type", "") or "").strip().lower()
+    new_type = (new_entry.get("filter_type", "") or "").strip().lower()
+    if old_type != new_type:
+        return "scope impact ambiguous (include/exclude semantics changed)"
+    old_id = (old_entry.get("filter_id", "") or "").strip().lower()
+    new_id = (new_entry.get("filter_id", "") or "").strip().lower()
+    if old_id != new_id:
+        return "scope impact ambiguous (different filter population)"
+    return "scope impact ambiguous"
+
+
+def _assignment_filter_changes(old_map: dict[Any, dict[str, str]], new_map: dict[Any, dict[str, str]]) -> list[str]:
+    changes: list[str] = []
+    for key in sorted(set(old_map) & set(new_map)):
+        old_entry, new_entry = old_map[key], new_map[key]
+        old_filter = (old_entry.get("filter_type", ""), old_entry.get("filter_id", ""))
+        new_filter = (new_entry.get("filter_type", ""), new_entry.get("filter_id", ""))
+        if old_filter == new_filter:
+            continue
+        target_label = old_entry.get("target_type", "") or "assignment"
+        old_text = f"{old_filter[0] or 'none'}/{old_filter[1] or 'none'}"
+        new_text = f"{new_filter[0] or 'none'}/{new_filter[1] or 'none'}"
+        changes.append(
+            f"assignment filter ({target_label}): {old_text} -> {new_text} "
+            f"[{_filter_scope_hint(old_entry, new_entry)}]"
+        )
+    return changes
+
+
+def _assignment_scope_summary(
+    old_entries: list[dict[str, str]],
+    new_entries: list[dict[str, str]],
+    added_entries: list[dict[str, str]],
+    removed_entries: list[dict[str, str]],
+) -> str | None:
+    """One line on whether the effective assignment scope got broader or narrower."""
+    if old_entries and not new_entries:
+        return "assignment scope: likely unassigned (all assignment targets removed)"
+    if not old_entries and new_entries:
+        return "assignment scope: newly assigned (targets added)"
+    if bool(added_entries or removed_entries) and not (added_entries and removed_entries):
+        # Only additions or only removals: exclusions narrow scope, includes broaden it (reversed for removals).
+        adding = bool(added_entries)
+        entries = added_entries if adding else removed_entries
+        all_exclusions = all(_is_exclusion_target_type(e.get("target_type", "")) for e in entries)
+        no_exclusions = all(not _is_exclusion_target_type(e.get("target_type", "")) for e in entries)
+        if all_exclusions:
+            return (
+                "assignment scope: likely narrower (more exclusion targets)"
+                if adding
+                else "assignment scope: likely broader (fewer exclusion targets)"
+            )
+        if no_exclusions:
+            return (
+                "assignment scope: likely broader (more include/all targets)"
+                if adding
+                else "assignment scope: likely narrower (fewer include/all targets)"
+            )
+        return "assignment scope: ambiguous (mixed target semantics)"
+    return None
+
+
 def _describe_assignment_changes(old_payload: Any, new_payload: Any) -> list[str]:
     old_entries = _assignment_entries(old_payload)
     new_entries = _assignment_entries(new_payload)
     if old_entries == new_entries:
         return []
 
-    def _base_key(entry: dict[str, str]) -> tuple[str, str, str, str, str]:
-        group_identity = str(entry.get("group_id", "") or "").strip()
-        if not group_identity:
-            group_identity = str(entry.get("group_name", "") or "").strip().casefold()
-        return (
-            entry.get("target_type", ""),
-            group_identity,
-            entry.get("collection_id", ""),
-            entry.get("intent", ""),
-            entry.get("source", ""),
-        )
-
-    old_map = {_base_key(entry): entry for entry in old_entries}
-    new_map = {_base_key(entry): entry for entry in new_entries}
-    changes: list[str] = []
-
-    def _has_filter(entry: dict[str, str]) -> bool:
-        return bool((entry.get("filter_type", "") or "").strip()) or bool((entry.get("filter_id", "") or "").strip())
-
-    def _filter_scope_hint(old_entry: dict[str, str], new_entry: dict[str, str]) -> str:
-        old_has = _has_filter(old_entry)
-        new_has = _has_filter(new_entry)
-        if old_has and not new_has:
-            return "scope likely broader (unfiltered base target)"
-        if not old_has and new_has:
-            return "scope likely narrower (filtered subset of base target)"
-
-        old_type = (old_entry.get("filter_type", "") or "").strip().lower()
-        new_type = (new_entry.get("filter_type", "") or "").strip().lower()
-        old_id = (old_entry.get("filter_id", "") or "").strip().lower()
-        new_id = (new_entry.get("filter_id", "") or "").strip().lower()
-        if old_type != new_type:
-            return "scope impact ambiguous (include/exclude semantics changed)"
-        if old_id != new_id:
-            return "scope impact ambiguous (different filter population)"
-        return "scope impact ambiguous"
-
-    for key in sorted(set(old_map.keys()) & set(new_map.keys())):
-        old_entry = old_map[key]
-        new_entry = new_map[key]
-        old_filter = (old_entry.get("filter_type", ""), old_entry.get("filter_id", ""))
-        new_filter = (new_entry.get("filter_type", ""), new_entry.get("filter_id", ""))
-        if old_filter != new_filter:
-            target_label = old_entry.get("target_type", "") or "assignment"
-            old_filter_text = f"{old_filter[0] or 'none'}/{old_filter[1] or 'none'}"
-            new_filter_text = f"{new_filter[0] or 'none'}/{new_filter[1] or 'none'}"
-            scope_hint = _filter_scope_hint(old_entry, new_entry)
-            changes.append(
-                f"assignment filter ({target_label}): {old_filter_text} -> {new_filter_text} [{scope_hint}]"
-            )
-
+    old_map = {_assignment_base_key(entry): entry for entry in old_entries}
+    new_map = {_assignment_base_key(entry): entry for entry in new_entries}
+    changes = _assignment_filter_changes(old_map, new_map)
     # If only filter values changed on the same assignment targets, the
     # explicit filter diff is clearer than additional added/removed noise.
-    if changes and set(old_map.keys()) == set(new_map.keys()):
+    if changes and set(old_map) == set(new_map):
         return changes
 
     old_set = set(_normalized_assignment_signatures(old_payload))
     new_set = set(_normalized_assignment_signatures(new_payload))
     added = sorted(new_set - old_set)
     removed = sorted(old_set - new_set)
-
-    old_by_sig = {_assignment_signature(entry): entry for entry in old_entries}
-    new_by_sig = {_assignment_signature(entry): entry for entry in new_entries}
-    added_entries = [new_by_sig[sig] for sig in added if sig in new_by_sig]
-    removed_entries = [old_by_sig[sig] for sig in removed if sig in old_by_sig]
-
     if added:
         changes.append(f"assignment targets added: {'; '.join(added[:2])}")
     if removed:
         changes.append(f"assignment targets removed: {'; '.join(removed[:2])}")
 
-    if old_entries and not new_entries:
-        changes.append("assignment scope: likely unassigned (all assignment targets removed)")
-    elif not old_entries and new_entries:
-        changes.append("assignment scope: newly assigned (targets added)")
-    elif added and not removed:
-        if added_entries and all(_is_exclusion_target_type(entry.get("target_type", "")) for entry in added_entries):
-            changes.append("assignment scope: likely narrower (more exclusion targets)")
-        elif added_entries and all(not _is_exclusion_target_type(entry.get("target_type", "")) for entry in added_entries):
-            changes.append("assignment scope: likely broader (more include/all targets)")
-        else:
-            changes.append("assignment scope: ambiguous (mixed target semantics)")
-    elif removed and not added:
-        if removed_entries and all(_is_exclusion_target_type(entry.get("target_type", "")) for entry in removed_entries):
-            changes.append("assignment scope: likely broader (fewer exclusion targets)")
-        elif removed_entries and all(not _is_exclusion_target_type(entry.get("target_type", "")) for entry in removed_entries):
-            changes.append("assignment scope: likely narrower (fewer include/all targets)")
-        else:
-            changes.append("assignment scope: ambiguous (mixed target semantics)")
+    old_by_sig = {_assignment_signature(entry): entry for entry in old_entries}
+    new_by_sig = {_assignment_signature(entry): entry for entry in new_entries}
+    scope = _assignment_scope_summary(
+        old_entries,
+        new_entries,
+        [new_by_sig[sig] for sig in added if sig in new_by_sig],
+        [old_by_sig[sig] for sig in removed if sig in old_by_sig],
+    )
+    if scope:
+        changes.append(scope)
     elif added and removed:
         changes.append("assignment scope: ambiguous (target mix changed)")
     return changes
@@ -726,7 +686,7 @@ def _build_deterministic_summary(
     lines.append(f"> **Overall Risk:** **{overall_risk}**")
 
     highlights = sorted(
-        [item for item in changes if item.risk_score >= 2 and not _is_doc_like(item.path)],
+        [item for item in changes if item.risk_score >= 2 and not common.is_doc_like(item.path)],
         key=lambda item: (
             -item.risk_score,
             0 if item.operation == "Deleted" else 1,
@@ -872,148 +832,172 @@ def _detect_hotspots(changes: list[ChangeItem]) -> list[str]:
     return [area for area, _ in area_counter.most_common(5)]
 
 
+_ADMIN_POLICY_TYPES = {
+    "conditional_access",
+    "device_configuration",
+    "compliance_policy",
+    "script",
+    "app_configuration",
+    "app_protection",
+    "identity_security",
+}
+_ADMIN_PATH_MARKERS = (
+    "/conditional access/",
+    "/named locations/",
+    "/authentication strengths/",
+    "/device configurations/",
+    "/settings catalog/",
+    "/compliance policies/",
+    "/scripts/",
+    "/app configuration/",
+    "/app protection/",
+    "/filters/",
+    "/scope tags/",
+    "/device management settings/",
+    "/apple vpp tokens/",
+    "/apple push notification/",
+    "/roles/",
+    "/identity protection/",
+    "/privileged identity management/",
+    "/admin units/",
+    "/intune/applications/",
+)
+_ASSIGNMENT_SEMANTIC_TOKENS = (
+    "assignment filter",
+    "assignment scope",
+    "assignment targets",
+    "newly assigned",
+    "unassigned",
+    "scope likely broader",
+    "scope likely narrower",
+    "include targets",
+    "exclude targets",
+)
+_RESOLVER_CHURN_TOKENS = (
+    "resolutionstatus",
+    "ownersresolved",
+    "approleassignmentsresolved",
+    "requiredresourceaccessresolved",
+    "appownerorganizationresolved",
+    "unresolved",
+)
+_APP_SECURITY_TOKENS = (
+    "requiredresourceaccess",
+    "approles",
+    "oauth2permissionscopes",
+    "passwordcredentials",
+    "keycredentials",
+    "redirecturis",
+    "identifieruris",
+    "preauthorizedapplications",
+    "signinaudience",
+)
+_ENTERPRISE_APPS = "/enterprise applications/"
+_APP_REGISTRATIONS = "/app registrations/"
+
+
+@dataclass(frozen=True)
+class _SourceSignal:
+    """One piece of evidence: when fires(item, path, semantic, semantic_lower), add score to `side`."""
+
+    side: str  # "admin" | "infrastructure"
+    score: int
+    reason: str
+    fires: Callable[[ChangeItem, str, str, str], bool]
+
+
+def _is_identity_app_path(lp: str) -> bool:
+    return _ENTERPRISE_APPS in lp or _APP_REGISTRATIONS in lp
+
+
+# Order matters: it decides which reasons are shown first.
+_SOURCE_SIGNALS: tuple[_SourceSignal, ...] = (
+    _SourceSignal(
+        "admin", 3, "Policy/control workload usually reflects tenant-admin intent",
+        lambda item, lp, sem, low: item.policy_type in _ADMIN_POLICY_TYPES,
+    ),
+    _SourceSignal(
+        "admin", 2, "Changed path is typically tenant-managed configuration",
+        lambda item, lp, sem, low: any(marker in lp for marker in _ADMIN_PATH_MARKERS),
+    ),
+    _SourceSignal(
+        "admin", 2, "Enrollment settings are typically administered intentionally",
+        lambda item, lp, sem, low: "/enrollment " in lp or "/enrollment/" in lp,
+    ),
+    _SourceSignal(
+        "admin", 3, "Assignment/targeting semantics changed",
+        lambda item, lp, sem, low: any(token in low for token in _ASSIGNMENT_SEMANTIC_TOKENS),
+    ),
+    _SourceSignal(
+        "infrastructure", 3, "Enterprise application inventory often contains platform-managed object churn",
+        lambda item, lp, sem, low: _ENTERPRISE_APPS in lp,
+    ),
+    _SourceSignal(
+        "infrastructure", 2, "App registration inventory can include service/platform object churn",
+        lambda item, lp, sem, low: _APP_REGISTRATIONS in lp and _ENTERPRISE_APPS not in lp,
+    ),
+    _SourceSignal(
+        "infrastructure", 1, "New application identity objects may be introduced automatically by the platform",
+        lambda item, lp, sem, low: item.operation == "Added" and _is_identity_app_path(lp),
+    ),
+    _SourceSignal(
+        "infrastructure", 2, "No semantic setting delta detected despite file drift",
+        lambda item, lp, sem, low: low == "no semantic key changes detected",
+    ),
+    _SourceSignal(
+        "infrastructure", 2, "Semantic diff resembles resolver/metadata churn",
+        lambda item, lp, sem, low: any(token in low for token in _RESOLVER_CHURN_TOKENS),
+    ),
+    _SourceSignal(
+        "infrastructure", 1, "Object lifecycle changes in identity app inventory may be platform-driven",
+        lambda item, lp, sem, low: sem in {"New configuration object added", "Configuration object removed"}
+        and _is_identity_app_path(lp),
+    ),
+    # Security-relevant app identity changes should not be treated as pure infrastructure drift.
+    _SourceSignal(
+        "admin", 4,
+        "Application identity shows permission, credential, or scope changes indicating tenant security impact",
+        lambda item, lp, sem, low: _is_identity_app_path(lp) and any(token in low for token in _APP_SECURITY_TOKENS),
+    ),
+)
+
+
 def _classify_change_source(item: ChangeItem, semantic_change: str = "") -> dict[str, Any]:
+    """Score whether a change looks admin-driven or platform (infrastructure) driven."""
     lp = item.path.lower().replace("\\", "/")
     semantic = (semantic_change or "").strip()
     semantic_lower = semantic.lower()
 
-    admin_score = 0
-    infrastructure_score = 0
-    admin_reasons: list[str] = []
-    infrastructure_reasons: list[str] = []
-
-    def _add_admin(score: int, reason: str) -> None:
-        nonlocal admin_score
-        admin_score += score
-        if reason not in admin_reasons:
-            admin_reasons.append(reason)
-
-    def _add_infrastructure(score: int, reason: str) -> None:
-        nonlocal infrastructure_score
-        infrastructure_score += score
-        if reason not in infrastructure_reasons:
-            infrastructure_reasons.append(reason)
-
-    if item.policy_type in {
-        "conditional_access",
-        "device_configuration",
-        "compliance_policy",
-        "script",
-        "app_configuration",
-        "app_protection",
-        "identity_security",
-    }:
-        _add_admin(3, "Policy/control workload usually reflects tenant-admin intent")
-
-    admin_path_markers = (
-        "/conditional access/",
-        "/named locations/",
-        "/authentication strengths/",
-        "/device configurations/",
-        "/settings catalog/",
-        "/compliance policies/",
-        "/scripts/",
-        "/app configuration/",
-        "/app protection/",
-        "/filters/",
-        "/scope tags/",
-        "/device management settings/",
-        "/apple vpp tokens/",
-        "/apple push notification/",
-        "/roles/",
-        "/identity protection/",
-        "/privileged identity management/",
-        "/admin units/",
-        "/intune/applications/",
-    )
-    if any(marker in lp for marker in admin_path_markers):
-        _add_admin(2, "Changed path is typically tenant-managed configuration")
-
-    if "/enrollment " in lp or "/enrollment/" in lp:
-        _add_admin(2, "Enrollment settings are typically administered intentionally")
-
-    if any(
-        token in semantic_lower
-        for token in (
-            "assignment filter",
-            "assignment scope",
-            "assignment targets",
-            "newly assigned",
-            "unassigned",
-            "scope likely broader",
-            "scope likely narrower",
-            "include targets",
-            "exclude targets",
-        )
-    ):
-        _add_admin(3, "Assignment/targeting semantics changed")
-
-    if any(marker in lp for marker in ("/enterprise applications/", "/app registrations/")):
-        if "/enterprise applications/" in lp:
-            _add_infrastructure(3, "Enterprise application inventory often contains platform-managed object churn")
-        else:
-            _add_infrastructure(2, "App registration inventory can include service/platform object churn")
-
-    if item.operation == "Added" and any(marker in lp for marker in ("/enterprise applications/", "/app registrations/")):
-        _add_infrastructure(1, "New application identity objects may be introduced automatically by the platform")
-
-    if semantic_lower == "no semantic key changes detected":
-        _add_infrastructure(2, "No semantic setting delta detected despite file drift")
-
-    if any(
-        token in semantic_lower
-        for token in (
-            "resolutionstatus",
-            "ownersresolved",
-            "approleassignmentsresolved",
-            "requiredresourceaccessresolved",
-            "appownerorganizationresolved",
-            "unresolved",
-        )
-    ):
-        _add_infrastructure(2, "Semantic diff resembles resolver/metadata churn")
-
-    if semantic in {"New configuration object added", "Configuration object removed"} and any(
-        marker in lp for marker in ("/enterprise applications/", "/app registrations/")
-    ):
-        _add_infrastructure(1, "Object lifecycle changes in identity app inventory may be platform-driven")
-
-    # Security-relevant app identity changes should not be treated as pure infrastructure drift.
-    if any(marker in lp for marker in ("/enterprise applications/", "/app registrations/")):
-        security_semantic_tokens = (
-            "requiredresourceaccess",
-            "approles",
-            "oauth2permissionscopes",
-            "passwordcredentials",
-            "keycredentials",
-            "redirecturis",
-            "identifieruris",
-            "preauthorizedapplications",
-            "signinaudience",
-        )
-        if any(token in semantic_lower for token in security_semantic_tokens):
-            _add_admin(4, "Application identity shows permission, credential, or scope changes indicating tenant security impact")
+    scores = {"admin": 0, "infrastructure": 0}
+    reasons: dict[str, list[str]] = {"admin": [], "infrastructure": []}
+    for signal in _SOURCE_SIGNALS:
+        if signal.fires(item, lp, semantic, semantic_lower):
+            scores[signal.side] += signal.score
+            if signal.reason not in reasons[signal.side]:
+                reasons[signal.side].append(signal.reason)
+    admin_score, infrastructure_score = scores["admin"], scores["infrastructure"]
+    admin_reasons, infrastructure_reasons = reasons["admin"], reasons["infrastructure"]
 
     if admin_score == 0 and infrastructure_score == 0:
         label = "mixed_or_uncertain"
-        reasons = ["Insufficient deterministic evidence to attribute source"]
+        reason_list = ["Insufficient deterministic evidence to attribute source"]
     elif admin_score >= infrastructure_score + 2:
         label = "likely_admin_driven"
-        reasons = admin_reasons[:3] or ["Deterministic signals favor tenant-admin intent"]
+        reason_list = admin_reasons[:3] or ["Deterministic signals favor tenant-admin intent"]
     elif infrastructure_score >= admin_score + 2:
         label = "likely_infrastructure_driven"
-        reasons = infrastructure_reasons[:3] or ["Deterministic signals favor platform-managed drift"]
+        reason_list = infrastructure_reasons[:3] or ["Deterministic signals favor platform-managed drift"]
     else:
         label = "mixed_or_uncertain"
-        reasons = (admin_reasons[:2] + infrastructure_reasons[:2])[:4]
-        if not reasons:
-            reasons = ["Signals conflict or are too weak to attribute source confidently"]
+        reason_list = (admin_reasons[:2] + infrastructure_reasons[:2])[:4]
+        if not reason_list:
+            reason_list = ["Signals conflict or are too weak to attribute source confidently"]
 
     return {
         "label": label,
         "admin_score": admin_score,
         "infrastructure_score": infrastructure_score,
-        "reasons": reasons,
+        "reasons": reason_list,
     }
 
 
@@ -1104,7 +1088,7 @@ def _load_policy_excerpt(repo_root: str, branch: str, path: str, max_chars: int 
     Load a small excerpt of a file from a given git branch for AI context.
     """
     try:
-        normalized_branch = _normalize_branch_name(branch)
+        normalized_branch = common.normalize_branch(branch)
         result = subprocess.run(
             ["git", "show", f"origin/{normalized_branch}:{path}"],
             cwd=repo_root,
@@ -1565,65 +1549,156 @@ def _aoai_temperature_candidates(deployment_name: str) -> list[float | None]:
     return [preferred, None]
 
 
-def _call_azure_openai(
-    changes: list[ChangeItem],
-    deterministic_summary: str,
-    workload: str,
-    repo_root: str,
-    baseline_branch: str,
-    drift_branch: str,
-) -> tuple[str | None, str | None]:
-    enabled = _env("ENABLE_PR_AI_SUMMARY", required=False, default="true").lower() == "true"
-    if not enabled:
-        return (None, None)
+_AOAI_RETRY_HTTP_CODES = {408, 429, 500, 502, 503, 504}
 
-    endpoint = _env("AZURE_OPENAI_ENDPOINT", required=False)
-    deployment = _env("AZURE_OPENAI_DEPLOYMENT", required=False)
-    api_key = _env("AZURE_OPENAI_API_KEY", required=False)
-    api_version = _env("AZURE_OPENAI_API_VERSION", required=False, default="2024-12-01-preview")
-    max_ai_tokens = max(256, _env_int("PR_AI_MAX_TOKENS", 1200))
-    ai_timeout_seconds = max(10, _env_int("PR_AI_REQUEST_TIMEOUT_SECONDS", 60))
-    compact_timeout_seconds = max(
-        ai_timeout_seconds,
-        _env_int("PR_AI_COMPACT_TIMEOUT_SECONDS", max(90, ai_timeout_seconds)),
-    )
-    minimal_timeout_seconds = max(
-        compact_timeout_seconds,
-        _env_int("PR_AI_MINIMAL_TIMEOUT_SECONDS", max(120, compact_timeout_seconds)),
-    )
-    max_route_attempts = max(1, _env_int("PR_AI_REQUEST_MAX_ATTEMPTS", 3))
 
-    if not endpoint or not deployment or not api_key:
-        return (None, "Azure OpenAI is not configured (endpoint/deployment/api-key missing)")
+class _AzureOpenAIClient:
+    """Chat-completions client for Azure OpenAI with route / parameter fallbacks.
 
-    ai_candidates = [
-        item for item in changes
-        if not _is_doc_like(item.path) and not _is_report_like(item.path)
+    Tries the endpoint styles ("deployments" and "v1"), retries transient failures, and adapts
+    to deployments that reject max_tokens vs max_completion_tokens or a custom temperature.
+    """
+
+    def __init__(self, endpoint: str, deployment: str, api_key: str, api_version: str, max_attempts: int) -> None:
+        self.endpoint = _normalize_aoai_endpoint(endpoint).rstrip("/")
+        self.deployment = deployment
+        self.api_key = api_key
+        self.api_version = api_version
+        self.max_attempts = max_attempts
+        self.prefer_v1 = self.endpoint.lower().endswith(".cognitiveservices.azure.com")
+
+    def _routes(
+        self, messages: list[dict[str, str]], token_limit: int, token_param: str, temperature: float | None
+    ) -> list[dict[str, Any]]:
+        body: dict[str, Any] = {"messages": messages, token_param: token_limit}
+        if temperature is not None:
+            body["temperature"] = temperature
+        deployments = {
+            "name": "deployments",
+            "url": (
+                f"{self.endpoint}/openai/deployments/{quote(self.deployment)}"
+                f"/chat/completions?api-version={quote(self.api_version)}"
+            ),
+            "body": body,
+        }
+        v1 = {
+            "name": "v1",
+            "url": f"{self.endpoint}/openai/v1/chat/completions",
+            "body": {"model": self.deployment, **body},
+        }
+        return [v1, deployments] if self.prefer_v1 else [deployments, v1]
+
+    def _post(self, route: dict[str, Any], timeout_seconds: int) -> dict[str, Any]:
+        request = Request(
+            url=route["url"],
+            method="POST",
+            data=json.dumps(route["body"]).encode("utf-8"),
+            headers={"Content-Type": "application/json", "api-key": self.api_key},
+        )
+        with urlopen(request, timeout=timeout_seconds) as response:
+            return json.loads(response.read().decode("utf-8"))
+
+    def _try_route(
+        self, route: dict[str, Any], timeout_seconds: int, token_param: str, temperature: float | None
+    ) -> tuple[str, str, str | None]:
+        """One route with retries -> (content, error, signal).
+
+        signal: "token_param" / "temperature" when the deployment rejects that parameter,
+        "stop" for credential errors (no point trying other routes), else None.
+        """
+        name = route["name"]
+        error = ""
+        for attempt in range(1, self.max_attempts + 1):
+            try:
+                payload = self._post(route, timeout_seconds)
+            except HTTPError as exc:  # pragma: no cover
+                try:
+                    raw_body = exc.read().decode("utf-8", errors="replace")
+                except Exception:
+                    raw_body = ""
+                error = f"{name}: {f'{exc} {raw_body}'.strip()}"
+                raw_lower = raw_body.lower()
+                if exc.code == 400:
+                    if "unsupported parameter" in raw_lower and f"'{token_param}'" in raw_lower:
+                        return "", error, "token_param"
+                    if "unsupported value" in raw_lower and "'temperature'" in raw_lower and temperature is not None:
+                        return "", error, "temperature"
+                if exc.code in (401, 403):  # invalid credentials fail fast
+                    return "", error, "stop"
+                if exc.code == 404:  # endpoint style doesn't match: try the other route
+                    break
+                if exc.code in _AOAI_RETRY_HTTP_CODES and attempt < self.max_attempts:
+                    delay = common.retry_after_seconds(exc)
+                    time.sleep(min(2 ** (attempt - 1), 8) if delay is None else delay)
+                    continue
+                break
+            except Exception as exc:  # pragma: no cover  (URLError and anything else)
+                timed_out = _is_timeout_like_error(exc)
+                if timed_out and attempt < self.max_attempts:
+                    time.sleep(min(2 ** (attempt - 1), 8))
+                    continue
+                error = (
+                    f"{name}: timed out after {self.max_attempts} attempts ({exc})" if timed_out else f"{name}: {exc}"
+                )
+                break
+            else:
+                content, content_error = _extract_ai_text_from_payload(payload)
+                return (content, "", None) if content else ("", f"{name}: {content_error}", None)
+        return "", error, None
+
+    def complete(self, messages: list[dict[str, str]], token_limit: int, timeout_seconds: int) -> tuple[str, str]:
+        """Return (content, errors); content is empty when every combination failed."""
+        errors: list[str] = []
+        for temperature in _aoai_temperature_candidates(self.deployment):
+            temperature_unsupported = False
+            for token_param in _aoai_token_param_candidates(self.deployment):
+                signal: str | None = None
+                for route in self._routes(messages, token_limit, token_param, temperature):
+                    content, error, signal = self._try_route(route, timeout_seconds, token_param, temperature)
+                    if content:
+                        return content, ""
+                    if error:
+                        errors.append(error)
+                    if signal:
+                        break
+                if signal == "stop":
+                    return "", " | ".join(errors).strip()
+                if signal == "temperature":
+                    temperature_unsupported = True
+                    break
+                if signal != "token_param":
+                    break  # only try the alternate token parameter when the current one is unsupported
+            if not temperature_unsupported:
+                break
+        return "", " | ".join(errors).strip()
+
+
+def _compact_change_records(
+    changes: list[ChangeItem], repo_root: str, baseline_branch: str, drift_branch: str
+) -> list[dict[str, Any]]:
+    """Highest-risk changes (max 80) as the per-change records sent to the model."""
+    candidates = [
+        item for item in changes if not common.is_doc_like(item.path) and not common.is_report_like(item.path)
     ]
-    if not ai_candidates:
-        return (None, "AI summary skipped: only report/documentation changes detected")
-
-    max_items = min(80, len(ai_candidates))
     shortlist = sorted(
-        ai_candidates,
+        candidates,
         key=lambda item: (
             -item.risk_score,
             0 if item.operation == "Deleted" else 1,
             0 if "conditional access" in item.path.lower() else 1,
             item.path.lower(),
         ),
-    )[:max_items]
-    compact_changes = []
+    )[:80]
+    records: list[dict[str, Any]] = []
     for item in shortlist:
         baseline_path = item.old_path if item.operation == "Renamed" and item.old_path else item.path
         old_excerpt = _load_policy_excerpt(repo_root, baseline_branch, baseline_path)
         new_excerpt = _load_policy_excerpt(repo_root, drift_branch, item.path)
-
         semantic_change = _extract_semantic_change(old_excerpt, new_excerpt, item.path)
         old_fingerprint = _policy_fingerprint(old_excerpt)
         new_fingerprint = _policy_fingerprint(new_excerpt)
-
-        compact_changes.append(
+        source = _classify_change_source(item, semantic_change)
+        records.append(
             {
                 "operation": item.operation,
                 "path": item.path,
@@ -1636,246 +1711,123 @@ def _call_azure_openai(
                 "old_fingerprint": old_fingerprint,
                 "new_fingerprint": new_fingerprint,
                 "fingerprint_changed": old_fingerprint != new_fingerprint,
+                "change_source": source["label"],
+                "change_source_reasons": source["reasons"],
+                "change_source_scores": {
+                    "admin": source["admin_score"],
+                    "infrastructure": source["infrastructure_score"],
+                },
             }
         )
-        source = _classify_change_source(item, semantic_change)
-        compact_changes[-1]["change_source"] = source["label"]
-        compact_changes[-1]["change_source_reasons"] = source["reasons"]
-        compact_changes[-1]["change_source_scores"] = {
-            "admin": source["admin_score"],
-            "infrastructure": source["infrastructure_score"],
-        }
+    return records
 
-    change_facts = _build_change_facts(changes)
+
+def _chat_messages(system_suffix: str, payload: dict[str, Any]) -> list[dict[str, str]]:
+    return [
+        {"role": "system", "content": _reviewer_system_prompt() + system_suffix},
+        {"role": "user", "content": json.dumps(payload, ensure_ascii=True)},
+    ]
+
+
+def _fallback_reason(last_error: str) -> str:
+    if "finish_reason=length" in last_error:
+        return (
+            f"Azure OpenAI response was cut by token limit ({last_error}); "
+            "consider increasing PR_AI_MAX_TOKENS"
+        )
+    if not last_error:
+        return "Azure OpenAI returned no usable text output"
+    return f"Azure OpenAI unavailable ({last_error})"
+
+
+def _call_azure_openai(
+    changes: list[ChangeItem],
+    deterministic_summary: str,
+    workload: str,
+    repo_root: str,
+    baseline_branch: str,
+    drift_branch: str,
+) -> tuple[str | None, str | None]:
+    """Reviewer narrative via Azure OpenAI -> (text, error).
+
+    Escalation: full payload; on timeout a compact payload; then (unless the failure
+    was an auth error) a minimal payload; finally a deterministic fallback narrative.
+    """
+    if _env("ENABLE_PR_AI_SUMMARY", required=False, default="true").lower() != "true":
+        return (None, None)
+
+    endpoint = _env("AZURE_OPENAI_ENDPOINT", required=False)
+    deployment = _env("AZURE_OPENAI_DEPLOYMENT", required=False)
+    api_key = _env("AZURE_OPENAI_API_KEY", required=False)
+    if not endpoint or not deployment or not api_key:
+        return (None, "Azure OpenAI is not configured (endpoint/deployment/api-key missing)")
+
+    max_ai_tokens = max(256, common.env_int("PR_AI_MAX_TOKENS", 1200))
+    ai_timeout = max(10, common.env_int("PR_AI_REQUEST_TIMEOUT_SECONDS", 60))
+    compact_timeout = max(ai_timeout, common.env_int("PR_AI_COMPACT_TIMEOUT_SECONDS", max(90, ai_timeout)))
+    minimal_timeout = max(compact_timeout, common.env_int("PR_AI_MINIMAL_TIMEOUT_SECONDS", max(120, compact_timeout)))
+    client = _AzureOpenAIClient(
+        endpoint=endpoint,
+        deployment=deployment,
+        api_key=api_key,
+        api_version=_env("AZURE_OPENAI_API_VERSION", required=False, default="2024-12-01-preview"),
+        max_attempts=max(1, common.env_int("PR_AI_REQUEST_MAX_ATTEMPTS", 3)),
+    )
+
+    if not any(not common.is_doc_like(c.path) and not common.is_report_like(c.path) for c in changes):
+        return (None, "AI summary skipped: only report/documentation changes detected")
+
+    compact_changes = _compact_change_records(changes, repo_root, baseline_branch, drift_branch)
     change_scope = _change_scope(changes)
     security_sensitive = any(item.risk_score >= 3 for item in changes)
     top_changed_areas = _detect_hotspots(changes)
     posture_change = _classify_posture(changes)
     change_source_assessment = _build_change_source_assessment(compact_changes)
-    baseline_alignment = "proposed_change_to_authoritative_config"
-    baseline_profile = os.environ.get("SECURITY_BASELINE_PROFILE", "authoritative-main")
 
-    user_payload = {
+    user_payload: dict[str, Any] = {
         "workload": workload,
         "change_scope": change_scope,
         "security_sensitive": security_sensitive,
-        "baseline_alignment": baseline_alignment,
-        "baseline_profile": baseline_profile,
+        "baseline_alignment": "proposed_change_to_authoritative_config",
+        "baseline_profile": os.environ.get("SECURITY_BASELINE_PROFILE", "authoritative-main"),
         "posture_change": posture_change,
         "top_changed_areas": top_changed_areas,
-        "change_facts": change_facts,
+        "change_facts": _build_change_facts(changes),
         "change_source_assessment": change_source_assessment,
         "deterministic_summary": deterministic_summary,
         "instruction": _reviewer_instruction(),
     }
-    max_payload_bytes = max(16000, _env_int("PR_AI_PAYLOAD_MAX_BYTES", 120000))
     sampled_changes, payload_truncated = _fit_payload_budget(
         payload=user_payload,
         sampled_changes=compact_changes,
-        max_bytes=max_payload_bytes,
+        max_bytes=max(16000, common.env_int("PR_AI_PAYLOAD_MAX_BYTES", 120000)),
     )
     user_payload["sampled_changes"] = sampled_changes
     user_payload["sampled_changes_total"] = len(compact_changes)
     user_payload["sampled_changes_used"] = len(sampled_changes)
     user_payload["sampled_changes_truncated"] = payload_truncated
 
-    endpoint = _normalize_aoai_endpoint(endpoint)
-    prefer_v1 = endpoint.lower().endswith(".cognitiveservices.azure.com")
-
-    retry_http_codes = {408, 429, 500, 502, 503, 504}
-
-    def _routes_for(
-        messages: list[dict[str, str]],
-        token_limit: int,
-        token_param: str,
-        temperature: float | None,
-    ) -> list[dict[str, Any]]:
-        deployment_body: dict[str, Any] = {
-            "messages": messages,
-            token_param: token_limit,
-        }
-        v1_body: dict[str, Any] = {
-            "model": deployment,
-            "messages": messages,
-            token_param: token_limit,
-        }
-        if temperature is not None:
-            deployment_body["temperature"] = temperature
-            v1_body["temperature"] = temperature
-        deployment_route = {
-            "name": "deployments",
-            "url": (
-                endpoint.rstrip("/")
-                + f"/openai/deployments/{quote(deployment)}/chat/completions?api-version={quote(api_version)}"
-            ),
-            "body": deployment_body,
-        }
-        v1_route = {
-            "name": "v1",
-            "url": endpoint.rstrip("/") + "/openai/v1/chat/completions",
-            "body": v1_body,
-        }
-        return [v1_route, deployment_route] if prefer_v1 else [deployment_route, v1_route]
-
-    def _run_ai_request(
-        messages: list[dict[str, str]],
-        token_limit: int,
-        timeout_seconds: int,
-    ) -> tuple[str, str]:
-        all_errors: list[str] = []
-        token_params = _aoai_token_param_candidates(deployment)
-        temperature_candidates = _aoai_temperature_candidates(deployment)
-        for temperature in temperature_candidates:
-            temperature_unsupported = False
-            stop_after_route = False
-            for token_param in token_params:
-                route_errors: list[str] = []
-                token_param_unsupported = False
-                for route in _routes_for(messages, token_limit, token_param, temperature):
-                    route_error = ""
-                    for attempt in range(1, max_route_attempts + 1):
-                        request = Request(
-                            url=route["url"],
-                            method="POST",
-                            data=json.dumps(route["body"]).encode("utf-8"),
-                            headers={
-                                "Content-Type": "application/json",
-                                "api-key": api_key,
-                            },
-                        )
-                        try:
-                            with urlopen(request, timeout=timeout_seconds) as response:
-                                payload = json.loads(response.read().decode("utf-8"))
-                            content, content_error = _extract_ai_text_from_payload(payload)
-                            if content:
-                                return (content, "")
-                            route_error = f"{route['name']}: {content_error}"
-                            break
-                        except HTTPError as exc:  # pragma: no cover
-                            raw_body = ""
-                            try:
-                                raw_body = exc.read().decode("utf-8", errors="replace")
-                            except Exception:
-                                raw_body = ""
-                            combined = f"{exc} {raw_body}".strip()
-                            route_error = f"{route['name']}: {combined}"
-                            if exc.code == 400:
-                                raw_lower = raw_body.lower()
-                                if "unsupported parameter" in raw_lower and f"'{token_param}'" in raw_lower:
-                                    token_param_unsupported = True
-                                    break
-                                if "unsupported value" in raw_lower and "'temperature'" in raw_lower and temperature is not None:
-                                    temperature_unsupported = True
-                                    break
-                            # Try alternate route when the endpoint style doesn't match.
-                            if exc.code == 404:
-                                break
-                            # Invalid credentials/authorization should fail fast.
-                            if exc.code in (401, 403):
-                                stop_after_route = True
-                                break
-                            if exc.code in retry_http_codes and attempt < max_route_attempts:
-                                delay = _retry_after_seconds(exc)
-                                if delay is None:
-                                    delay = min(2 ** (attempt - 1), 8)
-                                time.sleep(delay)
-                                continue
-                            break
-                        except URLError as exc:  # pragma: no cover
-                            if _is_timeout_like_error(exc) and attempt < max_route_attempts:
-                                time.sleep(min(2 ** (attempt - 1), 8))
-                                continue
-                            if _is_timeout_like_error(exc):
-                                route_error = (
-                                    f"{route['name']}: timed out after {max_route_attempts} attempts ({exc})"
-                                )
-                            else:
-                                route_error = f"{route['name']}: {exc}"
-                            break
-                        except Exception as exc:  # pragma: no cover
-                            if _is_timeout_like_error(exc) and attempt < max_route_attempts:
-                                time.sleep(min(2 ** (attempt - 1), 8))
-                                continue
-                            if _is_timeout_like_error(exc):
-                                route_error = (
-                                    f"{route['name']}: timed out after {max_route_attempts} attempts ({exc})"
-                                )
-                            else:
-                                route_error = f"{route['name']}: {exc}"
-                            break
-
-                    if route_error:
-                        route_errors.append(route_error)
-                    if token_param_unsupported or stop_after_route or temperature_unsupported:
-                        break
-                all_errors.extend(route_errors)
-                if stop_after_route:
-                    break
-                if temperature_unsupported:
-                    break
-                # Only try alternate token parameter when the current one is unsupported.
-                if not token_param_unsupported:
-                    break
-            if stop_after_route:
-                break
-            # Continue to next temperature candidate only when current one is unsupported.
-            if not temperature_unsupported:
-                break
-        return ("", " | ".join(all_errors).strip())
-
-    base_messages = [
-        {
-            "role": "system",
-            "content": _reviewer_system_prompt(),
-        },
-        {"role": "user", "content": json.dumps(user_payload, ensure_ascii=True)},
-    ]
-    content, last_error = _run_ai_request(base_messages, max_ai_tokens, ai_timeout_seconds)
+    content, last_error = client.complete(_chat_messages("", user_payload), max_ai_tokens, ai_timeout)
     if content:
         return (content, None)
 
-    # If full payload times out, retry once with a compact payload.
+    # If the full payload times out, retry once with a compact payload.
     timed_out = "timed out" in last_error.lower() or "timeout" in last_error.lower()
     if timed_out and len(sampled_changes) > 12:
-        compact_limit = max(8, _env_int("PR_AI_COMPACT_CHANGE_LIMIT", 12))
-        compact_token_limit = max(256, min(max_ai_tokens, _env_int("PR_AI_COMPACT_MAX_TOKENS", 600)))
+        compact_limit = max(8, common.env_int("PR_AI_COMPACT_CHANGE_LIMIT", 12))
         compact_payload = dict(user_payload)
         compact_payload["sampled_changes"] = sampled_changes[:compact_limit]
         compact_payload["sampled_changes_used"] = len(compact_payload["sampled_changes"])
         compact_payload["sampled_changes_truncated"] = True
-        compact_messages = [
-            {
-                "role": "system",
-                "content": _reviewer_system_prompt(),
-            },
-            {"role": "user", "content": json.dumps(compact_payload, ensure_ascii=True)},
-        ]
-        compact_content, compact_error = _run_ai_request(
-            compact_messages,
-            compact_token_limit,
-            compact_timeout_seconds,
-        )
-        if compact_content:
-            return (compact_content, None)
-        last_error = f"{last_error} | compact-retry: {compact_error}".strip(" |")
+        compact_tokens = max(256, min(max_ai_tokens, common.env_int("PR_AI_COMPACT_MAX_TOKENS", 600)))
+        content, error = client.complete(_chat_messages("", compact_payload), compact_tokens, compact_timeout)
+        if content:
+            return (content, None)
+        last_error = f"{last_error} | compact-retry: {error}".strip(" |")
 
-    # Last-resort minimal prompt for reliability when richer payloads fail.
-    auth_like_error = any(marker in last_error.lower() for marker in ("401", "403", "unauthorized", "forbidden"))
-    if not auth_like_error:
-        minimal_change_limit = max(3, _env_int("PR_AI_MINIMAL_CHANGE_LIMIT", 5))
-        minimal_token_limit = max(256, min(max_ai_tokens, _env_int("PR_AI_MINIMAL_MAX_TOKENS", 400)))
-        minimal_changes = []
-        for item in sampled_changes[:minimal_change_limit]:
-            minimal_changes.append(
-                {
-                    "operation": item.get("operation"),
-                    "path": item.get("path"),
-                    "risk": item.get("risk"),
-                    "semantic_change": item.get("semantic_change"),
-                    "change_source": item.get("change_source"),
-                    "change_source_reasons": item.get("change_source_reasons"),
-                }
-            )
+    # Last resort: minimal prompt, unless the failure looks like bad credentials.
+    if not any(marker in last_error.lower() for marker in ("401", "403", "unauthorized", "forbidden")):
+        minimal_limit = max(3, common.env_int("PR_AI_MINIMAL_CHANGE_LIMIT", 5))
         minimal_payload = {
             "workload": workload,
             "change_scope": change_scope,
@@ -1884,45 +1836,35 @@ def _call_azure_openai(
             "top_changed_areas": top_changed_areas,
             "change_source_assessment": change_source_assessment,
             "deterministic_summary": _compact_deterministic_summary(deterministic_summary),
-            "changes": minimal_changes,
+            "changes": [
+                {
+                    key: item.get(key)
+                    for key in ("operation", "path", "risk", "semantic_change", "change_source", "change_source_reasons")
+                }
+                for item in sampled_changes[:minimal_limit]
+            ],
             "instruction": _minimal_reviewer_instruction(),
         }
-        minimal_messages = [
-            {
-                "role": "system",
-                "content": _reviewer_system_prompt() + " Prioritize clarity, practical risk framing, and reviewer actionability.",
-            },
-            {"role": "user", "content": json.dumps(minimal_payload, ensure_ascii=True)},
-        ]
-        minimal_content, minimal_error = _run_ai_request(
-            minimal_messages,
-            minimal_token_limit,
-            minimal_timeout_seconds,
-        )
-        if minimal_content:
-            return (minimal_content, None)
-        if minimal_error:
-            last_error = f"{last_error} | minimal-retry: {minimal_error}".strip(" |")
+        minimal_tokens = max(256, min(max_ai_tokens, common.env_int("PR_AI_MINIMAL_MAX_TOKENS", 400)))
+        messages = _chat_messages(" Prioritize clarity, practical risk framing, and reviewer actionability.", minimal_payload)
+        content, error = client.complete(messages, minimal_tokens, minimal_timeout)
+        if content:
+            return (content, None)
+        if error:
+            last_error = f"{last_error} | minimal-retry: {error}".strip(" |")
 
     print(f"WARNING: Azure OpenAI summary fallback triggered: {last_error}")
-    if "finish_reason=length" in last_error:
-        fallback_reason = (
-            f"Azure OpenAI response was cut by token limit ({last_error}); "
-            "consider increasing PR_AI_MAX_TOKENS"
-        )
-    elif not last_error:
-        fallback_reason = "Azure OpenAI returned no usable text output"
-    else:
-        fallback_reason = f"Azure OpenAI unavailable ({last_error})"
-    fallback = _build_fallback_narrative(
-        workload=workload,
-        changes=changes,
-        compact_changes=compact_changes,
-        top_changed_areas=top_changed_areas,
-        change_source_assessment=change_source_assessment,
-        fallback_reason=fallback_reason,
+    return (
+        _build_fallback_narrative(
+            workload=workload,
+            changes=changes,
+            compact_changes=compact_changes,
+            top_changed_areas=top_changed_areas,
+            change_source_assessment=change_source_assessment,
+            fallback_reason=_fallback_reason(last_error),
+        ),
+        None,
     )
-    return (fallback, None)
 
 
 def _upsert_marked_block(description: str, block: str, start_marker: str, end_marker: str) -> str:
@@ -2128,29 +2070,6 @@ def _find_marked_thread(threads: list[dict[str, Any]], marker: str) -> dict[str,
     return None
 
 
-def _thread_status_code(thread: dict[str, Any]) -> int:
-    status = thread.get("status")
-    if isinstance(status, int):
-        return status
-    if isinstance(status, str):
-        lowered = status.strip().lower()
-        mapping = {
-            "active": THREAD_STATUS_ACTIVE,
-            "fixed": THREAD_STATUS_FIXED,
-            "wontfix": THREAD_STATUS_WONT_FIX,
-            "closed": THREAD_STATUS_CLOSED,
-            "bydesign": THREAD_STATUS_BY_DESIGN,
-            "pending": THREAD_STATUS_PENDING,
-        }
-        return mapping.get(lowered, THREAD_STATUS_ACTIVE)
-    return THREAD_STATUS_ACTIVE
-
-
-def _is_thread_resolved(thread: dict[str, Any]) -> bool:
-    status = _thread_status_code(thread)
-    return status in (THREAD_STATUS_FIXED, THREAD_STATUS_WONT_FIX, THREAD_STATUS_CLOSED, THREAD_STATUS_BY_DESIGN)
-
-
 def _extract_thread_ticket(comments: list[dict[str, Any]], ticket_re: re.Pattern[str]) -> str:
     for comment in comments:
         content = str(comment.get("content", "") or "")
@@ -2195,7 +2114,7 @@ def _create_ticket_thread(
                     "commentType": 1,
                 }
             ],
-            "status": THREAD_STATUS_ACTIVE,
+            "status": common.THREAD_STATUS_ACTIVE,
         },
     )
 
@@ -2245,7 +2164,7 @@ def _create_ai_review_thread(
                     "commentType": 1,
                 }
             ],
-            "status": THREAD_STATUS_ACTIVE,
+            "status": common.THREAD_STATUS_ACTIVE,
         },
     )
 
@@ -2298,8 +2217,8 @@ def _sync_full_ai_review_thread(
         _create_ai_review_thread(repo_api, pr_id, token, workload, ai_summary)
         return True
 
-    if _is_thread_resolved(thread):
-        _set_thread_status(repo_api, pr_id, thread_id, token, THREAD_STATUS_ACTIVE)
+    if common.is_thread_resolved(thread):
+        _set_thread_status(repo_api, pr_id, thread_id, token, common.THREAD_STATUS_ACTIVE)
     _add_thread_comment(repo_api, pr_id, thread_id, token, desired_content)
     return True
 
@@ -2338,7 +2257,7 @@ def _create_deterministic_thread(
                     "commentType": 1,
                 }
             ],
-            "status": THREAD_STATUS_ACTIVE,
+            "status": common.THREAD_STATUS_ACTIVE,
         },
     )
 
@@ -2371,8 +2290,8 @@ def _sync_deterministic_thread(
         _create_deterministic_thread(repo_api, pr_id, token, workload, deterministic_summary)
         return True
 
-    if _is_thread_resolved(thread):
-        _set_thread_status(repo_api, pr_id, thread_id, token, THREAD_STATUS_ACTIVE)
+    if common.is_thread_resolved(thread):
+        _set_thread_status(repo_api, pr_id, thread_id, token, common.THREAD_STATUS_ACTIVE)
     _add_thread_comment(repo_api, pr_id, thread_id, token, desired_content)
     return True
 
@@ -2395,9 +2314,9 @@ def _close_deterministic_thread(
     thread_id = _thread_id(thread)
     if thread_id <= 0:
         return False
-    if _is_thread_resolved(thread):
+    if common.is_thread_resolved(thread):
         return False
-    _set_thread_status(repo_api, pr_id, thread_id, token, THREAD_STATUS_CLOSED)
+    _set_thread_status(repo_api, pr_id, thread_id, token, common.THREAD_STATUS_CLOSED)
     return True
 
 
@@ -2445,7 +2364,7 @@ def _create_reviewer_guide_thread(
                     "commentType": 1,
                 }
             ],
-            "status": THREAD_STATUS_ACTIVE,
+            "status": common.THREAD_STATUS_ACTIVE,
         },
     )
 
@@ -2477,8 +2396,8 @@ def _sync_reviewer_guide_thread(
         _create_reviewer_guide_thread(repo_api, pr_id, token, workload)
         return True
 
-    if _is_thread_resolved(thread):
-        _set_thread_status(repo_api, pr_id, thread_id, token, THREAD_STATUS_ACTIVE)
+    if common.is_thread_resolved(thread):
+        _set_thread_status(repo_api, pr_id, thread_id, token, common.THREAD_STATUS_ACTIVE)
     _add_thread_comment(repo_api, pr_id, thread_id, token, desired_content)
     return True
 
@@ -2532,7 +2451,7 @@ def _build_ticket_change_context(
     context: dict[str, tuple[str, str]] = {}
 
     for item in changes:
-        if _is_doc_like(item.path) or _is_report_like(item.path):
+        if common.is_doc_like(item.path) or common.is_report_like(item.path):
             continue
         baseline_path = item.old_path if item.operation == "Renamed" and item.old_path else item.path
         old_excerpt = _load_policy_excerpt(repo_root, baseline_branch, baseline_path)
@@ -2558,7 +2477,7 @@ def _enforce_change_ticket_threads(
     change_context: dict[str, tuple[str, str]],
 ) -> tuple[int, int]:
     tracked_paths = sorted(
-        {item.path for item in changes if not _is_doc_like(item.path) and not _is_report_like(item.path)}
+        {item.path for item in changes if not common.is_doc_like(item.path) and not common.is_report_like(item.path)}
     )
     tracked_set = set(tracked_paths)
     _debug(f"Tracked changed paths: count={len(tracked_paths)}")
@@ -2591,11 +2510,11 @@ def _enforce_change_ticket_threads(
     for path, thread in auto_threads_by_path.items():
         if path in tracked_set:
             continue
-        if not _is_thread_resolved(thread):
+        if not common.is_thread_resolved(thread):
             thread_id = _thread_id(thread)
             if thread_id > 0:
                 _debug(f"Closing stale auto thread: thread_id={thread_id}, path={path}")
-                _set_thread_status(repo_api, pr_id, thread_id, token, THREAD_STATUS_CLOSED)
+                _set_thread_status(repo_api, pr_id, thread_id, token, common.THREAD_STATUS_CLOSED)
                 closed_count += 1
 
     created_count = 0
@@ -2615,11 +2534,11 @@ def _enforce_change_ticket_threads(
             )
             created_count += 1
         else:
-            if _is_thread_resolved(thread):
+            if common.is_thread_resolved(thread):
                 thread_id = _thread_id(thread)
                 if thread_id > 0:
                     _debug(f"Re-opening resolved auto thread for changed path: thread_id={thread_id}, path={path}")
-                    _set_thread_status(repo_api, pr_id, thread_id, token, THREAD_STATUS_ACTIVE)
+                    _set_thread_status(repo_api, pr_id, thread_id, token, common.THREAD_STATUS_ACTIVE)
                     _add_thread_comment(
                         repo_api=repo_api,
                         pr_id=pr_id,
@@ -2651,10 +2570,301 @@ def _enforce_change_ticket_threads(
                     )
             _debug(
                 f"Auto thread already exists for path={path} "
-                f"(thread_id={_thread_id(thread)}, resolved={_is_thread_resolved(thread)})"
+                f"(thread_id={_thread_id(thread)}, resolved={common.is_thread_resolved(thread)})"
             )
 
     return (created_count, closed_count)
+
+
+def _build_summary_block(
+    workload: str,
+    deterministic: str,
+    ai_summary: str | None,
+    ai_error: str | None,
+    level: str,
+) -> str:
+    """Auto-summary block for the PR description.
+
+    level: "full" (everything inline), "compact" (short deterministic summary, AI inline),
+    "compact_thread" (short deterministic summary, AI narrative in a thread) or
+    "ultra" (short deterministic summary, everything else in threads).
+    """
+    lines = [
+        AUTO_BLOCK_START,
+        f"## Automated Review Summary ({workload})",
+        "",
+        f"- **Summary Version:** `{AUTO_SUMMARY_VERSION}`",
+    ]
+    if level == "full":
+        lines.append(deterministic)
+        if ai_summary:
+            lines.extend(["", "### AI Reviewer Narrative", _format_ai_narrative_markdown(ai_summary)])
+        elif ai_error:
+            lines.extend(["", f"_AI summary unavailable: {ai_error}_"])
+        lines.append(AUTO_BLOCK_END)
+        return "\n".join(lines)
+
+    if level == "ultra":
+        ai_block = COMPACT_AI_THREAD_NOTE
+    elif ai_summary:
+        narrative = _format_ai_narrative_markdown(ai_summary) if level == "compact" else COMPACT_AI_THREAD_NOTE
+        ai_block = "\n### AI Reviewer Narrative\n" + narrative
+    elif ai_error:
+        ai_block = f"\n_AI summary unavailable: {ai_error}_"
+    else:
+        ai_block = ""
+    lines.extend(
+        [
+            _compact_deterministic_summary(deterministic),
+            "",
+            COMPACT_DETERMINISTIC_THREAD_NOTE,
+            ai_block,
+            AUTO_BLOCK_END,
+        ]
+    )
+    return "\n".join(lines)
+
+
+def _description_with_block(current_description: str, block: str, tidy_reviewer_guide: bool) -> str:
+    description = _upsert_auto_block(current_description, block)
+    # Cleanup legacy description-based ticket checklist if present.
+    description = _remove_marked_block(description, TICKET_BLOCK_START, TICKET_BLOCK_END)
+    if tidy_reviewer_guide:
+        # Strip legacy long reviewer guide and ensure compact note is present.
+        description = _compact_reviewer_guide(description)
+        description = _append_reviewer_guide_note(description)
+    return description
+
+
+@dataclass
+class DescriptionUpdate:
+    summary_updated: bool
+    final_description: str
+    compacted: bool  # description could not hold the full summary
+    ai_moved_to_thread: bool
+
+
+def _publish_description(
+    *,
+    workload: str,
+    deterministic: str,
+    ai_summary: str | None,
+    ai_error: str | None,
+    current_description: str,
+    patch_url: str,
+    patch_title: str,
+    token: str,
+) -> DescriptionUpdate:
+    """Write the summary into the PR description, degrading full -> compact -> ultra on size limits."""
+    limit = ADO_PR_DESCRIPTION_MAX_LEN - 100
+
+    def _description(level: str) -> str:
+        block = _build_summary_block(workload, deterministic, ai_summary, ai_error, level)
+        return _description_with_block(current_description, block, tidy_reviewer_guide=level in {"full", "compact"})
+
+    def _patch(description: str) -> None:
+        _request_json(patch_url, token=token, method="PATCH", body={"title": patch_title, "description": description})
+
+    updated = _description("full")
+    if updated == current_description:
+        return DescriptionUpdate(False, updated, len(updated) > limit, False)
+
+    if len(updated) <= limit:
+        try:
+            _patch(updated)
+            return DescriptionUpdate(True, updated, False, False)
+        except RuntimeError as exc:
+            if not _is_description_limit_error(exc):
+                raise
+
+    # Compact deterministic summary first; the AI narrative stays inline when it fits.
+    ai_moved_to_thread = False
+    compact = _description("compact")
+    if len(compact) > limit:
+        ai_moved_to_thread = True
+        compact = _description("compact_thread")
+
+    if ai_moved_to_thread:
+        print(
+            "INFO: Full PR summary exceeds Azure DevOps description limit; "
+            "using compact summary in description and posting full details to PR threads."
+        )
+    else:
+        print(
+            "INFO: Full PR summary exceeds Azure DevOps description limit; "
+            "using compact deterministic summary in description, keeping AI narrative inline, "
+            "and posting full deterministic details to a PR thread."
+        )
+    try:
+        _patch(compact)
+        return DescriptionUpdate(True, compact, True, ai_moved_to_thread)
+    except RuntimeError as exc:
+        if not _is_description_limit_error(exc):
+            raise
+    print("WARNING: Compact summary still too large; retrying with ultra-compact block.")
+    ultra = _description("ultra")
+    _patch(ultra)
+    return DescriptionUpdate(True, ultra, True, ai_moved_to_thread)
+
+
+def _log_thread_sync(synced: bool, pr_id: Any, workload: str, what: str, up_to_date_msg: str = "") -> None:
+    if synced:
+        print(f"Updated {what} for PR #{pr_id} ({workload}).")
+    elif up_to_date_msg:
+        print(f"{up_to_date_msg} for PR #{pr_id} ({workload}).")
+
+
+def _sync_summary_threads(
+    *,
+    repo_api: str,
+    pr_id: int,
+    token: str,
+    workload: str,
+    deterministic: str,
+    ai_summary: str | None,
+    update: DescriptionUpdate,
+) -> None:
+    """Keep the full-detail PR threads consistent with what the description holds. Never raises."""
+    common_args = {"repo_api": repo_api, "pr_id": pr_id, "token": token, "workload": workload}
+    if update.compacted:
+        try:
+            synced = _sync_deterministic_thread(**common_args, deterministic_summary=deterministic)
+            _log_thread_sync(
+                synced, pr_id, workload, "full deterministic summary thread",
+                "Full deterministic summary thread already up to date",
+            )
+        except Exception as exc:
+            print(f"WARNING: Failed to sync full deterministic summary thread for PR #{pr_id}: {exc}")
+    else:
+        try:
+            if _close_deterministic_thread(**common_args):
+                print(
+                    f"Closed full deterministic summary thread for PR #{pr_id} ({workload}) "
+                    "because description now fits."
+                )
+        except Exception as exc:
+            print(f"WARNING: Failed to close deterministic summary thread for PR #{pr_id}: {exc}")
+
+    print(
+        f"Updated automated review summary for PR #{pr_id} ({workload})."
+        if update.summary_updated
+        else f"Automated review summary already up to date for PR #{pr_id} ({workload})."
+    )
+    if ai_summary and update.ai_moved_to_thread:
+        try:
+            synced = _sync_full_ai_review_thread(**common_args, ai_summary=ai_summary)
+            _log_thread_sync(
+                synced, pr_id, workload, "full AI reviewer narrative thread",
+                "Full AI reviewer narrative thread already up to date",
+            )
+        except Exception as exc:
+            print(f"WARNING: Failed to sync full AI reviewer narrative thread for PR #{pr_id}: {exc}")
+    try:
+        synced = _sync_reviewer_guide_thread(**common_args)
+        _log_thread_sync(synced, pr_id, workload, "reviewer guide thread", "Reviewer guide thread already up to date")
+    except Exception as exc:
+        print(f"WARNING: Failed to sync reviewer guide thread for PR #{pr_id}: {exc}")
+
+
+def _run_ticket_gate(
+    *,
+    enabled: bool,
+    repo_api: str,
+    pr_id: Any,
+    token: str,
+    repo_root: str,
+    baseline_branch: str,
+    drift_branch: str,
+    changes: list[ChangeItem],
+) -> None:
+    if not enabled:
+        print("Change-needed thread sync disabled (set REQUIRE_CHANGE_TICKETS=true).")
+        return
+    ticket_pattern = _env("CHANGE_TICKET_REGEX", required=False, default=r"[A-Z][A-Z0-9]+-\d+")
+    change_context = _build_ticket_change_context(
+        repo_root=repo_root,
+        baseline_branch=baseline_branch,
+        drift_branch=drift_branch,
+        changes=changes,
+    )
+    created_count, closed_count = _enforce_change_ticket_threads(
+        repo_api=repo_api,
+        pr_id=pr_id,
+        token=token,
+        changes=changes,
+        ticket_pattern=ticket_pattern,
+        change_context=change_context,
+    )
+    print(
+        "Change-needed thread sync complete: "
+        f"created={created_count}, closed_stale={closed_count}. "
+        "Merge policy should enforce unresolved thread handling."
+    )
+
+
+def _fetch_drift_branch(repo_root: str, baseline_branch: str, drift_branch: str) -> bool:
+    """Fetch both branches; False when the drift branch does not exist on origin."""
+    _run_git(repo_root, ["fetch", "--quiet", "origin", baseline_branch])
+    try:
+        _run_git(repo_root, ["fetch", "--quiet", "origin", drift_branch])
+    except RuntimeError as exc:
+        message = str(exc).lower()
+        if "couldn't find remote ref" in message or "could not find remote ref" in message:
+            print(f"Drift branch '{drift_branch}' not found on origin; skipping summary update.")
+            return False
+        raise
+    return True
+
+
+def _find_active_rolling_pr(repo_api: str, token: str, source_ref: str, target_ref: str) -> dict[str, Any] | None:
+    query = urlencode(
+        {
+            "searchCriteria.status": "active",
+            "searchCriteria.sourceRefName": source_ref,
+            "searchCriteria.targetRefName": target_ref,
+            "api-version": "7.1",
+        },
+        safe="/",
+    )
+    items = _request_json(f"{repo_api}/pullrequests?{query}", token=token).get("value", [])
+    return items[0] if items else None
+
+
+def _summary_is_current(
+    *,
+    workload: str,
+    pr_id: Any,
+    current_description: str,
+    changes_fingerprint: str,
+    deterministic: str,
+) -> bool:
+    """True when the description already holds this summary; otherwise logs why it is refreshed."""
+    existing_fingerprint = _existing_change_fingerprint(current_description)
+    if not existing_fingerprint or existing_fingerprint != changes_fingerprint:
+        return False
+    existing_summary_version = _existing_summary_version(current_description)
+    current_auto_body = _auto_block_body(current_description)
+    deterministic_present = bool(current_auto_body) and (
+        deterministic in current_auto_body or _compact_deterministic_summary(deterministic) in current_auto_body
+    )
+    ai_fallback_present = _auto_block_contains_ai_fallback(current_auto_body)
+    refresh_on_fallback = _env_bool("PR_AI_FORCE_REFRESH_ON_FALLBACK", default=True)
+    version_matches = existing_summary_version == AUTO_SUMMARY_VERSION
+    retry_ai = deterministic_present and refresh_on_fallback and ai_fallback_present
+
+    prefix = f"Automated review summary fingerprint unchanged for PR #{pr_id} ({workload})"
+    if deterministic_present and version_matches and not (refresh_on_fallback and ai_fallback_present):
+        return True
+    if retry_ai:
+        print(f"{prefix}, but prior AI fallback marker detected; retrying AI narrative refresh.")
+    elif not version_matches:
+        print(
+            f"{prefix}, but summary version changed "
+            f"({existing_summary_version or 'unversioned'} -> {AUTO_SUMMARY_VERSION}); refreshing description."
+        )
+    else:
+        print(f"{prefix}, but summary format/content changed; refreshing description.")
+    return False
 
 
 def main() -> int:
@@ -2674,8 +2884,8 @@ def main() -> int:
     )
 
     try:
-        baseline_branch = _normalize_branch_name(args.baseline_branch)
-        drift_branch = _normalize_branch_name(args.drift_branch)
+        baseline_branch = common.normalize_branch(args.baseline_branch)
+        drift_branch = common.normalize_branch(args.drift_branch)
 
         token = _env("SYSTEM_ACCESSTOKEN")
         collection_uri = _env("SYSTEM_COLLECTIONURI").rstrip("/")
@@ -2686,36 +2896,18 @@ def main() -> int:
         target_ref = f"refs/heads/{baseline_branch}"
         repo_api = f"{collection_uri}/{project}/_apis/git/repositories/{repository_id}"
 
-        query = urlencode(
-            {
-                "searchCriteria.status": "active",
-                "searchCriteria.sourceRefName": source_ref,
-                "searchCriteria.targetRefName": target_ref,
-                "api-version": "7.1",
-            },
-            safe="/",
-        )
-        existing = _request_json(f"{repo_api}/pullrequests?{query}", token=token)
-        items = existing.get("value", [])
-        if not items:
+        pr = _find_active_rolling_pr(repo_api, token, source_ref, target_ref)
+        if not pr:
             print("No active rolling PR found; skipping summary update.")
             return 0
-
-        pr = items[0]
         pr_id = pr.get("pullRequestId")
         if not pr_id:
             print("Active PR without pullRequestId; skipping summary update.")
             return 0
         _debug(f"Active rolling PR detected: pr_id={pr_id}, source={source_ref}, target={target_ref}")
 
-        _run_git(args.repo_root, ["fetch", "--quiet", "origin", baseline_branch])
-        try:
-            _run_git(args.repo_root, ["fetch", "--quiet", "origin", drift_branch])
-        except RuntimeError as exc:
-            if "couldn't find remote ref" in str(exc).lower() or "could not find remote ref" in str(exc).lower():
-                print(f"Drift branch '{drift_branch}' not found on origin; skipping summary update.")
-                return 0
-            raise
+        if not _fetch_drift_branch(args.repo_root, baseline_branch, drift_branch):
+            return 0
         diff_output = _run_diff_name_status(args.repo_root, baseline_branch, drift_branch)
         changes = _parse_changes(diff_output, args.backup_folder, args.reports_subdir)
         _debug(f"Parsed non-doc/report changes for summary: count={len(changes)}")
@@ -2731,7 +2923,6 @@ def main() -> int:
                 "Ignored operational-only drift changes from summary/ticket scope: "
                 f"{ignored_operational_count}"
             )
-        changes_fingerprint = _changes_fingerprint(changes).lower()
         deterministic = _build_deterministic_summary(
             changes,
             drift_branch,
@@ -2742,76 +2933,40 @@ def main() -> int:
         full_pr = _request_json(f"{repo_api}/pullrequests/{pr_id}?api-version=7.1", token=token)
         current_description = full_pr.get("description") or ""
         pr_is_draft = bool(full_pr.get("isDraft"))
-        existing_fingerprint = _existing_change_fingerprint(current_description)
-        existing_summary_version = _existing_summary_version(current_description)
-        current_auto_body = _auto_block_body(current_description)
-        compact_deterministic = _compact_deterministic_summary(deterministic)
-        deterministic_already_present = (
-            (deterministic in current_auto_body)
-            or (compact_deterministic in current_auto_body)
-        ) if current_auto_body else False
-        ai_fallback_in_current_block = _auto_block_contains_ai_fallback(current_auto_body)
-        refresh_on_fallback = _env_bool("PR_AI_FORCE_REFRESH_ON_FALLBACK", default=True)
-        if existing_fingerprint and existing_fingerprint == changes_fingerprint:
-            summary_version_matches = existing_summary_version == AUTO_SUMMARY_VERSION
-            should_skip = deterministic_already_present and summary_version_matches
-            if refresh_on_fallback and ai_fallback_in_current_block:
-                should_skip = False
+        patch_title = full_pr.get("title") or pr.get("title") or f"{args.workload} drift review (rolling)"
+        ticket_gate = dict(
+            enabled=require_ticket_gate,
+            repo_api=repo_api,
+            pr_id=pr_id,
+            token=token,
+            repo_root=args.repo_root,
+            baseline_branch=baseline_branch,
+            drift_branch=drift_branch,
+            changes=changes,
+        )
 
-            if should_skip:
-                published = _publish_draft_pr(
-                    repo_api=repo_api,
-                    token=token,
-                    pr_id=int(pr_id),
-                    title=full_pr.get("title") or pr.get("title") or f"{args.workload} drift review (rolling)",
-                    description=current_description,
-                    is_draft=pr_is_draft,
-                )
-                if published:
-                    print(f"Published draft PR #{pr_id} after confirming summary was already up to date.")
-                print(
-                    f"Automated review summary fingerprint unchanged for PR #{pr_id} "
-                    f"({args.workload}); skipping description update."
-                )
-                if require_ticket_gate:
-                    ticket_pattern = _env("CHANGE_TICKET_REGEX", required=False, default=r"[A-Z][A-Z0-9]+-\d+")
-                    change_context = _build_ticket_change_context(
-                        repo_root=args.repo_root,
-                        baseline_branch=baseline_branch,
-                        drift_branch=drift_branch,
-                        changes=changes,
-                    )
-                    created_count, closed_count = _enforce_change_ticket_threads(
-                        repo_api=repo_api,
-                        pr_id=pr_id,
-                        token=token,
-                        changes=changes,
-                        ticket_pattern=ticket_pattern,
-                        change_context=change_context,
-                    )
-                    print(
-                        "Change-needed thread sync complete: "
-                        f"created={created_count}, closed_stale={closed_count}. "
-                        "Merge policy should enforce unresolved thread handling."
-                    )
-                else:
-                    print("Change-needed thread sync disabled (set REQUIRE_CHANGE_TICKETS=true).")
-                return 0
-            if deterministic_already_present and refresh_on_fallback and ai_fallback_in_current_block:
-                print(
-                    f"Automated review summary fingerprint unchanged for PR #{pr_id} ({args.workload}), "
-                    "but prior AI fallback marker detected; retrying AI narrative refresh."
-                )
-            elif not summary_version_matches:
-                print(
-                    f"Automated review summary fingerprint unchanged for PR #{pr_id} ({args.workload}), "
-                    f"but summary version changed ({existing_summary_version or 'unversioned'} -> {AUTO_SUMMARY_VERSION}); refreshing description."
-                )
-            else:
-                print(
-                    f"Automated review summary fingerprint unchanged for PR #{pr_id} ({args.workload}), "
-                    "but summary format/content changed; refreshing description."
-                )
+        if _summary_is_current(
+            workload=args.workload,
+            pr_id=pr_id,
+            current_description=current_description,
+            changes_fingerprint=_changes_fingerprint(changes).lower(),
+            deterministic=deterministic,
+        ):
+            if _publish_draft_pr(
+                repo_api=repo_api,
+                token=token,
+                pr_id=int(pr_id),
+                title=patch_title,
+                description=current_description,
+                is_draft=pr_is_draft,
+            ):
+                print(f"Published draft PR #{pr_id} after confirming summary was already up to date.")
+            print(
+                f"Automated review summary fingerprint unchanged for PR #{pr_id} "
+                f"({args.workload}); skipping description update."
+            )
+            _run_ticket_gate(**ticket_gate)
+            return 0
 
         ai_summary, ai_error = _call_azure_openai(
             changes,
@@ -2821,278 +2976,46 @@ def main() -> int:
             baseline_branch,
             drift_branch,
         )
-
-        auto_lines = [
-            AUTO_BLOCK_START,
-            f"## Automated Review Summary ({args.workload})",
-            "",
-            f"- **Summary Version:** `{AUTO_SUMMARY_VERSION}`",
-            deterministic,
-        ]
-        if ai_summary:
-            formatted_ai = _format_ai_narrative_markdown(ai_summary)
-            auto_lines.extend(["", "### AI Reviewer Narrative", formatted_ai])
-        elif ai_error:
-            auto_lines.extend(["", f"_AI summary unavailable: {ai_error}_"])
-        auto_lines.append(AUTO_BLOCK_END)
-        auto_block = "\n".join(auto_lines)
-        updated_description = _upsert_auto_block(current_description, auto_block)
-        # Cleanup legacy description-based ticket checklist if present.
-        updated_description = _remove_marked_block(updated_description, TICKET_BLOCK_START, TICKET_BLOCK_END)
-        # Strip legacy long reviewer guide and ensure compact note is present.
-        updated_description = _compact_reviewer_guide(updated_description)
-        updated_description = _append_reviewer_guide_note(updated_description)
-
-        patch_url = f"{repo_api}/pullrequests/{pr_id}?api-version=7.1"
-        patch_title = full_pr.get("title") or pr.get("title") or f"{args.workload} drift review (rolling)"
-        summary_updated = False
-        final_description = current_description
-        description_compacted = False
-        ai_moved_to_thread = False
         print(
             f"DEBUG summary: pr_id={pr_id} workload={args.workload} "
             f"status={full_pr.get('status')} isDraft={full_pr.get('isDraft')} "
             f"mergeStatus={full_pr.get('mergeStatus')} title_len={len(patch_title)} "
-            f"current_desc_len={len(current_description or '')} updated_desc_len={len(updated_description or '')}"
+            f"current_desc_len={len(current_description)}"
         )
-        # Proactively compact if we are near the Azure DevOps PR description limit.
-        if len(updated_description) > (ADO_PR_DESCRIPTION_MAX_LEN - 100):
-            description_compacted = True
-
-        if updated_description != current_description:
-            if not description_compacted:
-                try:
-                    _request_json(
-                        patch_url,
-                        token=token,
-                        method="PATCH",
-                        body={
-                            "title": patch_title,
-                            "description": updated_description,
-                        },
-                    )
-                    summary_updated = True
-                    final_description = updated_description
-                except RuntimeError as exc:
-                    if not _is_description_limit_error(exc):
-                        raise
-                    description_compacted = True
-            if description_compacted:
-                # First, try compact deterministic + full AI inline.
-                # The Top Risk Items table is usually the bulky part; keeping AI inline
-                # often produces a description that still fits under the limit.
-                compact_ai_block = ""
-                if ai_summary:
-                    formatted_ai = _format_ai_narrative_markdown(ai_summary)
-                    compact_ai_block = "\n### AI Reviewer Narrative\n" + formatted_ai
-                elif ai_error:
-                    compact_ai_block = f"\n_AI summary unavailable: {ai_error}_"
-                compact_auto_block = "\n".join(
-                    [
-                        AUTO_BLOCK_START,
-                        f"## Automated Review Summary ({args.workload})",
-                        "",
-                        f"- **Summary Version:** `{AUTO_SUMMARY_VERSION}`",
-                        _compact_deterministic_summary(deterministic),
-                        "",
-                        COMPACT_DETERMINISTIC_THREAD_NOTE,
-                        compact_ai_block,
-                        AUTO_BLOCK_END,
-                    ]
-                )
-                compact_description = _upsert_auto_block(current_description, compact_auto_block)
-                compact_description = _remove_marked_block(
-                    compact_description, TICKET_BLOCK_START, TICKET_BLOCK_END
-                )
-                compact_description = _compact_reviewer_guide(compact_description)
-                compact_description = _append_reviewer_guide_note(compact_description)
-
-                if len(compact_description) > (ADO_PR_DESCRIPTION_MAX_LEN - 100):
-                    # Still too long — move AI to a thread as well.
-                    ai_moved_to_thread = True
-                    compact_ai_block = ""
-                    if ai_summary:
-                        compact_ai_block = "\n### AI Reviewer Narrative\n" + COMPACT_AI_THREAD_NOTE
-                    elif ai_error:
-                        compact_ai_block = f"\n_AI summary unavailable: {ai_error}_"
-                    compact_auto_block = "\n".join(
-                        [
-                            AUTO_BLOCK_START,
-                            f"## Automated Review Summary ({args.workload})",
-                            "",
-                            f"- **Summary Version:** `{AUTO_SUMMARY_VERSION}`",
-                            _compact_deterministic_summary(deterministic),
-                            "",
-                            COMPACT_DETERMINISTIC_THREAD_NOTE,
-                            compact_ai_block,
-                            AUTO_BLOCK_END,
-                        ]
-                    )
-                    compact_description = _upsert_auto_block(current_description, compact_auto_block)
-                    compact_description = _remove_marked_block(
-                        compact_description, TICKET_BLOCK_START, TICKET_BLOCK_END
-                    )
-
-                if compact_description == updated_description:
-                    raise
-                if not summary_updated:
-                    if ai_moved_to_thread:
-                        print(
-                            "INFO: Full PR summary exceeds Azure DevOps description limit; "
-                            "using compact summary in description and posting full details to PR threads."
-                        )
-                    else:
-                        print(
-                            "INFO: Full PR summary exceeds Azure DevOps description limit; "
-                            "using compact deterministic summary in description, keeping AI narrative inline, "
-                            "and posting full deterministic details to a PR thread."
-                        )
-                try:
-                    _request_json(
-                        patch_url,
-                        token=token,
-                        method="PATCH",
-                        body={
-                            "title": patch_title,
-                            "description": compact_description,
-                        },
-                    )
-                    summary_updated = True
-                    final_description = compact_description
-                except RuntimeError as compact_exc:
-                    if not _is_description_limit_error(compact_exc):
-                        raise
-                    ultra_compact_block = "\n".join(
-                        [
-                            AUTO_BLOCK_START,
-                            f"## Automated Review Summary ({args.workload})",
-                            "",
-                            f"- **Summary Version:** `{AUTO_SUMMARY_VERSION}`",
-                            _compact_deterministic_summary(deterministic),
-                            "",
-                            COMPACT_DETERMINISTIC_THREAD_NOTE,
-                            COMPACT_AI_THREAD_NOTE,
-                            AUTO_BLOCK_END,
-                        ]
-                    )
-                    ultra_compact_description = _upsert_auto_block(current_description, ultra_compact_block)
-                    ultra_compact_description = _remove_marked_block(
-                        ultra_compact_description, TICKET_BLOCK_START, TICKET_BLOCK_END
-                    )
-                    print("WARNING: Compact summary still too large; retrying with ultra-compact block.")
-                    _request_json(
-                        patch_url,
-                        token=token,
-                        method="PATCH",
-                        body={
-                            "title": patch_title,
-                            "description": ultra_compact_description,
-                        },
-                    )
-                    summary_updated = True
-                    final_description = ultra_compact_description
-        else:
-            final_description = updated_description
-
-        if description_compacted:
-            try:
-                thread_updated = _sync_deterministic_thread(
-                    repo_api=repo_api,
-                    pr_id=int(pr_id),
-                    token=token,
-                    workload=args.workload,
-                    deterministic_summary=deterministic,
-                )
-                if thread_updated:
-                    print(f"Updated full deterministic summary thread for PR #{pr_id} ({args.workload}).")
-                else:
-                    print(f"Full deterministic summary thread already up to date for PR #{pr_id} ({args.workload}).")
-            except Exception as exc:
-                print(f"WARNING: Failed to sync full deterministic summary thread for PR #{pr_id}: {exc}")
-        else:
-            try:
-                closed = _close_deterministic_thread(
-                    repo_api=repo_api,
-                    pr_id=int(pr_id),
-                    token=token,
-                    workload=args.workload,
-                )
-                if closed:
-                    print(f"Closed full deterministic summary thread for PR #{pr_id} ({args.workload}) because description now fits.")
-            except Exception as exc:
-                print(f"WARNING: Failed to close deterministic summary thread for PR #{pr_id}: {exc}")
-
-        if summary_updated:
-            print(f"Updated automated review summary for PR #{pr_id} ({args.workload}).")
-        else:
-            print(f"Automated review summary already up to date for PR #{pr_id} ({args.workload}).")
-        if ai_summary and ai_moved_to_thread:
-            try:
-                thread_updated = _sync_full_ai_review_thread(
-                    repo_api=repo_api,
-                    pr_id=int(pr_id),
-                    token=token,
-                    workload=args.workload,
-                    ai_summary=ai_summary,
-                )
-                if thread_updated:
-                    print(f"Updated full AI reviewer narrative thread for PR #{pr_id} ({args.workload}).")
-                else:
-                    print(f"Full AI reviewer narrative thread already up to date for PR #{pr_id} ({args.workload}).")
-            except Exception as exc:
-                print(f"WARNING: Failed to sync full AI reviewer narrative thread for PR #{pr_id}: {exc}")
-        try:
-            guide_updated = _sync_reviewer_guide_thread(
-                repo_api=repo_api,
-                pr_id=int(pr_id),
-                token=token,
-                workload=args.workload,
-            )
-            if guide_updated:
-                print(f"Updated reviewer guide thread for PR #{pr_id} ({args.workload}).")
-            else:
-                print(f"Reviewer guide thread already up to date for PR #{pr_id} ({args.workload}).")
-        except Exception as exc:
-            print(f"WARNING: Failed to sync reviewer guide thread for PR #{pr_id}: {exc}")
+        update = _publish_description(
+            workload=args.workload,
+            deterministic=deterministic,
+            ai_summary=ai_summary,
+            ai_error=ai_error,
+            current_description=current_description,
+            patch_url=f"{repo_api}/pullrequests/{pr_id}?api-version=7.1",
+            patch_title=patch_title,
+            token=token,
+        )
+        _sync_summary_threads(
+            repo_api=repo_api,
+            pr_id=int(pr_id),
+            token=token,
+            workload=args.workload,
+            deterministic=deterministic,
+            ai_summary=ai_summary,
+            update=update,
+        )
         if _publish_draft_pr(
             repo_api=repo_api,
             token=token,
             pr_id=int(pr_id),
             title=patch_title,
-            description=final_description,
+            description=update.final_description,
             is_draft=pr_is_draft,
         ):
             print(f"Published draft PR #{pr_id} after automated review summary update.")
-        if require_ticket_gate:
-            ticket_pattern = _env("CHANGE_TICKET_REGEX", required=False, default=r"[A-Z][A-Z0-9]+-\d+")
-            change_context = _build_ticket_change_context(
-                repo_root=args.repo_root,
-                baseline_branch=baseline_branch,
-                drift_branch=drift_branch,
-                changes=changes,
-            )
-            created_count, closed_count = _enforce_change_ticket_threads(
-                repo_api=repo_api,
-                pr_id=pr_id,
-                token=token,
-                changes=changes,
-                ticket_pattern=ticket_pattern,
-                change_context=change_context,
-            )
-            print(
-                "Change-needed thread sync complete: "
-                f"created={created_count}, closed_stale={closed_count}. "
-                "Merge policy should enforce unresolved thread handling."
-            )
-        else:
-            print("Change-needed thread sync disabled (set REQUIRE_CHANGE_TICKETS=true).")
+        _run_ticket_gate(**ticket_gate)
         return 0
     except Exception as exc:
         # Non-fatal on purpose: backup and PR flow should continue even if summary generation fails.
         print(f"WARNING: Failed to update automated review summary: {exc}", file=sys.stderr)
-        if require_ticket_gate:
-            return 1
-        return 0
+        return 1 if require_ticket_gate else 0
 
 
 if __name__ == "__main__":

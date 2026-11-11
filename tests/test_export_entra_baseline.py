@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -10,6 +11,7 @@ from unittest.mock import MagicMock, patch
 
 
 MODULE_PATH = Path(__file__).resolve().parents[1] / "scripts" / "export_entra_baseline.py"
+sys.path.insert(0, str(MODULE_PATH.parent))  # scripts import their sibling common.py
 
 
 def load_module():
@@ -90,8 +92,56 @@ class ExportEntraBaselineTests(unittest.TestCase):
     def test_normalize_resolution_error_keeps_non_transient_http_error(self) -> None:
         self.assertEqual(self.module.normalize_resolution_error("HTTP 403"), "HTTP 403")
 
+    def _resolved(self, org_name: str = "") -> dict:
+        return {
+            "appOwnerOrganizationResolved": {"displayName": org_name},
+            "resolutionStatus": {"appRoleAssignments": {"count": 0}},
+        }
+
+    def test_enterprise_enrichment_same_result_sequential_and_parallel(self) -> None:
+        def fake_enrich(item, client, by_id, lock, orgs):
+            return [{"id": "o"}], [], self._resolved("Contoso")
+
+        for workers in (1, 4):
+            with self.subTest(workers=workers):
+                items = [{"id": f"id{i}", "appId": f"app{i}"} for i in range(5)]
+                by_appid: dict = {}
+                by_id: dict = {}
+                with patch.object(self.module, "enrich_enterprise_application", side_effect=fake_enrich):
+                    warnings = self.module._enrich_enterprise_apps(
+                        items, MagicMock(), by_appid, by_id, {}, None, workers
+                    )
+                self.assertEqual(warnings, 0)
+                self.assertEqual(set(by_appid), {f"app{i}" for i in range(5)})
+                for item in items:
+                    self.assertEqual(item["ownersResolved"], [{"id": "o"}])
+                    self.assertEqual(item["appOwnerOrganizationResolved"]["displayName"], "Contoso")
+
+    def test_enterprise_enrichment_error_is_fatal_sequentially_but_recorded_in_parallel(self) -> None:
+        def boom(item, client, by_id, lock, orgs):
+            raise RuntimeError("HTTP 500")
+
+        with patch.object(self.module, "enrich_enterprise_application", side_effect=boom):
+            with self.assertRaises(RuntimeError):
+                self.module._enrich_enterprise_apps([{"id": "1"}], MagicMock(), {}, {}, {}, None, 1)
+            items = [{"id": "1", "appOwnerOrganizationId": "t"}, {"id": "2", "appOwnerOrganizationId": "t"}]
+            warnings = self.module._enrich_enterprise_apps(items, MagicMock(), {}, {}, {}, None, 2)
+        self.assertEqual(warnings, 2)
+        self.assertEqual(items[0]["ownersResolved"], [])
+        self.assertEqual(items[0]["resolutionStatus"]["owners"]["count"], 0)
+
+    def test_enterprise_enrichment_backfills_org_name_from_previous_snapshot(self) -> None:
+        previous = MagicMock()
+        previous.get.return_value = {"appOwnerOrganizationResolved": {"displayName": "Old Org"}}
+        item = {"id": "1"}
+        with patch.object(
+            self.module, "enrich_enterprise_application", return_value=([], [], self._resolved(""))
+        ):
+            self.module._enrich_enterprise_apps([item], MagicMock(), {}, {}, {}, previous, 1)
+        self.assertEqual(item["appOwnerOrganizationResolved"]["displayName"], "Old Org")
+
     def test_normalize_branch_name_ignores_unresolved_macro(self) -> None:
-        self.assertEqual(self.module._normalize_branch_name("$(DRIFT_BRANCH_ENTRA)"), "")
+        self.assertEqual(self.module.common.normalize_branch("$(DRIFT_BRANCH_ENTRA)"), "")
 
     def test_required_resource_resolution_backfills_unresolved_from_previous(self) -> None:
         current = [

@@ -9,11 +9,8 @@ import json
 import re
 from pathlib import Path
 
+from report_utils import resolve_assignment_target, safe_text
 
-GROUP_TARGET_TYPES = {
-    "#microsoft.graph.groupAssignmentTarget",
-    "#microsoft.graph.exclusionGroupAssignmentTarget",
-}
 
 
 def parse_args() -> argparse.Namespace:
@@ -32,12 +29,6 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def safe_text(value: object) -> str:
-    if value is None:
-        return ""
-    return str(value).strip()
-
-
 def slugify(value: str) -> str:
     text = safe_text(value).lower()
     text = re.sub(r"[^a-z0-9]+", "-", text).strip("-")
@@ -51,28 +42,6 @@ def infer_intent(assignment: dict, target_type: str) -> str:
     if explicit in {"exclude"}:
         return "Exclude"
     return "Include"
-
-
-def resolve_assignment_target(target: dict) -> str:
-    target_type = safe_text(target.get("@odata.type"))
-    if target_type == "#microsoft.graph.allDevicesAssignmentTarget":
-        return "All devices"
-    if target_type == "#microsoft.graph.allLicensedUsersAssignmentTarget":
-        return "All users"
-    if target_type in GROUP_TARGET_TYPES:
-        return (
-            safe_text(target.get("groupDisplayName"))
-            or safe_text(target.get("groupName"))
-            or safe_text(target.get("groupId"))
-            or "Unresolved group"
-        )
-    return (
-        safe_text(target.get("groupDisplayName"))
-        or safe_text(target.get("groupName"))
-        or safe_text(target.get("displayName"))
-        or safe_text(target.get("id"))
-        or "Unknown target"
-    )
 
 
 def summarize_assignments(payload: dict) -> dict[str, object]:

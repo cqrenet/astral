@@ -9,6 +9,8 @@ import json
 from pathlib import Path
 from typing import Any
 
+from report_utils import safe_text
+
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
@@ -24,12 +26,6 @@ def parse_args() -> argparse.Namespace:
         help="Output CSV filename (default: apps-inventory.csv).",
     )
     return parser.parse_args()
-
-
-def safe_text(value: object) -> str:
-    if value is None:
-        return ""
-    return str(value).strip()
 
 
 def summarize_owners(owners: object) -> tuple[int, str]:

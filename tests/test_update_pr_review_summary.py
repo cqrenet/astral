@@ -1142,5 +1142,60 @@ class UpdatePrReviewSummaryTests(unittest.TestCase):
         self.assertEqual(content, "Recovered via compact retry")
 
 
+class PublishDescriptionTests(unittest.TestCase):
+    """Description size fallback: full -> compact -> ultra."""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.module = load_module()
+
+    def _publish(self, patch_side_effect, deterministic="D" * 50, current=""):
+        calls: list[str] = []
+
+        def fake_request(url, token, method="GET", body=None):
+            calls.append(body["description"])
+            effect = patch_side_effect[len(calls) - 1]
+            if isinstance(effect, Exception):
+                raise effect
+            return {}
+
+        with patch.object(self.module, "_request_json", side_effect=fake_request):
+            update = self.module._publish_description(
+                workload="intune",
+                deterministic=deterministic,
+                ai_summary=None,
+                ai_error="offline",
+                current_description=current,
+                patch_url="https://x/pr",
+                patch_title="t",
+                token="tok",
+            )
+        return update, calls
+
+    def test_full_description_fits(self) -> None:
+        update, calls = self._publish([{}])
+        self.assertTrue(update.summary_updated)
+        self.assertFalse(update.compacted)
+        self.assertEqual(len(calls), 1)
+
+    def test_limit_error_falls_back_to_compact(self) -> None:
+        update, calls = self._publish([RuntimeError("PATCH failed: description too long"), {}], deterministic="D" * 3000)
+        self.assertTrue(update.summary_updated)
+        self.assertTrue(update.compacted)
+        self.assertEqual(len(calls), 2)
+        self.assertNotEqual(calls[0], calls[1])
+
+    def test_compact_limit_error_falls_back_to_ultra(self) -> None:
+        limit = RuntimeError("PATCH failed: description too long")
+        update, calls = self._publish([limit, limit, {}], deterministic="D" * 3000)
+        self.assertTrue(update.summary_updated)
+        self.assertEqual(len(calls), 3)
+        self.assertIn(self.module.COMPACT_AI_THREAD_NOTE, calls[2])
+
+    def test_non_limit_error_propagates(self) -> None:
+        with self.assertRaises(RuntimeError):
+            self._publish([RuntimeError("HTTP 500 boom")])
+
+
 if __name__ == "__main__":
     unittest.main()

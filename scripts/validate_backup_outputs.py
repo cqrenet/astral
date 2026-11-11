@@ -6,9 +6,7 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
-
-def to_bool(value: str) -> bool:
-    return str(value).strip().lower() in {"1", "true", "yes", "y", "on"}
+import common
 
 
 def parse_args() -> argparse.Namespace:
@@ -61,13 +59,13 @@ def _validate_entra(root: Path, reports_root: Path, args: argparse.Namespace, er
         errors.append(f"Missing Entra backup root: {root}")
         return
 
-    include_named_locations = to_bool(args.include_named_locations)
-    include_auth_strengths = to_bool(args.include_authentication_strengths)
-    include_conditional_access = to_bool(args.include_conditional_access)
-    include_enterprise_apps = to_bool(args.include_enterprise_applications)
-    include_enterprise_apps_effective = to_bool(args.include_enterprise_applications_effective)
-    include_app_registrations = to_bool(args.include_app_registrations)
-    include_app_registrations_effective = to_bool(args.include_app_registrations_effective)
+    include_named_locations = common.to_bool(args.include_named_locations)
+    include_auth_strengths = common.to_bool(args.include_authentication_strengths)
+    include_conditional_access = common.to_bool(args.include_conditional_access)
+    include_enterprise_apps = common.to_bool(args.include_enterprise_applications)
+    include_enterprise_apps_effective = common.to_bool(args.include_enterprise_applications_effective)
+    include_app_registrations = common.to_bool(args.include_app_registrations)
+    include_app_registrations_effective = common.to_bool(args.include_app_registrations_effective)
 
     expected_category_indexes: list[tuple[str, bool]] = [
         ("Named Locations", include_named_locations),

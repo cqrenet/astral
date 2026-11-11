@@ -5,26 +5,11 @@ from __future__ import annotations
 
 import argparse
 import json
-import subprocess
 import sys
 from pathlib import Path
+
+import common
 from typing import Any
-
-
-def _to_bool(value: str) -> bool:
-    return str(value).strip().lower() in {"1", "true", "yes", "y", "on"}
-
-
-def _run_git_show(repo_root: Path, ref: str, rel_path: str) -> str | None:
-    proc = subprocess.run(
-        ["git", "show", f"{ref}:{rel_path}"],
-        cwd=str(repo_root),
-        check=False,
-        capture_output=True,
-    )
-    if proc.returncode != 0:
-        return None
-    return proc.stdout.decode("utf-8", errors="replace")
 
 
 def _is_settings_catalog_json(file_path: Path, backup_root: Path) -> bool:
@@ -67,7 +52,7 @@ def restore_partial_settings_from_baseline(
             continue
 
         rel_path = file_path.relative_to(repo_root).as_posix()
-        baseline_text = _run_git_show(repo_root, baseline_ref, rel_path)
+        baseline_text = common.git_show_text(repo_root, baseline_ref, rel_path)
         if not baseline_text:
             unresolved.append(rel_path)
             continue
@@ -135,7 +120,7 @@ def main() -> int:
         print(f"Unresolved partial Intune Settings Catalog exports: {len(unresolved)}")
         for path in unresolved:
             print(f" - {path}")
-        if _to_bool(args.fail_on_unresolved_partial_exports):
+        if common.to_bool(args.fail_on_unresolved_partial_exports):
             return 2
     return 0
 

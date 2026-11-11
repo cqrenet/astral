@@ -4,39 +4,30 @@
 from __future__ import annotations
 
 import argparse
+import os
 import datetime as dt
 import json
 import pathlib
-import subprocess
 import sys
 import urllib.error
 import urllib.parse
 import urllib.request
+
+import common
 from collections import defaultdict
 from dataclasses import dataclass
 
 
-def _git_run(repo_root: pathlib.Path, args: list[str], check: bool = True) -> subprocess.CompletedProcess[str]:
-    proc = subprocess.run(
-        ["git", *args],
-        cwd=str(repo_root),
-        check=False,
-        capture_output=True,
-        text=True,
-    )
-    if check and proc.returncode != 0:
-        stderr = (proc.stderr or "").strip()
-        raise RuntimeError(f"git {' '.join(args)} failed ({proc.returncode}): {stderr}")
-    return proc
-
-
 def _set_output_var(name: str, value: str, is_output: bool = True) -> None:
-    suffix = ";isOutput=true" if is_output else ""
-    print(f"##vso[task.setvariable variable={name}{suffix}]{value}")
+    # Works on Azure DevOps (##vso) and GitHub Actions (GITHUB_OUTPUT / GITHUB_ENV).
+    if is_output:
+        common.ci_set_output(name, value)
+    else:
+        common.ci_set_env(name, value)
 
 
 def _warning(message: str) -> None:
-    print(f"##vso[task.logissue type=warning]{message}")
+    common.ci_log("warning", message)
 
 
 def _parse_backup_start(value: str) -> dt.datetime:
@@ -52,8 +43,8 @@ def _format_filter_datetime(value: dt.datetime) -> str:
 
 
 def _last_entra_commit_date(repo_root: pathlib.Path, depth: int = 30) -> dt.datetime | None:
-    _git_run(repo_root, ["fetch", f"--depth={depth}"], check=False)
-    proc = _git_run(
+    common.git_proc(repo_root, ["fetch", f"--depth={depth}"], check=False)
+    proc = common.git_proc(
         repo_root,
         [
             "--no-pager",
@@ -205,15 +196,15 @@ def _effective_fallback_identity(
 
 
 def _changed_files(repo_root: pathlib.Path, workload_root: str) -> list[str]:
-    proc = _git_run(repo_root, ["diff", "--cached", "--name-only", "--", workload_root])
+    proc = common.git_proc(repo_root, ["diff", "--cached", "--name-only", "--", workload_root])
     return [line.strip() for line in proc.stdout.splitlines() if line.strip()]
 
 
 def _remote_diff_is_empty(repo_root: pathlib.Path, drift_branch: str, workload_root: str) -> bool:
     remote_ref = f"refs/remotes/origin/{drift_branch}"
-    if _git_run(repo_root, ["show-ref", "--verify", "--quiet", remote_ref], check=False).returncode != 0:
+    if common.git_proc(repo_root, ["show-ref", "--verify", "--quiet", remote_ref], check=False).returncode != 0:
         return False
-    return _git_run(repo_root, ["diff", "--quiet", f"origin/{drift_branch}", "--", workload_root], check=False).returncode == 0
+    return common.git_proc(repo_root, ["diff", "--quiet", f"origin/{drift_branch}", "--", workload_root], check=False).returncode == 0
 
 
 def _build_author_groups(
@@ -284,16 +275,16 @@ def _commit_group(
 ) -> None:
     for path in files:
         print(f"\t- Adding {repo_root / path}")
-        _git_run(repo_root, ["add", "--all", "--", path])
+        common.git_proc(repo_root, ["add", "--all", "--", path])
     author_name = ", ".join(identity.name for identity in identities)
     author_email = ", ".join(identity.value for identity in identities)
     print(f"\t- Setting commit author(s): {author_name}")
-    _git_run(repo_root, ["config", "user.name", author_name])
-    _git_run(repo_root, ["config", "user.email", author_email])
+    common.git_proc(repo_root, ["config", "user.name", author_name])
+    common.git_proc(repo_root, ["config", "user.email", author_email])
     commit_date = backup_start.astimezone(dt.timezone.utc).strftime("%Y.%m.%d_%H.%M")
     commit_name = f"{commit_date} -- {author_name} (Entra)"
     print(f"\t- Creating commit '{commit_name}'")
-    _git_run(repo_root, ["commit", "-m", commit_name])
+    common.git_proc(repo_root, ["commit", "-m", commit_name])
 
 
 def main() -> int:
@@ -302,7 +293,8 @@ def main() -> int:
     parser.add_argument("--workload-root", required=True)
     parser.add_argument("--baseline-branch", required=True)
     parser.add_argument("--drift-branch", required=True)
-    parser.add_argument("--access-token", required=True)
+    # Defaults to $GRAPH_TOKEN so CI need not put the token on the command line.
+    parser.add_argument("--access-token", default=os.environ.get("GRAPH_TOKEN", ""))
     parser.add_argument("--service-name", required=True)
     parser.add_argument("--service-email", required=True)
     parser.add_argument("--build-reason", default="")
@@ -321,9 +313,9 @@ def main() -> int:
         service_email=args.service_email,
     )
 
-    _git_run(repo_root, ["config", "user.name", fallback.name])
-    _git_run(repo_root, ["config", "user.email", fallback.value])
-    _git_run(repo_root, ["add", "--all", "--", workload_root])
+    common.git_proc(repo_root, ["config", "user.name", fallback.name])
+    common.git_proc(repo_root, ["config", "user.email", fallback.value])
+    common.git_proc(repo_root, ["add", "--all", "--", workload_root])
 
     changed_files = _changed_files(repo_root, workload_root)
     if not changed_files:
@@ -362,7 +354,7 @@ def main() -> int:
             f"Unable to resolve author from Entra audit logs for {unresolved_count} of {len(changed_files)} changed files. Fallback identity used where needed."
         )
 
-    _git_run(repo_root, ["reset", "--quiet", "--", workload_root])
+    common.git_proc(repo_root, ["reset", "--quiet", "--", workload_root])
     print("\nCommit changes")
     for group in groups.values():
         files = group["files"]
@@ -370,15 +362,15 @@ def main() -> int:
         assert isinstance(files, list)
         assert isinstance(identities, list)
         _commit_group(repo_root, files, identities, backup_start)
-        unpushed = _git_run(repo_root, ["cherry", "-v", f"origin/{args.baseline_branch}"]).stdout.strip()
+        unpushed = common.git_proc(repo_root, ["cherry", "-v", f"origin/{args.baseline_branch}"]).stdout.strip()
         if not unpushed:
             _warning("Nothing to commit?! This shouldn't happen.")
             _set_output_var("CHANGE_DETECTED", "0")
             _set_output_var("ROLLING_PR_SYNC_REQUIRED", "0")
             return 0
 
-    _git_run(repo_root, ["push", "--force-with-lease", "origin", f"HEAD:{args.drift_branch}"])
-    commit_sha = _git_run(repo_root, ["rev-parse", "HEAD"]).stdout.strip()
+    common.git_proc(repo_root, ["push", "--force-with-lease", "origin", f"HEAD:{args.drift_branch}"])
+    commit_sha = common.git_proc(repo_root, ["rev-parse", "HEAD"]).stdout.strip()
     modification_authors = sorted({identity.value for group in groups.values() for identity in group["identities"]})  # type: ignore[index]
     _set_output_var("CHANGE_DETECTED", "1")
     _set_output_var("ROLLING_PR_SYNC_REQUIRED", "1")

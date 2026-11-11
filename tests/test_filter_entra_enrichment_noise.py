@@ -3,12 +3,14 @@ from __future__ import annotations
 import importlib.util
 import json
 import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
 
 
 MODULE_PATH = Path(__file__).resolve().parents[1] / "scripts" / "filter_entra_enrichment_noise.py"
+sys.path.insert(0, str(MODULE_PATH.parent))  # scripts import their sibling common.py
 
 
 def load_module():
@@ -54,6 +56,18 @@ class FilterEntraEnrichmentNoiseTests(unittest.TestCase):
             }
         )
         self.assertTrue(self.module._is_enrichment_only_change(old_text, new_text))
+
+    def test_owner_or_permission_grant_is_not_noise(self) -> None:
+        base = {"displayName": "App", "ownersResolved": [], "appRoleAssignmentsResolved": []}
+        owner_added = dict(base, ownersResolved=[{"id": "u1", "userPrincipalName": "x@contoso.com"}])
+        role_granted = dict(base, appRoleAssignmentsResolved=[{"resourceId": "graph", "appRoleId": "r1"}])
+        for changed in (owner_added, role_granted):
+            self.assertFalse(self.module._is_enrichment_only_change(json.dumps(base), json.dumps(changed)))
+
+    def test_owner_name_resolution_churn_is_noise(self) -> None:
+        old = {"displayName": "App", "ownersResolved": [{"id": "u1", "displayName": "Old Name"}]}
+        new = {"displayName": "App", "ownersResolved": [{"id": "U1", "displayName": "New Name"}]}
+        self.assertTrue(self.module._is_enrichment_only_change(json.dumps(old), json.dumps(new)))
 
     def test_is_enrichment_only_change_false_when_config_changes(self) -> None:
         old_text = json.dumps(

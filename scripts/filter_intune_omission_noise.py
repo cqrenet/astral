@@ -11,10 +11,10 @@ does not show a spurious deletion.
 from __future__ import annotations
 
 import argparse
-import json
-import subprocess
 import sys
 from pathlib import Path
+
+import common
 
 
 # Path fragments (relative to backup root) that are known to be intermittently
@@ -27,27 +27,10 @@ KNOWN_FLAKY_FRAGMENTS: tuple[str, ...] = (
 
 def _run_git_ls_tree(repo_root: Path, ref: str, path: str) -> list[str]:
     """Return list of blob paths under *path* at *ref*."""
-    proc = subprocess.run(
-        ["git", "ls-tree", "-r", "--name-only", ref, path],
-        cwd=str(repo_root),
-        check=False,
-        capture_output=True,
-    )
+    proc = common.git_proc(repo_root, ["ls-tree", "-r", "--name-only", ref, path], check=False, text=False)
     if proc.returncode != 0:
         return []
     return [line for line in proc.stdout.decode("utf-8").splitlines() if line]
-
-
-def _run_git_show(repo_root: Path, ref: str, rel_path: str) -> bytes | None:
-    proc = subprocess.run(
-        ["git", "show", f"{ref}:{rel_path}"],
-        cwd=str(repo_root),
-        check=False,
-        capture_output=True,
-    )
-    if proc.returncode != 0:
-        return None
-    return proc.stdout
 
 
 def _is_flaky_path(rel_path: str) -> bool:
@@ -79,7 +62,7 @@ def restore_omitted_files(
             continue
 
         # File is missing from export but existed in baseline — restore it
-        data = _run_git_show(repo_root, baseline_ref, baseline_path)
+        data = common.git_show(repo_root, baseline_ref, baseline_path)
         if data is None:
             skipped.append(baseline_path)
             continue

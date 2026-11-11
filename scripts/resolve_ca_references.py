@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 import json
 import pathlib
 import urllib.error
@@ -22,7 +23,7 @@ SPECIAL_APP_IDS = {
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--root", required=True, help="Path to workload backup root (for Entra: tenant-state/entra).")
-    parser.add_argument("--token", required=True, help="Microsoft Graph access token.")
+    parser.add_argument("--token", default=os.environ.get("GRAPH_TOKEN", ""), help="Microsoft Graph access token (default: $GRAPH_TOKEN).")
     return parser.parse_args()
 
 

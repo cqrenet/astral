@@ -5,43 +5,40 @@ from __future__ import annotations
 
 import argparse
 import json
-import subprocess
 import sys
 from pathlib import Path, PurePosixPath
 from typing import Any
 
+import common
+
+
+# Who owns an app and which app roles are granted to it are real, security-relevant
+# config (owner add / permission grant = classic persistence). Only their resolved
+# display names are best-effort enrichment, so compare these lists by identity.
+IDENTITY_KEY_FIELDS = {
+    "ownersresolved": ("id",),
+    "approleassignmentsresolved": ("resourceId", "appRoleId"),
+}
 
 ENRICHMENT_KEY_NAMES = {
-    "ownersresolved",
-    "approleassignmentsresolved",
     "requiredresourceaccessresolved",
     "appownerorganizationresolved",
     "resolutionstatus",
 }
 
 
-def _to_bool(value: str) -> bool:
-    return str(value).strip().lower() in {"1", "true", "yes", "y", "on"}
-
-
-def _run_git(repo_root: Path, args: list[str], check: bool = True) -> subprocess.CompletedProcess[bytes]:
-    proc = subprocess.run(
-        ["git", *args],
-        cwd=str(repo_root),
-        check=False,
-        capture_output=True,
-    )
-    if check and proc.returncode != 0:
-        stderr = proc.stderr.decode("utf-8", errors="replace").strip()
-        raise RuntimeError(f"git {' '.join(args)} failed ({proc.returncode}): {stderr}")
-    return proc
-
-
 def _strip_enrichment(value: Any) -> Any:
     if isinstance(value, dict):
         cleaned: dict[str, Any] = {}
         for key, child in value.items():
-            if str(key).strip().lower() in ENRICHMENT_KEY_NAMES:
+            lowered = str(key).strip().lower()
+            if lowered in IDENTITY_KEY_FIELDS and isinstance(child, list):
+                fields = IDENTITY_KEY_FIELDS[lowered]
+                cleaned[key] = sorted(
+                    {tuple(str(item.get(f) or "").lower() for f in fields) for item in child if isinstance(item, dict)}
+                )
+                continue
+            if lowered in ENRICHMENT_KEY_NAMES:
                 continue
             cleaned[key] = _strip_enrichment(child)
         return cleaned
@@ -69,10 +66,11 @@ def _is_enrichment_only_change(old_text: str, new_text: str) -> bool:
 
 
 def _modified_paths(repo_root: Path, workload_root: str) -> list[str]:
-    proc = _run_git(
+    proc = common.git_proc(
         repo_root,
         ["diff", "--name-only", "-z", "--diff-filter=M", "--", workload_root],
         check=True,
+        text=False,
     )
     raw = proc.stdout.split(b"\x00")
     paths: list[str] = []
@@ -93,7 +91,7 @@ def filter_enrichment_only_files(repo_root: Path, workload_root: str) -> list[st
         if not _is_json_path(rel_path):
             continue
 
-        head_proc = _run_git(repo_root, ["show", f"HEAD:{rel_path}"], check=False)
+        head_proc = common.git_proc(repo_root, ["show", f"HEAD:{rel_path}"], check=False, text=False)
         if head_proc.returncode != 0:
             continue
         old_text = head_proc.stdout.decode("utf-8", errors="replace")
@@ -104,7 +102,7 @@ def filter_enrichment_only_files(repo_root: Path, workload_root: str) -> list[st
         new_text = abs_path.read_text(encoding="utf-8")
 
         if _is_enrichment_only_change(old_text, new_text):
-            _run_git(repo_root, ["checkout", "--quiet", "--", rel_path], check=True)
+            common.git_proc(repo_root, ["checkout", "--quiet", "--", rel_path], check=True, text=False)
             reverted.append(rel_path)
     return reverted
 
@@ -115,7 +113,7 @@ def find_enrichment_only_modified_files(repo_root: Path, workload_root: str) -> 
         if not _is_json_path(rel_path):
             continue
 
-        head_proc = _run_git(repo_root, ["show", f"HEAD:{rel_path}"], check=False)
+        head_proc = common.git_proc(repo_root, ["show", f"HEAD:{rel_path}"], check=False, text=False)
         if head_proc.returncode != 0:
             continue
         old_text = head_proc.stdout.decode("utf-8", errors="replace")
@@ -162,7 +160,7 @@ def main() -> int:
         print(f"Residual enrichment-only Entra file changes still present: {len(residual)}")
         for path in residual:
             print(f" - {path}")
-        if _to_bool(args.fail_on_residual_enrichment_drift):
+        if common.to_bool(args.fail_on_residual_enrichment_drift):
             return 2
     return 0
 

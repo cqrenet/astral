@@ -3,12 +3,14 @@ from __future__ import annotations
 import importlib.util
 import json
 import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
 
 
 MODULE_PATH = Path(__file__).resolve().parents[1] / "scripts" / "filter_intune_partial_settings_noise.py"
+sys.path.insert(0, str(MODULE_PATH.parent))  # scripts import their sibling common.py
 
 
 def load_module():

@@ -5,7 +5,6 @@ from __future__ import annotations
 
 import argparse
 import concurrent.futures
-import datetime as dt
 import json
 import os
 import pathlib
@@ -17,6 +16,8 @@ from typing import Any
 import urllib.error
 import urllib.parse
 import urllib.request
+
+import common
 
 
 TRANSIENT_RESOLUTION_ERROR_MARKERS = (
@@ -42,7 +43,7 @@ TRANSIENT_RESOLUTION_ERROR_MARKERS = (
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--root", required=True, help="Path to Entra workload backup root (tenant-state/entra).")
-    parser.add_argument("--token", required=True, help="Microsoft Graph bearer token.")
+    parser.add_argument("--token", default=os.environ.get("GRAPH_TOKEN", ""), help="Microsoft Graph bearer token (default: $GRAPH_TOKEN).")
     parser.add_argument("--include-named-locations", default="true", help="Include Entra named locations export (true/false).")
     parser.add_argument(
         "--include-authentication-strengths",
@@ -67,7 +68,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--enterprise-app-workers",
         type=int,
-        default=env_int("ENTRA_ENTERPRISE_APP_WORKERS", 8),
+        default=common.env_int("ENTRA_ENTERPRISE_APP_WORKERS", 8),
         help="Number of parallel workers used to enrich Enterprise Applications (1-32).",
     )
     parser.add_argument(
@@ -87,52 +88,10 @@ def log(message: str) -> None:
     print(message, flush=True)
 
 
-def to_bool(value: str) -> bool:
-    return str(value).strip().lower() in {"1", "true", "yes", "y", "on"}
-
-
-def env_int(name: str, default: int) -> int:
-    raw = os.getenv(name)
-    if raw is None:
-        return default
-    try:
-        return int(raw)
-    except ValueError:
-        return default
-
-
 def sanitize_filename(value: str) -> str:
     cleaned = re.sub(r'[\\/:*?"<>|]+', "_", value).strip()
     cleaned = re.sub(r"\s+", " ", cleaned)
     return cleaned[:180] if len(cleaned) > 180 else cleaned
-
-
-def _normalize_branch_name(branch: str) -> str:
-    normalized = str(branch or "").strip()
-    if normalized.startswith("$(") and normalized.endswith(")"):
-        return ""
-    for _ in range(2):
-        if normalized.startswith("origin/"):
-            normalized = normalized[len("origin/") :]
-        if normalized.startswith("refs/heads/"):
-            normalized = normalized[len("refs/heads/") :]
-        if normalized.startswith("refs/remotes/origin/"):
-            normalized = normalized[len("refs/remotes/origin/") :]
-    return normalized
-
-
-def _git_run(repo_root: pathlib.Path, args: list[str], check: bool = True) -> subprocess.CompletedProcess[str]:
-    proc = subprocess.run(
-        ["git", *args],
-        cwd=str(repo_root),
-        check=False,
-        capture_output=True,
-        text=True,
-    )
-    if check and proc.returncode != 0:
-        stderr = (proc.stderr or "").strip()
-        raise RuntimeError(f"git {' '.join(args)} failed ({proc.returncode}): {stderr}")
-    return proc
 
 
 def _discover_repo_root(path: pathlib.Path) -> pathlib.Path | None:
@@ -152,14 +111,14 @@ def _discover_repo_root(path: pathlib.Path) -> pathlib.Path | None:
 
 
 def _resolve_existing_branch_ref(repo_root: pathlib.Path, branch: str) -> str:
-    normalized = _normalize_branch_name(branch)
+    normalized = common.normalize_branch(branch)
     if not normalized:
         return ""
     remote_ref = f"refs/remotes/origin/{normalized}"
-    if _git_run(repo_root, ["show-ref", "--verify", "--quiet", remote_ref], check=False).returncode == 0:
+    if common.git_proc(repo_root, ["show-ref", "--verify", "--quiet", remote_ref], check=False).returncode == 0:
         return f"origin/{normalized}"
     local_ref = f"refs/heads/{normalized}"
-    if _git_run(repo_root, ["show-ref", "--verify", "--quiet", local_ref], check=False).returncode == 0:
+    if common.git_proc(repo_root, ["show-ref", "--verify", "--quiet", local_ref], check=False).returncode == 0:
         return normalized
     return ""
 
@@ -219,7 +178,7 @@ class PreviousSnapshotLookup:
         if not category_repo_dir:
             return
         try:
-            out = _git_run(
+            out = common.git_proc(
                 repo_root,
                 ["ls-tree", "-r", "--name-only", ref, "--", category_repo_dir],
             ).stdout
@@ -244,7 +203,7 @@ class PreviousSnapshotLookup:
             self.cache[object_id] = None
             return None
         try:
-            content = _git_run(self.repo_root, ["show", f"{self.ref}:{rel_path}"]).stdout
+            content = common.git_proc(self.repo_root, ["show", f"{self.ref}:{rel_path}"]).stdout
             payload = json.loads(content)
             self.cache[object_id] = payload if isinstance(payload, dict) else None
         except Exception:
@@ -285,16 +244,6 @@ class GraphClient:
         self.token = token
         self.max_retries = max_retries
 
-    @staticmethod
-    def _get_retry_after_seconds(error: urllib.error.HTTPError) -> float | None:
-        retry_after = error.headers.get("Retry-After")
-        if not retry_after:
-            return None
-        try:
-            return max(0.0, float(retry_after))
-        except ValueError:
-            return None
-
     def _request(self, url: str) -> dict:
         req = urllib.request.Request(
             url,
@@ -311,7 +260,7 @@ class GraphClient:
                     return json.loads(response.read().decode("utf-8"))
             except urllib.error.HTTPError as exc:
                 if exc.code in {429, 500, 502, 503, 504} and attempt < self.max_retries:
-                    retry_after = self._get_retry_after_seconds(exc)
+                    retry_after = common.retry_after_seconds(exc)
                     delay = retry_after if retry_after is not None else min(2**attempt, 10)
                     time.sleep(delay)
                     attempt += 1
@@ -912,78 +861,269 @@ def write_collection(
     return written
 
 
+def _owner_org_unresolved(resolved: dict[str, Any]) -> bool:
+    return not str(resolved["appOwnerOrganizationResolved"].get("displayName") or "").strip()
+
+
+def _as_list(value: Any) -> list:
+    return value if isinstance(value, list) else []
+
+
+def _store_enterprise_app_enrichment(
+    item: dict[str, Any],
+    owners: list[dict[str, str]],
+    role_assignments: list[dict[str, Any]],
+    resolved: dict[str, Any],
+    previous_lookup: PreviousSnapshotLookup | None,
+) -> None:
+    """Backfill unresolved gaps from the previous snapshot, then write the enrichment onto *item*."""
+    object_id = str(item.get("id") or "").strip()
+    needs_backfill = (
+        _owners_need_backfill(owners)
+        or _app_role_assignments_need_backfill(role_assignments)
+        or _owner_org_unresolved(resolved)
+    )
+    previous_item = previous_lookup.get(object_id) if previous_lookup and object_id and needs_backfill else None
+    if isinstance(previous_item, dict):
+        owners = _merge_owner_resolution(owners, _as_list(previous_item.get("ownersResolved")))
+        role_assignments = _merge_app_role_assignments_resolution(
+            role_assignments, _as_list(previous_item.get("appRoleAssignmentsResolved"))
+        )
+        previous_owner_org = previous_item.get("appOwnerOrganizationResolved")
+        if isinstance(previous_owner_org, dict) and _owner_org_unresolved(resolved):
+            previous_name = str(previous_owner_org.get("displayName") or "").strip()
+            if previous_name:
+                resolved["appOwnerOrganizationResolved"]["displayName"] = previous_name
+        unresolved_resources, unresolved_roles = _count_unresolved_app_role_assignments(role_assignments)
+        app_role_status = resolved["resolutionStatus"].get("appRoleAssignments", {})
+        if isinstance(app_role_status, dict):
+            app_role_status["count"] = len(role_assignments)
+            app_role_status["unresolvedResourceCount"] = unresolved_resources
+            app_role_status["unresolvedRoleCount"] = unresolved_roles
+            resolved["resolutionStatus"]["appRoleAssignments"] = app_role_status
+    item["ownersResolved"] = owners
+    item["appRoleAssignmentsResolved"] = role_assignments
+    item["appOwnerOrganizationResolved"] = resolved["appOwnerOrganizationResolved"]
+    item["resolutionStatus"] = resolved["resolutionStatus"]
+
+
+def _enterprise_app_failure(
+    item: dict[str, Any], local_org_by_id: dict[str, str], exc: Exception
+) -> tuple[list[dict[str, str]], list[dict[str, Any]], dict[str, Any]]:
+    normalized_error = normalize_resolution_error(str(exc))
+    resolved = {
+        "appOwnerOrganizationResolved": resolve_org_owner(
+            org_id=str(item.get("appOwnerOrganizationId") or ""),
+            local_org_by_id=local_org_by_id,
+        ),
+        "resolutionStatus": {
+            "owners": {"count": 0, "error": normalized_error},
+            "appRoleAssignments": {
+                "count": 0,
+                "collectionError": normalized_error,
+                "unresolvedResourceCount": 0,
+                "unresolvedRoleCount": 0,
+                "lookupErrors": [],
+            },
+        },
+    }
+    return [], [], resolved
+
+
+def _log_progress(label: str, done: int, total: int) -> None:
+    if done == 1 or done % 25 == 0 or done == total:
+        log(f"{label} progress: {done}/{total}")
+
+
+def _enrich_enterprise_apps(
+    items: list[Any],
+    client: GraphClient,
+    resource_sp_by_appid: dict[str, dict[str, Any] | None],
+    resource_sp_by_id: dict[str, dict[str, Any] | None],
+    local_org_by_id: dict[str, str],
+    previous_lookup: PreviousSnapshotLookup | None,
+    workers: int,
+) -> int:
+    """Enrich Enterprise Application items in place; returns the number of failed lookups (warnings).
+
+    With one worker an enrichment error is fatal (propagates); with several, the failing app
+    gets an error placeholder and the export continues.
+    """
+    apps = [item for item in items if isinstance(item, dict)]
+    total = len(apps)
+    log(f"Resolving Enterprise Applications details for {total} objects using {workers} worker(s)...")
+    for item in apps:
+        app_id = str(item.get("appId") or "").strip()
+        object_id = str(item.get("id") or "").strip()
+        if app_id and app_id not in resource_sp_by_appid:
+            resource_sp_by_appid[app_id] = item
+        if object_id and object_id not in resource_sp_by_id:
+            resource_sp_by_id[object_id] = item
+
+    lock = threading.Lock()
+
+    def _enrich(item: dict[str, Any]):
+        return enrich_enterprise_application(item, client, resource_sp_by_id, lock, local_org_by_id)
+
+    warnings = 0
+
+    def _handle(item: dict[str, Any], result: tuple | None, error: Exception | None) -> None:
+        nonlocal warnings
+        if error is not None:
+            warnings += 1
+            result = _enterprise_app_failure(item, local_org_by_id, error)
+        owners, role_assignments, resolved = result
+        _store_enterprise_app_enrichment(item, owners, role_assignments, resolved, previous_lookup)
+
+    if workers == 1:
+        for done, item in enumerate(apps, start=1):
+            _log_progress("Enterprise Applications", done, total)
+            _handle(item, _enrich(item), None)
+        return warnings
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as pool:
+        future_to_item = {pool.submit(_enrich, item): item for item in apps}
+        for done, future in enumerate(concurrent.futures.as_completed(future_to_item), start=1):
+            item = future_to_item[future]
+            try:
+                result, error = future.result(), None
+            except Exception as exc:  # noqa: BLE001
+                result, error = None, exc
+            _handle(item, result, error)
+            _log_progress("Enterprise Applications", done, total)
+    return warnings
+
+
+def _enrich_app_registrations(
+    items: list[Any],
+    client: GraphClient,
+    resource_sp_by_appid: dict[str, dict[str, Any] | None],
+    previous_lookup: PreviousSnapshotLookup | None,
+) -> None:
+    total = len(items)
+    log(f"Resolving App Registrations details for {total} objects...")
+    for idx, item in enumerate(items, start=1):
+        if not isinstance(item, dict):
+            continue
+        _log_progress("App Registrations", idx, total)
+        object_id = str(item.get("id") or "").strip()
+        owners, owners_error = resolve_owners(client=client, object_kind="applications", object_id=object_id)
+        (
+            required_resolved,
+            unresolved_resources,
+            unresolved_permissions,
+            required_lookup_errors,
+        ) = resolve_required_resource_access(
+            app=item,
+            client=client,
+            resource_sp_by_appid=resource_sp_by_appid,
+        )
+        needs_backfill = _owners_need_backfill(owners) or _required_resource_access_needs_backfill(required_resolved)
+        previous_item = previous_lookup.get(object_id) if previous_lookup and object_id and needs_backfill else None
+        if isinstance(previous_item, dict):
+            owners = _merge_owner_resolution(owners, _as_list(previous_item.get("ownersResolved")))
+            required_resolved = _merge_required_resource_access_resolution(
+                required_resolved, _as_list(previous_item.get("requiredResourceAccessResolved"))
+            )
+            unresolved_resources, unresolved_permissions = _count_unresolved_required_permissions(required_resolved)
+        item["ownersResolved"] = owners
+        item["requiredResourceAccessResolved"] = required_resolved
+        item["resolutionStatus"] = {
+            "owners": {
+                "count": len(owners),
+                "error": normalize_resolution_error(owners_error),
+            },
+            "requiredResourceAccess": {
+                "resourceCount": len(required_resolved),
+                "unresolvedResourceCount": unresolved_resources,
+                "unresolvedPermissionCount": unresolved_permissions,
+                "lookupErrors": normalize_resolution_lookup_errors(required_lookup_errors),
+            },
+        }
+
+
+GRAPH = "https://graph.microsoft.com"
+ENTERPRISE_APP_SELECT = (
+    "id,appId,displayName,servicePrincipalType,appOwnerOrganizationId,"
+    "accountEnabled,publisherName,preferredSingleSignOnMode,tags,"
+    "appRoleAssignmentRequired,appRoles,oauth2PermissionScopes,"
+    "homepage,replyUrls,logoutUrl,servicePrincipalNames,verifiedPublisher,"
+    "passwordCredentials,keyCredentials"
+)
+APP_REGISTRATION_SELECT = (
+    "id,appId,displayName,description,signInAudience,publisherDomain,"
+    "identifierUris,createdDateTime,tags,requiredResourceAccess,api,web,spa,"
+    "publicClient,isFallbackPublicClient,verifiedPublisher,"
+    "passwordCredentials,keyCredentials"
+)
+# (CLI flag, title == output folder, Graph URL)
+EXPORT_CATALOG = (
+    ("include_named_locations", "Named Locations", f"{GRAPH}/v1.0/identity/conditionalAccess/namedLocations"),
+    (
+        "include_authentication_strengths",
+        "Authentication Strengths",
+        f"{GRAPH}/beta/identity/conditionalAccess/authenticationStrength/policies",
+    ),
+    ("include_conditional_access", "Conditional Access", f"{GRAPH}/v1.0/identity/conditionalAccess/policies"),
+    (
+        "include_enterprise_applications",
+        "Enterprise Applications",
+        f"{GRAPH}/v1.0/servicePrincipals?$filter=servicePrincipalType%20eq%20'Application'&$select={ENTERPRISE_APP_SELECT}",
+    ),
+    ("include_app_registrations", "App Registrations", f"{GRAPH}/v1.0/applications?$select={APP_REGISTRATION_SELECT}"),
+)
+
+
+def _previous_snapshot_ref(repo_root: pathlib.Path, requested_ref: str) -> str:
+    candidates = [
+        requested_ref,
+        os.getenv("DRIFT_BRANCH_ENTRA", ""),
+        os.getenv("DRIFT_BRANCH", ""),
+        "origin/drift/entra",
+        os.getenv("BASELINE_BRANCH", ""),
+    ]
+    for candidate_raw in candidates:
+        candidate = _resolve_existing_branch_ref(repo_root, candidate_raw)
+        if candidate:
+            return candidate
+    return ""
+
+
+def _local_org_names(client: GraphClient) -> tuple[dict[str, str], int]:
+    """Map organization id -> display name for the local tenant; returns (names, warnings)."""
+    log("Resolving local organization details...")
+    payload, error = client.get_object("https://graph.microsoft.com/v1.0/organization?$select=id,displayName")
+    if error:
+        log(f"Warning: unable to resolve local organization details ({error})")
+        return {}, 1
+    names: dict[str, str] = {}
+    values = payload.get("value") if isinstance(payload, dict) else None
+    for org in _as_list(values):
+        if not isinstance(org, dict):
+            continue
+        org_id = str(org.get("id") or "").strip()
+        if org_id:
+            names[org_id] = str(org.get("displayName") or "").strip()
+    return names, 0
+
+
 def main() -> int:
     args = parse_args()
     root = pathlib.Path(args.root).resolve()
     token = args.token.strip()
-    enterprise_app_workers = max(1, min(int(args.enterprise_app_workers), 32))
-    include_named_locations = to_bool(args.include_named_locations)
-    include_auth_strengths = to_bool(args.include_authentication_strengths)
-    include_conditional_access = to_bool(args.include_conditional_access)
-    include_enterprise_apps = to_bool(args.include_enterprise_applications)
-    include_app_registrations = to_bool(args.include_app_registrations)
-    fail_on_export_error = to_bool(args.fail_on_export_error)
-
     if not token:
-        log("No Graph token provided. Skipping Entra baseline export.")
-        return 0
+        raise SystemExit("Microsoft Graph token required (--token or GRAPH_TOKEN).")
+    workers = max(1, min(int(args.enterprise_app_workers), 32))
+    fail_on_export_error = common.to_bool(args.fail_on_export_error)
+    include_app_registrations = common.to_bool(args.include_app_registrations)
 
     client = GraphClient(token)
 
-    exports: list[dict[str, str]] = []
-    if include_named_locations:
-        exports.append(
-            {
-                "title": "Named Locations",
-                "rel_dir": "Named Locations",
-                "url": "https://graph.microsoft.com/v1.0/identity/conditionalAccess/namedLocations",
-            }
-        )
-    if include_auth_strengths:
-        exports.append(
-            {
-                "title": "Authentication Strengths",
-                "rel_dir": "Authentication Strengths",
-                "url": "https://graph.microsoft.com/beta/identity/conditionalAccess/authenticationStrength/policies",
-            }
-        )
-    if include_conditional_access:
-        exports.append(
-            {
-                "title": "Conditional Access",
-                "rel_dir": "Conditional Access",
-                "url": "https://graph.microsoft.com/v1.0/identity/conditionalAccess/policies",
-            }
-        )
-    if include_enterprise_apps:
-        exports.append(
-            {
-                "title": "Enterprise Applications",
-                "rel_dir": "Enterprise Applications",
-                "url": (
-                    "https://graph.microsoft.com/v1.0/servicePrincipals"
-                    "?$filter=servicePrincipalType%20eq%20'Application'"
-                    "&$select=id,appId,displayName,servicePrincipalType,appOwnerOrganizationId,"
-                    "accountEnabled,publisherName,preferredSingleSignOnMode,tags,"
-                    "appRoleAssignmentRequired,appRoles,oauth2PermissionScopes,"
-                    "homepage,replyUrls,logoutUrl,servicePrincipalNames,verifiedPublisher"
-                ),
-            }
-        )
-    if include_app_registrations:
-        exports.append(
-            {
-                "title": "App Registrations",
-                "rel_dir": "App Registrations",
-                "url": (
-                    "https://graph.microsoft.com/v1.0/applications"
-                    "?$select=id,appId,displayName,description,signInAudience,publisherDomain,"
-                    "identifierUris,createdDateTime,tags,requiredResourceAccess,api,web,spa,"
-                    "publicClient,isFallbackPublicClient,verifiedPublisher"
-                ),
-            }
-        )
-
+    exports = [
+        {"title": title, "rel_dir": title, "url": url}
+        for flag, title, url in EXPORT_CATALOG
+        if common.to_bool(getattr(args, flag))
+    ]
     if not exports:
         log("All Entra export categories are disabled. Skipping Entra baseline export.")
         return 0
@@ -993,7 +1133,6 @@ def main() -> int:
     failed_exports: list[tuple[str, str]] = []
     resource_sp_by_appid: dict[str, dict[str, Any] | None] = {}
     resource_sp_by_id: dict[str, dict[str, Any] | None] = {}
-    local_org_by_id: dict[str, str] = {}
     if include_app_registrations:
         cached_resource_sps = _load_resource_sp_cache_from_export(root)
         if cached_resource_sps:
@@ -1006,291 +1145,57 @@ def main() -> int:
                 "Primed resource service-principal cache from local Enterprise Applications export: "
                 + f"{len(cached_resource_sps)} objects"
             )
+
     repo_root = _discover_repo_root(root)
-    previous_snapshot_ref = ""
-    if repo_root is not None:
-        candidates = [
-            args.previous_snapshot_ref,
-            os.getenv("DRIFT_BRANCH_ENTRA", ""),
-            os.getenv("DRIFT_BRANCH", ""),
-            "origin/drift/entra",
-            os.getenv("BASELINE_BRANCH", ""),
-        ]
-        for candidate_raw in candidates:
-            candidate = _resolve_existing_branch_ref(repo_root, candidate_raw)
-            if candidate:
-                previous_snapshot_ref = candidate
-                break
+    previous_snapshot_ref = _previous_snapshot_ref(repo_root, args.previous_snapshot_ref) if repo_root else ""
     root_repo_rel = _repo_relative_posix(repo_root, root) if repo_root is not None else ""
     previous_lookup_by_title: dict[str, PreviousSnapshotLookup] = {}
     if repo_root is not None and previous_snapshot_ref and root_repo_rel:
         for title in ("Enterprise Applications", "App Registrations"):
-            category_repo_dir = f"{root_repo_rel}/{title}".strip("/")
             previous_lookup_by_title[title] = PreviousSnapshotLookup(
                 repo_root=repo_root,
                 ref=previous_snapshot_ref,
-                category_repo_dir=category_repo_dir,
+                category_repo_dir=f"{root_repo_rel}/{title}".strip("/"),
             )
         log(f"Using previous snapshot reference for resolution backfill: {previous_snapshot_ref}")
     else:
         log("No previous snapshot reference found for resolution backfill; unresolved placeholders may cause drift noise.")
 
-    log("Resolving local organization details...")
-    org_payload, org_error = client.get_object(
-        "https://graph.microsoft.com/v1.0/organization?$select=id,displayName"
-    )
-    if org_error:
-        log(f"Warning: unable to resolve local organization details ({org_error})")
-        warnings += 1
-    elif isinstance(org_payload, dict):
-        org_values = org_payload.get("value")
-        if isinstance(org_values, list):
-            for org in org_values:
-                if not isinstance(org, dict):
-                    continue
-                org_id = str(org.get("id") or "").strip()
-                display_name = str(org.get("displayName") or "").strip()
-                if org_id:
-                    local_org_by_id[org_id] = display_name
+    local_org_by_id, org_warnings = _local_org_names(client)
+    warnings += org_warnings
 
     for export in exports:
-        log(f"Starting export: {export['title']}")
+        title = export["title"]
+        log(f"Starting export: {title}")
         items, error = client.get_collection(export["url"])
         if error:
-            log(f"Warning: unable to export {export['title']} from {export['url']} ({error})")
+            log(f"Warning: unable to export {title} from {export['url']} ({error})")
             warnings += 1
-            failed_exports.append((export["title"], str(error)))
+            failed_exports.append((title, str(error)))
             continue
 
-        if export["title"] == "Enterprise Applications":
-            enterprise_items = [item for item in items if isinstance(item, dict)]
-            total = len(enterprise_items)
-            log(
-                f"Resolving Enterprise Applications details for {total} objects "
-                + f"using {enterprise_app_workers} worker(s)..."
+        if title == "Enterprise Applications":
+            warnings += _enrich_enterprise_apps(
+                items,
+                client,
+                resource_sp_by_appid,
+                resource_sp_by_id,
+                local_org_by_id,
+                previous_lookup_by_title.get(title),
+                workers,
             )
-            for item in enterprise_items:
-                app_id = str(item.get("appId") or "").strip()
-                object_id = str(item.get("id") or "").strip()
-                if app_id and app_id not in resource_sp_by_appid:
-                    resource_sp_by_appid[app_id] = item
-                if object_id and object_id not in resource_sp_by_id:
-                    resource_sp_by_id[object_id] = item
-
-            resource_sp_lock = threading.Lock()
-            if enterprise_app_workers == 1:
-                for idx, item in enumerate(enterprise_items, start=1):
-                    if idx == 1 or idx % 25 == 0 or idx == total:
-                        log(f"Enterprise Applications progress: {idx}/{total}")
-                    owners, role_assignments, resolved = enrich_enterprise_application(
-                        item=item,
-                        client=client,
-                        resource_sp_by_id=resource_sp_by_id,
-                        resource_sp_lock=resource_sp_lock,
-                        local_org_by_id=local_org_by_id,
-                    )
-                    previous_item = None
-                    object_id = str(item.get("id") or "").strip()
-                    previous_lookup = previous_lookup_by_title.get("Enterprise Applications")
-                    needs_backfill = (
-                        _owners_need_backfill(owners)
-                        or _app_role_assignments_need_backfill(role_assignments)
-                        or not str(resolved["appOwnerOrganizationResolved"].get("displayName") or "").strip()
-                    )
-                    if previous_lookup and object_id and needs_backfill:
-                        previous_item = previous_lookup.get(object_id)
-                    if isinstance(previous_item, dict):
-                        owners = _merge_owner_resolution(
-                            owners,
-                            previous_item.get("ownersResolved")
-                            if isinstance(previous_item.get("ownersResolved"), list)
-                            else [],
-                        )
-                        role_assignments = _merge_app_role_assignments_resolution(
-                            role_assignments,
-                            previous_item.get("appRoleAssignmentsResolved")
-                            if isinstance(previous_item.get("appRoleAssignmentsResolved"), list)
-                            else [],
-                        )
-                        previous_owner_org = previous_item.get("appOwnerOrganizationResolved")
-                        if (
-                            isinstance(previous_owner_org, dict)
-                            and not str(resolved["appOwnerOrganizationResolved"].get("displayName") or "").strip()
-                        ):
-                            prev_owner_name = str(previous_owner_org.get("displayName") or "").strip()
-                            if prev_owner_name:
-                                resolved["appOwnerOrganizationResolved"]["displayName"] = prev_owner_name
-                        unresolved_resources, unresolved_roles = _count_unresolved_app_role_assignments(role_assignments)
-                        app_role_status = resolved["resolutionStatus"].get("appRoleAssignments", {})
-                        if isinstance(app_role_status, dict):
-                            app_role_status["count"] = len(role_assignments)
-                            app_role_status["unresolvedResourceCount"] = unresolved_resources
-                            app_role_status["unresolvedRoleCount"] = unresolved_roles
-                            resolved["resolutionStatus"]["appRoleAssignments"] = app_role_status
-                    item["ownersResolved"] = owners
-                    item["appRoleAssignmentsResolved"] = role_assignments
-                    item["appOwnerOrganizationResolved"] = resolved["appOwnerOrganizationResolved"]
-                    item["resolutionStatus"] = resolved["resolutionStatus"]
-            else:
-                completed = 0
-                with concurrent.futures.ThreadPoolExecutor(max_workers=enterprise_app_workers) as pool:
-                    future_to_item = {
-                        pool.submit(
-                            enrich_enterprise_application,
-                            item,
-                            client,
-                            resource_sp_by_id,
-                            resource_sp_lock,
-                            local_org_by_id,
-                        ): item
-                        for item in enterprise_items
-                    }
-                    for future in concurrent.futures.as_completed(future_to_item):
-                        item = future_to_item[future]
-                        try:
-                            owners, role_assignments, resolved = future.result()
-                        except Exception as exc:  # noqa: BLE001
-                            warnings += 1
-                            normalized_error = normalize_resolution_error(str(exc))
-                            owners = []
-                            role_assignments = []
-                            resolved = {
-                                "appOwnerOrganizationResolved": resolve_org_owner(
-                                    org_id=str(item.get("appOwnerOrganizationId") or ""),
-                                    local_org_by_id=local_org_by_id,
-                                ),
-                                "resolutionStatus": {
-                                    "owners": {"count": 0, "error": normalized_error},
-                                    "appRoleAssignments": {
-                                        "count": 0,
-                                        "collectionError": normalized_error,
-                                        "unresolvedResourceCount": 0,
-                                        "unresolvedRoleCount": 0,
-                                        "lookupErrors": [],
-                                    },
-                                },
-                            }
-
-                        previous_item = None
-                        object_id = str(item.get("id") or "").strip()
-                        previous_lookup = previous_lookup_by_title.get("Enterprise Applications")
-                        needs_backfill = (
-                            _owners_need_backfill(owners)
-                            or _app_role_assignments_need_backfill(role_assignments)
-                            or not str(resolved["appOwnerOrganizationResolved"].get("displayName") or "").strip()
-                        )
-                        if previous_lookup and object_id and needs_backfill:
-                            previous_item = previous_lookup.get(object_id)
-                        if isinstance(previous_item, dict):
-                            owners = _merge_owner_resolution(
-                                owners,
-                                previous_item.get("ownersResolved")
-                                if isinstance(previous_item.get("ownersResolved"), list)
-                                else [],
-                            )
-                            role_assignments = _merge_app_role_assignments_resolution(
-                                role_assignments,
-                                previous_item.get("appRoleAssignmentsResolved")
-                                if isinstance(previous_item.get("appRoleAssignmentsResolved"), list)
-                                else [],
-                            )
-                            previous_owner_org = previous_item.get("appOwnerOrganizationResolved")
-                            if (
-                                isinstance(previous_owner_org, dict)
-                                and not str(resolved["appOwnerOrganizationResolved"].get("displayName") or "").strip()
-                            ):
-                                prev_owner_name = str(previous_owner_org.get("displayName") or "").strip()
-                                if prev_owner_name:
-                                    resolved["appOwnerOrganizationResolved"]["displayName"] = prev_owner_name
-                            unresolved_resources, unresolved_roles = _count_unresolved_app_role_assignments(
-                                role_assignments
-                            )
-                            app_role_status = resolved["resolutionStatus"].get("appRoleAssignments", {})
-                            if isinstance(app_role_status, dict):
-                                app_role_status["count"] = len(role_assignments)
-                                app_role_status["unresolvedResourceCount"] = unresolved_resources
-                                app_role_status["unresolvedRoleCount"] = unresolved_roles
-                                resolved["resolutionStatus"]["appRoleAssignments"] = app_role_status
-
-                        item["ownersResolved"] = owners
-                        item["appRoleAssignmentsResolved"] = role_assignments
-                        item["appOwnerOrganizationResolved"] = resolved["appOwnerOrganizationResolved"]
-                        item["resolutionStatus"] = resolved["resolutionStatus"]
-
-                        completed += 1
-                        if completed == 1 or completed % 25 == 0 or completed == total:
-                            log(f"Enterprise Applications progress: {completed}/{total}")
-
-        if export["title"] == "App Registrations":
-            total = len(items)
-            log(f"Resolving App Registrations details for {total} objects...")
-            for idx, item in enumerate(items, start=1):
-                if not isinstance(item, dict):
-                    continue
-                if idx == 1 or idx % 25 == 0 or idx == total:
-                    log(f"App Registrations progress: {idx}/{total}")
-                object_id = str(item.get("id") or "").strip()
-                owners, owners_error = resolve_owners(
-                    client=client,
-                    object_kind="applications",
-                    object_id=object_id,
-                )
-                (
-                    required_resolved,
-                    unresolved_resources,
-                    unresolved_permissions,
-                    required_lookup_errors,
-                ) = resolve_required_resource_access(
-                    app=item,
-                    client=client,
-                    resource_sp_by_appid=resource_sp_by_appid,
-                )
-                previous_item = None
-                previous_lookup = previous_lookup_by_title.get("App Registrations")
-                needs_backfill = (
-                    _owners_need_backfill(owners)
-                    or _required_resource_access_needs_backfill(required_resolved)
-                )
-                if previous_lookup and object_id and needs_backfill:
-                    previous_item = previous_lookup.get(object_id)
-                if isinstance(previous_item, dict):
-                    owners = _merge_owner_resolution(
-                        owners,
-                        previous_item.get("ownersResolved")
-                        if isinstance(previous_item.get("ownersResolved"), list)
-                        else [],
-                    )
-                    required_resolved = _merge_required_resource_access_resolution(
-                        required_resolved,
-                        previous_item.get("requiredResourceAccessResolved")
-                        if isinstance(previous_item.get("requiredResourceAccessResolved"), list)
-                        else [],
-                    )
-                    unresolved_resources, unresolved_permissions = _count_unresolved_required_permissions(required_resolved)
-                item["ownersResolved"] = owners
-                item["requiredResourceAccessResolved"] = required_resolved
-                item["resolutionStatus"] = {
-                    "owners": {
-                        "count": len(owners),
-                        "error": normalize_resolution_error(owners_error),
-                    },
-                    "requiredResourceAccess": {
-                        "resourceCount": len(required_resolved),
-                        "unresolvedResourceCount": unresolved_resources,
-                        "unresolvedPermissionCount": unresolved_permissions,
-                        "lookupErrors": normalize_resolution_lookup_errors(required_lookup_errors),
-                    },
-                }
+        elif title == "App Registrations":
+            _enrich_app_registrations(items, client, resource_sp_by_appid, previous_lookup_by_title.get(title))
 
         written = write_collection(
             root=root,
             rel_dir=export["rel_dir"],
-            title=export["title"],
+            title=title,
             items=items,
             source_url=export["url"],
         )
         total_written += written
-        log(f"Exported {written} objects: {export['title']}")
+        log(f"Exported {written} objects: {title}")
 
     if failed_exports and fail_on_export_error:
         log("Entra baseline export failed because one or more requested categories could not be exported:")
