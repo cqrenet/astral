@@ -30,6 +30,9 @@ parameters:
     displayName: Restore mode (`full` or `selective`)
     type: string
     default: full
+    values:
+      - full
+      - selective
   - name: restorePathsCsv
     displayName: Selective restore file paths (CSV; repo-relative or intune-relative)
     type: string
@@ -179,7 +182,7 @@ jobs:
               if (-not ($roles -contains $role)) { $missingRoles += $role }
             }
 
-            if ("${{ parameters.includeEntraUpdate }}" -eq "true") {
+            if ($env:INCLUDE_ENTRA_UPDATE -eq "true") {
               $requiredEntraWriteRoles = @(
                 'Policy.Read.All',
                 'Policy.ReadWrite.ConditionalAccess'
@@ -196,6 +199,8 @@ jobs:
             }
 
             Write-Host "##vso[task.setvariable variable=accessToken;issecret=true]$accessToken"
+        env:
+          INCLUDE_ENTRA_UPDATE: ${{ parameters.includeEntraUpdate }}
 
       - task: Bash@3
         displayName: Run IntuneCD restore/update

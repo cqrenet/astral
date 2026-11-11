@@ -60,7 +60,15 @@ jobs:
             set -euo pipefail
 
             UPSTREAM_URL="https://github.com/cqrenet/astral"
-            UPSTREAM_REF="${{ parameters.upstreamRef }}"
+            # The queue-time input arrives via env, never as script text (shell injection).
+            UPSTREAM_REF="$(printf '%s' "${UPSTREAM_REF_INPUT:-}" | xargs)"
+            UPSTREAM_REF="${UPSTREAM_REF:-latest}"   # blank means the latest main
+            # Plain ref names or SHAs only: blocks option injection into the git commands below, and
+            # keeps the value safe to hand to later steps.
+            if [ "$UPSTREAM_REF" != "latest" ] && ! [[ "$UPSTREAM_REF" =~ ^[A-Za-z0-9][A-Za-z0-9._/-]*$ ]]; then
+              echo "##vso[task.logissue type=error]Invalid upstream ref '$UPSTREAM_REF'."
+              exit 1
+            fi
 
             git remote remove upstream 2>/dev/null || true
             git remote add upstream "$UPSTREAM_URL"
@@ -94,6 +102,8 @@ jobs:
             echo "##vso[task.setvariable variable=UPSTREAM_SHA]$UPSTREAM_SHA"
             echo "##vso[task.setvariable variable=FETCH_REF]$FETCH_REF"
           workingDirectory: "$(Build.SourcesDirectory)"
+        env:
+          UPSTREAM_REF_INPUT: ${{ parameters.upstreamRef }}
 
       - task: Bash@3
         displayName: Show incoming changes
@@ -102,8 +112,6 @@ jobs:
           targetType: inline
           script: |
             set -euo pipefail
-
-            FETCH_REF="$(FETCH_REF)"
 
             echo "=== Incoming commits ==="
             git log HEAD.."$FETCH_REF" --oneline --no-merges | grep -v "^.*Sync from dev" || true
@@ -122,6 +130,8 @@ jobs:
               fi
             done
           workingDirectory: "$(Build.SourcesDirectory)"
+        env:
+          FETCH_REF: $(FETCH_REF)
 
       - task: Bash@3
         displayName: Merge upstream changes
@@ -131,9 +141,7 @@ jobs:
           script: |
             set -euo pipefail
 
-            FETCH_REF="$(FETCH_REF)"
-            UPSTREAM_SHA="$(UPSTREAM_SHA)"
-            UPSTREAM_REF_LABEL="${{ parameters.upstreamRef }}"
+            UPSTREAM_REF_LABEL="$(printf '%s' "${UPSTREAM_REF_INPUT:-}" | xargs)"
             if [ "$UPSTREAM_REF_LABEL" = "latest" ] || [ -z "$UPSTREAM_REF_LABEL" ]; then
               UPSTREAM_REF_LABEL="main @ ${UPSTREAM_SHA:0:7}"
             fi
@@ -182,6 +190,10 @@ jobs:
               fi
             fi
           workingDirectory: "$(Build.SourcesDirectory)"
+        env:
+          FETCH_REF: $(FETCH_REF)
+          UPSTREAM_SHA: $(UPSTREAM_SHA)
+          UPSTREAM_REF_INPUT: ${{ parameters.upstreamRef }}
 
       - task: Bash@3
         displayName: Push merged changes
