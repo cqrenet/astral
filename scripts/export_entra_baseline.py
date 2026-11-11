@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import concurrent.futures
+import contextlib
 import json
 import os
 import pathlib
@@ -366,6 +367,52 @@ def _find_permission_by_id(
     return result
 
 
+_SP_SELECT = "id,appId,displayName,appRoles,oauth2PermissionScopes"
+
+
+def _lookup_service_principal_by_app_id(client: GraphClient, resource_app_id: str) -> tuple[dict[str, Any] | None, Any]:
+    """Find a resource service principal by appId: filter query first, then the direct key lookup."""
+    literal = urllib.parse.quote(_quote_odata_literal(resource_app_id))
+    payload, error = client.get_object(
+        "https://graph.microsoft.com/v1.0/servicePrincipals"
+        f"?$top=1&$select={_SP_SELECT}&$filter=appId eq '{literal}'"
+    )
+    sp = None
+    values = payload.get("value") if isinstance(payload, dict) else None
+    if isinstance(values, list) and values and isinstance(values[0], dict):
+        sp = values[0]
+    if sp is None:
+        direct_payload, direct_error = client.get_object(
+            f"https://graph.microsoft.com/v1.0/servicePrincipals(appId='{literal}')?$select={_SP_SELECT}"
+        )
+        if isinstance(direct_payload, dict) and str(direct_payload.get("id") or "").strip():
+            sp = direct_payload
+        elif direct_error and not error:
+            error = direct_error
+    return sp, error
+
+
+def _resolve_permissions(resource_sp: Any, accesses: list[Any]) -> tuple[list[dict[str, Any]], int]:
+    """Permission details for each resourceAccess entry; also counts entries left unresolved."""
+    permissions: list[dict[str, Any]] = []
+    unresolved = 0
+    for access in accesses:
+        if not isinstance(access, dict):
+            continue
+        permission_id = str(access.get("id") or "")
+        permission_type = str(access.get("type") or "")
+        if not permission_id:
+            continue
+        if isinstance(resource_sp, dict):
+            permission = _find_permission_by_id(resource_sp, permission_id=permission_id, permission_type=permission_type)
+        else:
+            permission = {"id": permission_id, "type": permission_type, "value": "", "displayName": "", "description": ""}
+        permissions.append(permission)
+        if not (str(permission.get("value") or "").strip() or str(permission.get("displayName") or "").strip()):
+            unresolved += 1
+    return permissions, unresolved
+
+
 def resolve_required_resource_access(
     app: dict[str, Any],
     client: GraphClient,
@@ -386,67 +433,17 @@ def resolve_required_resource_access(
         if not resource_app_id:
             continue
         if resource_app_id not in resource_sp_by_appid:
-            query_url = (
-                "https://graph.microsoft.com/v1.0/servicePrincipals"
-                + "?$top=1"
-                + "&$select=id,appId,displayName,appRoles,oauth2PermissionScopes"
-                + "&$filter=appId eq '"
-                + urllib.parse.quote(_quote_odata_literal(resource_app_id))
-                + "'"
-            )
-            payload, error = client.get_object(query_url)
-            sp = None
-            if isinstance(payload, dict):
-                value = payload.get("value")
-                if isinstance(value, list) and value and isinstance(value[0], dict):
-                    sp = value[0]
-            if sp is None:
-                direct_url = (
-                    "https://graph.microsoft.com/v1.0/servicePrincipals(appId='"
-                    + urllib.parse.quote(_quote_odata_literal(resource_app_id))
-                    + "')?$select=id,appId,displayName,appRoles,oauth2PermissionScopes"
-                )
-                direct_payload, direct_error = client.get_object(direct_url)
-                if isinstance(direct_payload, dict) and str(direct_payload.get("id") or "").strip():
-                    sp = direct_payload
-                elif direct_error and not error:
-                    error = direct_error
+            sp, error = _lookup_service_principal_by_app_id(client, resource_app_id)
             if error:
                 lookup_errors.append(f"resourceAppId {resource_app_id}: {error}")
             resource_sp_by_appid[resource_app_id] = sp
 
         resource_sp = resource_sp_by_appid.get(resource_app_id)
-        resource_name = (
-            str(resource_sp.get("displayName") or "") if isinstance(resource_sp, dict) else ""
-        )
+        resource_name = str(resource_sp.get("displayName") or "") if isinstance(resource_sp, dict) else ""
         if not resource_name:
             unresolved_resource_count += 1
-        permissions = []
-        for access in item.get("resourceAccess", []):
-            if not isinstance(access, dict):
-                continue
-            permission_id = str(access.get("id") or "")
-            permission_type = str(access.get("type") or "")
-            if not permission_id:
-                continue
-            if isinstance(resource_sp, dict):
-                permissions.append(
-                    _find_permission_by_id(resource_sp, permission_id=permission_id, permission_type=permission_type)
-                )
-            else:
-                permissions.append(
-                    {
-                        "id": permission_id,
-                        "type": permission_type,
-                        "value": "",
-                        "displayName": "",
-                        "description": "",
-                    }
-                )
-            if permissions:
-                current = permissions[-1]
-                if not (str(current.get("value") or "").strip() or str(current.get("displayName") or "").strip()):
-                    unresolved_permission_count += 1
+        permissions, unresolved = _resolve_permissions(resource_sp, item.get("resourceAccess", []))
+        unresolved_permission_count += unresolved
         resolved.append(
             {
                 "resourceAppId": resource_app_id,
@@ -463,6 +460,15 @@ def resolve_required_resource_access(
     )
 
 
+def _find_app_role(resource_sp: Any, app_role_id: str) -> tuple[str, str]:
+    """(value, display name) of the app role with this id on the resource, or ('', '')."""
+    if isinstance(resource_sp, dict):
+        for role in resource_sp.get("appRoles", []):
+            if str(role.get("id") or "").lower() == app_role_id.lower():
+                return str(role.get("value") or ""), str(role.get("displayName") or "")
+    return "", ""
+
+
 def resolve_enterprise_app_role_assignments(
     service_principal: dict[str, Any],
     client: GraphClient,
@@ -473,12 +479,12 @@ def resolve_enterprise_app_role_assignments(
     if not sp_id:
         return [], "Missing service principal id", 0, 0, []
 
-    url = (
+    assignments, assignment_error = client.get_collection(
         "https://graph.microsoft.com/v1.0/servicePrincipals/"
         + urllib.parse.quote(sp_id)
         + "/appRoleAssignments?$select=id,resourceId,appRoleId,principalType"
     )
-    assignments, assignment_error = client.get_collection(url)
+    lock = resource_sp_lock if resource_sp_lock is not None else contextlib.nullcontext()
     resolved: list[dict[str, Any]] = []
     unresolved_resource_count = 0
     unresolved_role_count = 0
@@ -488,49 +494,28 @@ def resolve_enterprise_app_role_assignments(
             continue
         resource_id = str(assignment.get("resourceId") or "")
         app_role_id = str(assignment.get("appRoleId") or "")
-        principal_type = str(assignment.get("principalType") or "")
         if not resource_id:
             continue
-        if resource_sp_lock is not None:
-            with resource_sp_lock:
-                has_resource = resource_id in resource_sp_by_id
-        else:
+        with lock:
             has_resource = resource_id in resource_sp_by_id
-
         if not has_resource:
-            resource_url = (
+            payload, error = client.get_object(
                 "https://graph.microsoft.com/v1.0/servicePrincipals/"
                 + urllib.parse.quote(resource_id)
                 + "?$select=id,appId,displayName,appRoles"
             )
-            payload, error = client.get_object(resource_url)
-            if resource_sp_lock is not None:
-                with resource_sp_lock:
-                    if resource_id not in resource_sp_by_id:
-                        resource_sp_by_id[resource_id] = payload if isinstance(payload, dict) else None
-            else:
-                resource_sp_by_id[resource_id] = payload if isinstance(payload, dict) else None
+            with lock:
+                if resource_id not in resource_sp_by_id:
+                    resource_sp_by_id[resource_id] = payload if isinstance(payload, dict) else None
             if error:
                 lookup_errors.append(f"resourceId {resource_id}: {error}")
 
-        if resource_sp_lock is not None:
-            with resource_sp_lock:
-                resource_sp = resource_sp_by_id.get(resource_id)
-        else:
+        with lock:
             resource_sp = resource_sp_by_id.get(resource_id)
-        resource_name = (
-            str(resource_sp.get("displayName") or "") if isinstance(resource_sp, dict) else ""
-        )
+        resource_name = str(resource_sp.get("displayName") or "") if isinstance(resource_sp, dict) else ""
         if not resource_name:
             unresolved_resource_count += 1
-        role_value = ""
-        role_display_name = ""
-        if isinstance(resource_sp, dict):
-            for role in resource_sp.get("appRoles", []):
-                if str(role.get("id") or "").lower() == app_role_id.lower():
-                    role_value = str(role.get("value") or "")
-                    role_display_name = str(role.get("displayName") or "")
-                    break
+        role_value, role_display_name = _find_app_role(resource_sp, app_role_id)
         if not role_value and not role_display_name:
             unresolved_role_count += 1
 
@@ -541,7 +526,7 @@ def resolve_enterprise_app_role_assignments(
                 "appRoleId": app_role_id,
                 "appRoleValue": role_value,
                 "appRoleDisplayName": role_display_name,
-                "principalType": principal_type,
+                "principalType": str(assignment.get("principalType") or ""),
             }
         )
     return (

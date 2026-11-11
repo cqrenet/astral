@@ -140,6 +140,75 @@ class ExportEntraBaselineTests(unittest.TestCase):
             self.module._enrich_enterprise_apps([item], MagicMock(), {}, {}, {}, previous, 1)
         self.assertEqual(item["appOwnerOrganizationResolved"]["displayName"], "Old Org")
 
+    def _graph(self, objects=None, collections=None):
+        """Fake GraphClient answering by URL substring; records the object URLs requested."""
+        client = MagicMock()
+        client.object_urls = []
+
+        def get_object(url):
+            client.object_urls.append(url)
+            for needle, answer in (objects or {}).items():
+                if needle in url:
+                    return answer
+            return None, None
+
+        client.get_object.side_effect = get_object
+        client.get_collection.side_effect = lambda url: (collections or {}).get(url, ([], None))
+        return client
+
+    def test_required_resource_access_falls_back_to_direct_lookup_and_caches(self) -> None:
+        graph_sp = {
+            "id": "sp-graph",
+            "displayName": "Graph",
+            "oauth2PermissionScopes": [{"id": "P1", "value": "User.Read", "adminConsentDisplayName": "Sign in"}],
+        }
+        client = self._graph(objects={"servicePrincipals(appId=": (graph_sp, None)})
+        cache: dict = {}
+        app = {"requiredResourceAccess": [{"resourceAppId": "app1", "resourceAccess": [{"id": "P1", "type": "Scope"}, {"id": "P9", "type": "Scope"}]}]}
+
+        resolved, unresolved_resources, unresolved_permissions, errors = self.module.resolve_required_resource_access(app, client, cache)
+
+        self.assertEqual(len(client.object_urls), 2)  # filter query, then direct key lookup
+        self.assertEqual(cache["app1"], graph_sp)
+        self.assertEqual(resolved[0]["resourceDisplayName"], "Graph")
+        self.assertEqual(resolved[0]["permissions"][0]["value"], "User.Read")
+        self.assertEqual((unresolved_resources, unresolved_permissions, errors), (0, 1, []))
+
+        self.module.resolve_required_resource_access(app, client, cache)
+        self.assertEqual(len(client.object_urls), 2)  # second call served from the cache
+
+    def test_required_resource_access_unresolvable_resource_is_reported(self) -> None:
+        client = self._graph(objects={"servicePrincipals": (None, "HTTP 403")})
+        app = {"requiredResourceAccess": [{"resourceAppId": "app1", "resourceAccess": [{"id": "P1", "type": "Role"}]}]}
+        resolved, unresolved_resources, unresolved_permissions, errors = self.module.resolve_required_resource_access(app, client, {})
+        self.assertEqual(resolved[0]["resourceDisplayName"], "Unresolved")
+        self.assertEqual(resolved[0]["permissions"][0]["value"], "")
+        self.assertEqual((unresolved_resources, unresolved_permissions), (1, 1))
+        self.assertTrue(errors and "app1" in errors[0])
+
+    def test_role_assignments_match_role_id_case_insensitively(self) -> None:
+        import threading
+
+        resource = {"id": "res1", "displayName": "Graph", "appRoles": [{"id": "ABC", "value": "Mail.Read", "displayName": "Read mail"}]}
+        url = "https://graph.microsoft.com/v1.0/servicePrincipals/sp1/appRoleAssignments?$select=id,resourceId,appRoleId,principalType"
+        assignments = [{"resourceId": "res1", "appRoleId": "abc", "principalType": "ServicePrincipal"}, {"resourceId": "res1", "appRoleId": "zzz"}, {"appRoleId": "no-resource"}]
+        for lock in (None, threading.Lock()):
+            with self.subTest(lock=lock is not None):
+                client = self._graph(objects={"servicePrincipals/res1": (resource, None)}, collections={url: (assignments, None)})
+                cache: dict = {}
+                resolved, error, unresolved_resources, unresolved_roles, _ = self.module.resolve_enterprise_app_role_assignments(
+                    {"id": "sp1"}, client, cache, lock
+                )
+                self.assertEqual([r["appRoleValue"] for r in resolved], ["Mail.Read", ""])
+                self.assertEqual((error, unresolved_resources, unresolved_roles), (None, 0, 1))
+                self.assertEqual(client.object_urls.count("https://graph.microsoft.com/v1.0/servicePrincipals/res1?$select=id,appId,displayName,appRoles"), 1)  # fetched once
+
+    def test_role_assignments_without_service_principal_id(self) -> None:
+        self.assertEqual(
+            self.module.resolve_enterprise_app_role_assignments({}, self._graph(), {}),
+            ([], "Missing service principal id", 0, 0, []),
+        )
+
     def test_normalize_branch_name_ignores_unresolved_macro(self) -> None:
         self.assertEqual(self.module.common.normalize_branch("$(DRIFT_BRANCH_ENTRA)"), "")
 
