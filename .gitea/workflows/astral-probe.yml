@@ -1,0 +1,54 @@
+# ASTRAL change probe on Gitea Actions: poll Intune/Entra audit logs every 5 minutes and dispatch
+# astral-backup.yml once changes settle (15 min quiet window, 30 min cooldown).
+# Debouncer state lives on branch astral-probe-state (one force-pushed commit).
+name: ASTRAL change probe
+
+on:
+  schedule:
+    - cron: "*/5 * * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: astral-probe
+  cancel-in-progress: false
+
+jobs:
+  probe:
+    runs-on: astral
+    permissions:
+      contents: write   # state branch
+      actions: write    # dispatch astral-backup.yml
+    timeout-minutes: 10
+    env:
+      ASTRAL_SCM: gitea
+      GRAPH_AUTH_METHOD: ${{ vars.GRAPH_AUTH_METHOD }}
+      AZURE_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
+      AZURE_CLIENT_ID: ${{ vars.AZURE_CLIENT_ID }}
+    steps:
+      - name: Checkout
+        env:
+          FORGE_TOKEN: ${{ github.token }}
+        run: |
+          git init -q .
+          git remote remove origin 2>/dev/null || true
+          git remote add origin "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY.git"
+          git config http.extraheader "AUTHORIZATION: basic $(printf 'x-access-token:%s' "$FORGE_TOKEN" | base64 | tr -d '\n')"
+          git fetch --quiet --depth=1 origin "$GITHUB_SHA"
+          git checkout --quiet --force FETCH_HEAD
+          git clean -ffdxq
+
+      - name: Get Graph token
+        env:
+          AZURE_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
+          AZURE_CLIENT_CERTIFICATE: ${{ secrets.AZURE_CLIENT_CERTIFICATE }}
+        run: python3 scripts/get_graph_token.py --require AuditLog.Read.All
+
+      - name: Probe audit logs and dispatch backup
+        env:
+          # The Actions token may not be allowed to dispatch on some Gitea versions; ASTRAL_DISPATCH_TOKEN
+          # (a token with write access to this repository) is the fallback.
+          FORGE_TOKEN: ${{ secrets.ASTRAL_DISPATCH_TOKEN || github.token }}
+          BASELINE_BRANCH: ${{ vars.BASELINE_BRANCH }}
+          PROBE_QUIET_WINDOW_MINUTES: ${{ vars.PROBE_QUIET_WINDOW_MINUTES }}
+          PROBE_COOLDOWN_MINUTES: ${{ vars.PROBE_COOLDOWN_MINUTES }}
+        run: bash scripts/run_probe.sh

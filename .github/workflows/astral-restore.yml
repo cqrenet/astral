@@ -1,0 +1,135 @@
+# ASTRAL restore: push an approved baseline snapshot back to the tenant (IntuneCD update).
+# GitHub counterpart of azure-pipelines-restore.yml. The only workflow that writes to the tenant.
+#
+# Controls:
+#  - environment astral-restore: required reviewers + deployment branch policy "main" only.
+#    The write-capable identity (AZURE_CLIENT_ID on that environment) is only usable from it.
+#  - the restored commit must be in the approved branch history (scripts/restore_checkout_ref.sh).
+#  - inputs reach scripts via env only, never interpolated into script text.
+#  - dryRun defaults to true.
+name: ASTRAL restore
+
+on:
+  workflow_dispatch:
+    inputs:
+      dryRun:
+        description: Dry run only (report, no changes pushed)
+        type: boolean
+        default: true
+      updateAssignments:
+        description: Update assignments
+        type: boolean
+        default: true
+      removeObjectsNotInBaseline:
+        description: Remove objects not present in baseline
+        type: boolean
+        default: false
+      includeEntraUpdate:
+        description: Include Entra (Conditional Access) updates
+        type: boolean
+        default: false
+      baselineBranch:
+        description: Baseline branch to restore from
+        type: string
+        default: main
+      baselineRef:
+        description: Optional historical ref (branch/tag/commit); must be in approved branch history
+        type: string
+        default: ""
+      restoreMode:
+        description: Restore mode
+        type: choice
+        options: [full, selective]
+        default: full
+      restorePathsCsv:
+        description: Selective restore file paths (CSV; repo-relative or intune-relative)
+        type: string
+        default: ""
+      maxWorkers:
+        description: IntuneCD max workers
+        type: string
+        default: "10"
+      excludeCsv:
+        description: Exclude object categories (comma-separated IntuneCD keys)
+        type: string
+        default: ""
+
+permissions: {}
+
+concurrency:
+  group: astral-restore
+  cancel-in-progress: false
+
+jobs:
+  restore:
+    name: Restore tenant from approved baseline
+    runs-on: ${{ fromJSON(vars.ASTRAL_RESTORE_RUNS_ON || '["self-hosted","astral-restore"]') }}
+    environment: astral-restore
+    permissions:
+      contents: read
+      id-token: write
+    timeout-minutes: 120
+    env:
+      ASTRAL_SCM: github
+      BACKUP_FOLDER: tenant-state
+      INTUNE_BACKUP_SUBDIR: intune
+      INTUNECD_VERSION: "2.5.0"
+      GRAPH_AUTH_METHOD: ${{ vars.GRAPH_AUTH_METHOD }}
+      AZURE_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false   # read-only job; no token left in .git/config
+
+      # The baseline checkout below may be an older commit; run helpers from this (main) revision.
+      - name: Snapshot restore helper scripts
+        run: |
+          cp -R scripts "$RUNNER_TEMP/astral-scripts"
+          echo "ASTRAL_SCRIPTS=$RUNNER_TEMP/astral-scripts" >> "$GITHUB_ENV"
+
+      - name: Python environment
+        run: |
+          python3 -m venv "$RUNNER_TEMP/astral-venv"
+          "$RUNNER_TEMP/astral-venv/bin/pip" install --quiet "IntuneCD==$INTUNECD_VERSION"
+          echo "$RUNNER_TEMP/astral-venv/bin" >> "$GITHUB_PATH"
+
+      - name: Checkout approved baseline snapshot
+        env:
+          TARGET_REF_RAW: ${{ inputs.baselineRef }}
+          BASELINE_BRANCH_PARAM: ${{ inputs.baselineBranch }}
+          APPROVED_BRANCH: ${{ vars.BASELINE_BRANCH || 'main' }}   # trusted: admin-managed variable
+          RESTORE_DATA_DIR: tenant-state/intune
+        run: bash "$ASTRAL_SCRIPTS/restore_checkout_ref.sh"
+
+      - name: Prepare restore payload scope
+        env:
+          RESTORE_MODE: ${{ inputs.restoreMode }}
+          RESTORE_PATHS_CSV: ${{ inputs.restorePathsCsv }}
+        run: python3 "$ASTRAL_SCRIPTS/restore_prepare_scope.py"
+
+      - name: Get Graph token for restore
+        env:
+          AZURE_CLIENT_ID: ${{ vars.AZURE_CLIENT_ID }}   # environment-level: the write-capable identity
+          INCLUDE_ENTRA_UPDATE: ${{ inputs.includeEntraUpdate }}
+        run: |
+          args=()
+          for role in DeviceManagementApps.ReadWrite.All DeviceManagementConfiguration.ReadWrite.All \
+                      DeviceManagementManagedDevices.ReadWrite.All DeviceManagementRBAC.ReadWrite.All \
+                      DeviceManagementScripts.ReadWrite.All DeviceManagementServiceConfig.ReadWrite.All Group.Read.All; do
+            args+=(--require "$role")
+          done
+          if [ "$INCLUDE_ENTRA_UPDATE" = "true" ]; then
+            args+=(--require Policy.Read.All --require Policy.ReadWrite.ConditionalAccess)
+          fi
+          python3 "$ASTRAL_SCRIPTS/get_graph_token.py" "${args[@]}"
+
+      - name: Run IntuneCD restore/update
+        env:
+          DRY_RUN: ${{ inputs.dryRun }}
+          UPDATE_ASSIGNMENTS: ${{ inputs.updateAssignments }}
+          REMOVE_UNMANAGED: ${{ inputs.removeObjectsNotInBaseline }}
+          ENTRA_UPDATE: ${{ inputs.includeEntraUpdate }}
+          MAX_WORKERS: ${{ inputs.maxWorkers }}
+          EXCLUDE_CSV: ${{ inputs.excludeCsv }}
+        run: bash "$ASTRAL_SCRIPTS/run_intunecd_update.sh"

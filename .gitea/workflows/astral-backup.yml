@@ -1,0 +1,166 @@
+# ASTRAL backup on Gitea Actions: export Intune and Entra, commit drift, create/refresh rolling PRs.
+# Same scripts as GitHub (scripts/backup_*.sh, scripts/run_review.sh). No third-party actions:
+# checkout is plain git, so nothing is downloaded from github.com.
+# Setup and security model: docs/gitea-setup.md.
+name: ASTRAL backup
+
+on:
+  schedule:
+    - cron: "0 2 * * *"   # UTC; with default BACKUP_TIMEZONE/FULL_RUN_HOUR this is the daily full run
+  workflow_dispatch:
+    inputs:
+      forceFullRun:
+        description: Force a full run (all Entra categories, full validation)
+        type: boolean
+        default: false
+
+concurrency:
+  group: astral-backup
+  cancel-in-progress: false
+
+env:
+  ASTRAL_SCM: gitea
+  INTUNECD_VERSION: "2.5.0"
+  FORCE_FULL_RUN: ${{ github.event.inputs.forceFullRun }}
+  # Empty values fall back to the defaults in the scripts.
+  BASELINE_BRANCH: ${{ vars.BASELINE_BRANCH }}
+  DRIFT_BRANCH_INTUNE: ${{ vars.DRIFT_BRANCH_INTUNE }}
+  DRIFT_BRANCH_ENTRA: ${{ vars.DRIFT_BRANCH_ENTRA }}
+  USER_NAME: ${{ vars.USER_NAME }}
+  USER_EMAIL: ${{ vars.USER_EMAIL }}
+  BACKUP_TIMEZONE: ${{ vars.BACKUP_TIMEZONE }}
+  FULL_RUN_HOUR: ${{ vars.FULL_RUN_HOUR }}
+  GRAPH_AUTH_METHOD: ${{ vars.GRAPH_AUTH_METHOD }}
+  AZURE_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
+  AZURE_CLIENT_ID: ${{ vars.AZURE_CLIENT_ID }}
+  ENABLE_ENTRA_CONDITIONAL_ACCESS: ${{ vars.ENABLE_ENTRA_CONDITIONAL_ACCESS }}
+  EXCLUDE_SCRIPT_BACKUP: ${{ vars.EXCLUDE_SCRIPT_BACKUP }}
+  INTUNE_EXCLUDE_CSV: ${{ vars.INTUNE_EXCLUDE_CSV }}
+  ENABLE_WORKLOAD_ENTRA: ${{ vars.ENABLE_WORKLOAD_ENTRA }}
+  ENTRA_INCLUDE_NAMED_LOCATIONS: ${{ vars.ENTRA_INCLUDE_NAMED_LOCATIONS }}
+  ENTRA_INCLUDE_AUTHENTICATION_STRENGTHS: ${{ vars.ENTRA_INCLUDE_AUTHENTICATION_STRENGTHS }}
+  ENTRA_INCLUDE_CONDITIONAL_ACCESS: ${{ vars.ENTRA_INCLUDE_CONDITIONAL_ACCESS }}
+  ENTRA_INCLUDE_ENTERPRISE_APPS: ${{ vars.ENTRA_INCLUDE_ENTERPRISE_APPS }}
+  ENTRA_INCLUDE_APP_REGISTRATIONS: ${{ vars.ENTRA_INCLUDE_APP_REGISTRATIONS }}
+  ENTRA_ENTERPRISE_APP_WORKERS: ${{ vars.ENTRA_ENTERPRISE_APP_WORKERS }}
+  BUILD_REASON: ${{ github.event_name == 'schedule' && 'Schedule' || 'Manual' }}
+  BUILD_REQUESTEDFOR: ${{ github.actor }}
+  # Review (scripts/run_review.sh)
+  PR_DECISION_ALLOWED_REVIEWERS: ${{ vars.PR_DECISION_ALLOWED_REVIEWERS }}
+  ENABLE_PR_REVIEW_SUMMARY: ${{ vars.ENABLE_PR_REVIEW_SUMMARY }}
+  ENABLE_PR_REVIEWER_DECISIONS: ${{ vars.ENABLE_PR_REVIEWER_DECISIONS }}
+  ENABLE_PR_AI_SUMMARY: ${{ vars.ENABLE_PR_AI_SUMMARY }}
+  AZURE_OPENAI_ENDPOINT: ${{ vars.AZURE_OPENAI_ENDPOINT }}
+  AZURE_OPENAI_DEPLOYMENT: ${{ vars.AZURE_OPENAI_DEPLOYMENT }}
+  REQUIRE_CHANGE_TICKETS: ${{ vars.REQUIRE_CHANGE_TICKETS }}
+  ROLLING_PR_MERGE_STRATEGY: ${{ vars.ROLLING_PR_MERGE_STRATEGY }}
+  AUTO_REMEDIATE_ON_PR_REJECTION: ${{ vars.AUTO_REMEDIATE_ON_PR_REJECTION }}
+  AUTO_REMEDIATE_AFTER_MERGE: ${{ vars.AUTO_REMEDIATE_AFTER_MERGE }}
+  AUTO_REMEDIATE_DRY_RUN: ${{ vars.AUTO_REMEDIATE_DRY_RUN }}
+
+jobs:
+  intune:
+    name: Backup Intune
+    if: vars.ENABLE_WORKLOAD_INTUNE != 'false'
+    runs-on: astral
+    permissions:
+      contents: write       # push drift/intune
+      pull-requests: write  # rolling PR
+      issues: write         # PR comments
+      actions: write        # auto-remediation dispatch (off by default)
+    timeout-minutes: 150
+    steps:
+      - name: Checkout
+        env:
+          FORGE_TOKEN: ${{ github.token }}
+        run: |
+          git init -q .
+          git remote remove origin 2>/dev/null || true
+          git remote add origin "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY.git"
+          git config http.extraheader "AUTHORIZATION: basic $(printf 'x-access-token:%s' "$FORGE_TOKEN" | base64 | tr -d '\n')"
+          git fetch --quiet --prune --tags origin '+refs/heads/*:refs/remotes/origin/*'
+          git checkout --quiet --force "$GITHUB_SHA"
+          git clean -ffdxq
+
+      - name: Python environment
+        run: |
+          python3 -m venv "$RUNNER_TEMP/astral-venv"
+          "$RUNNER_TEMP/astral-venv/bin/pip" install --quiet "IntuneCD==$INTUNECD_VERSION"
+          echo "$RUNNER_TEMP/astral-venv/bin" >> "$GITHUB_PATH"
+
+      - name: Get Graph token
+        env:
+          AZURE_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
+          AZURE_CLIENT_CERTIFICATE: ${{ secrets.AZURE_CLIENT_CERTIFICATE }}
+        run: |
+          args=(--warn-missing Group.Read.All)
+          if [ "$EXCLUDE_SCRIPT_BACKUP" != "true" ]; then
+            args+=(--require "DeviceManagementScripts.Read.All|DeviceManagementScripts.ReadWrite.All")
+          fi
+          if [ "${ENABLE_ENTRA_CONDITIONAL_ACCESS:-true}" != "true" ]; then
+            args+=(--require Policy.Read.All --require Policy.Read.ConditionalAccess)
+          fi
+          python3 scripts/get_graph_token.py "${args[@]}"
+
+      - name: Back up and commit Intune drift
+        id: backup
+        run: bash scripts/backup_intune.sh
+
+      - name: Rolling PR review
+        if: steps.backup.outputs.CHANGE_DETECTED == '1' || steps.backup.outputs.ROLLING_PR_SYNC_REQUIRED == '1'
+        env:
+          WORKLOAD: intune
+          ENSURE_PR: "true"
+          FORGE_TOKEN: ${{ github.token }}
+          AZURE_OPENAI_API_KEY: ${{ secrets.AZURE_OPENAI_API_KEY }}
+        run: bash scripts/run_review.sh
+
+  entra:
+    name: Backup Entra
+    if: vars.ENABLE_WORKLOAD_ENTRA != 'false'
+    runs-on: astral
+    permissions:
+      contents: write
+      pull-requests: write
+      issues: write
+      actions: write
+    timeout-minutes: 90
+    steps:
+      - name: Checkout
+        env:
+          FORGE_TOKEN: ${{ github.token }}
+        run: |
+          git init -q .
+          git remote remove origin 2>/dev/null || true
+          git remote add origin "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY.git"
+          git config http.extraheader "AUTHORIZATION: basic $(printf 'x-access-token:%s' "$FORGE_TOKEN" | base64 | tr -d '\n')"
+          git fetch --quiet --prune --tags origin '+refs/heads/*:refs/remotes/origin/*'
+          git checkout --quiet --force "$GITHUB_SHA"
+          git clean -ffdxq
+
+      - name: Get Graph token
+        env:
+          AZURE_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
+          AZURE_CLIENT_CERTIFICATE: ${{ secrets.AZURE_CLIENT_CERTIFICATE }}
+        run: |
+          args=(--warn-missing AuditLog.Read.All)
+          if [ "${ENTRA_INCLUDE_CONDITIONAL_ACCESS:-true}" = "true" ]; then
+            args+=(--require Policy.Read.All --require Policy.Read.ConditionalAccess)
+          fi
+          if [ "${ENTRA_INCLUDE_APP_REGISTRATIONS:-true}" = "true" ] || [ "${ENTRA_INCLUDE_ENTERPRISE_APPS:-true}" = "true" ]; then
+            args+=(--require Application.Read.All)
+          fi
+          python3 scripts/get_graph_token.py "${args[@]}"
+
+      - name: Back up and commit Entra drift
+        id: backup
+        run: bash scripts/backup_entra.sh
+
+      - name: Rolling PR review
+        if: steps.backup.outputs.CHANGE_DETECTED == '1' || steps.backup.outputs.ROLLING_PR_SYNC_REQUIRED == '1'
+        env:
+          WORKLOAD: entra
+          ENSURE_PR: "true"
+          FORGE_TOKEN: ${{ github.token }}
+          AZURE_OPENAI_API_KEY: ${{ secrets.AZURE_OPENAI_API_KEY }}
+        run: bash scripts/run_review.sh

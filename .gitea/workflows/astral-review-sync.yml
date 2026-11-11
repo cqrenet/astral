@@ -1,0 +1,68 @@
+# ASTRAL review sync on Gitea Actions: apply reviewer /reject decisions, refresh PR summaries,
+# queue post-merge remediation (off by default). Schedule only: no comment-triggered runs.
+name: ASTRAL review sync
+
+on:
+  schedule:
+    - cron: "*/20 * * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: astral-review-sync
+  cancel-in-progress: false
+
+env:
+  ASTRAL_SCM: gitea
+  BASELINE_BRANCH: ${{ vars.BASELINE_BRANCH }}
+  DRIFT_BRANCH_INTUNE: ${{ vars.DRIFT_BRANCH_INTUNE }}
+  DRIFT_BRANCH_ENTRA: ${{ vars.DRIFT_BRANCH_ENTRA }}
+  USER_NAME: ${{ vars.USER_NAME }}
+  USER_EMAIL: ${{ vars.USER_EMAIL }}
+  PR_DECISION_ALLOWED_REVIEWERS: ${{ vars.PR_DECISION_ALLOWED_REVIEWERS }}
+  ENABLE_PR_REVIEW_SUMMARY: ${{ vars.ENABLE_PR_REVIEW_SUMMARY }}
+  ENABLE_PR_REVIEWER_DECISIONS: ${{ vars.ENABLE_PR_REVIEWER_DECISIONS }}
+  ENABLE_PR_AI_SUMMARY: ${{ vars.ENABLE_PR_AI_SUMMARY }}
+  AZURE_OPENAI_ENDPOINT: ${{ vars.AZURE_OPENAI_ENDPOINT }}
+  AZURE_OPENAI_DEPLOYMENT: ${{ vars.AZURE_OPENAI_DEPLOYMENT }}
+  REQUIRE_CHANGE_TICKETS: ${{ vars.REQUIRE_CHANGE_TICKETS }}
+  ROLLING_PR_MERGE_STRATEGY: ${{ vars.ROLLING_PR_MERGE_STRATEGY }}
+  AUTO_REMEDIATE_ON_PR_REJECTION: ${{ vars.AUTO_REMEDIATE_ON_PR_REJECTION }}
+  AUTO_REMEDIATE_AFTER_MERGE: ${{ vars.AUTO_REMEDIATE_AFTER_MERGE }}
+  AUTO_REMEDIATE_DRY_RUN: ${{ vars.AUTO_REMEDIATE_DRY_RUN }}
+
+jobs:
+  review:
+    name: Review ${{ matrix.workload }}
+    runs-on: astral
+    strategy:
+      max-parallel: 1
+      matrix:
+        workload: [intune, entra]
+    permissions:
+      contents: write
+      pull-requests: write
+      issues: write
+      actions: write
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        env:
+          FORGE_TOKEN: ${{ github.token }}
+        run: |
+          git init -q .
+          git remote remove origin 2>/dev/null || true
+          git remote add origin "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY.git"
+          git config http.extraheader "AUTHORIZATION: basic $(printf 'x-access-token:%s' "$FORGE_TOKEN" | base64 | tr -d '\n')"
+          git fetch --quiet --prune --tags origin '+refs/heads/*:refs/remotes/origin/*'
+          git checkout --quiet --force "$GITHUB_SHA"
+          git clean -ffdxq
+
+      - name: Rolling PR review
+        env:
+          WORKLOAD: ${{ matrix.workload }}
+          WORKLOAD_ENABLED: ${{ matrix.workload == 'intune' && vars.ENABLE_WORKLOAD_INTUNE || vars.ENABLE_WORKLOAD_ENTRA }}
+          FORGE_TOKEN: ${{ github.token }}
+          AZURE_OPENAI_API_KEY: ${{ secrets.AZURE_OPENAI_API_KEY }}
+        run: |
+          if [ "$WORKLOAD_ENABLED" = "false" ]; then echo "$WORKLOAD disabled"; exit 0; fi
+          bash scripts/run_review.sh

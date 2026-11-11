@@ -1,0 +1,45 @@
+# ASTRAL change probe: poll Intune/Entra audit logs every 5 minutes and dispatch astral-backup.yml
+# after changes settle (debouncer: 15 min quiet window, 30 min cooldown).
+#
+# Replaces the Azure Function change probe on GitHub Enterprise Server: no inbound call into GHES,
+# no PAT, no client secret. Debouncer state lives on branch astral-probe-state (one force-pushed commit).
+name: ASTRAL change probe
+
+on:
+  schedule:
+    - cron: "*/5 * * * *"
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: astral-probe
+  cancel-in-progress: false
+
+jobs:
+  probe:
+    runs-on: ${{ fromJSON(vars.ASTRAL_RUNS_ON || '["self-hosted","astral"]') }}
+    environment: astral-backup
+    permissions:
+      contents: write   # debouncer state branch (astral-probe-state)
+      actions: write    # dispatch astral-backup.yml
+      id-token: write   # only used when GRAPH_AUTH_METHOD=github-oidc
+    timeout-minutes: 10
+    env:
+      GRAPH_AUTH_METHOD: ${{ vars.GRAPH_AUTH_METHOD }}
+      AZURE_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Get Graph token
+        env:
+          AZURE_CLIENT_ID: ${{ vars.AZURE_CLIENT_ID }}
+        run: python3 scripts/get_graph_token.py --require AuditLog.Read.All
+
+      - name: Probe audit logs and dispatch backup
+        env:
+          FORGE_TOKEN: ${{ github.token }}
+          BASELINE_BRANCH: ${{ vars.BASELINE_BRANCH }}
+          PROBE_QUIET_WINDOW_MINUTES: ${{ vars.PROBE_QUIET_WINDOW_MINUTES }}
+          PROBE_COOLDOWN_MINUTES: ${{ vars.PROBE_COOLDOWN_MINUTES }}
+        run: bash scripts/run_probe.sh

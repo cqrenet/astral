@@ -1,0 +1,70 @@
+# ASTRAL rolling-PR review steps (reusable). Called by astral-backup.yml and astral-review-sync.yml.
+#
+# Logic lives in scripts/run_review.sh (shared with Gitea).
+name: ASTRAL review (reusable)
+
+on:
+  workflow_call:
+    inputs:
+      workload:
+        description: intune or entra
+        type: string
+        required: true
+      ensure-pr:
+        description: Create/update the rolling PR first (backup runs only)
+        type: boolean
+        default: false
+
+jobs:
+  review:
+    name: Review ${{ inputs.workload }}
+    runs-on: ${{ fromJSON(vars.ASTRAL_RUNS_ON || '["self-hosted","astral"]') }}
+    # Main-only environment: holds AZURE_OPENAI_API_KEY so workflows from other branches can't read it.
+    environment: astral-backup
+    permissions:
+      contents: write        # reset rejected files on the drift branch
+      pull-requests: write   # PR, summary, review threads
+      actions: write         # dispatch astral-restore.yml (auto-remediation, still gated by its environment)
+    concurrency:
+      group: astral-review-${{ inputs.workload }}
+      cancel-in-progress: false
+    timeout-minutes: 30
+    env:
+      ASTRAL_SCM: github
+      WORKLOAD: ${{ inputs.workload }}
+      ENSURE_PR: ${{ inputs.ensure-pr }}
+      FORGE_TOKEN: ${{ github.token }}
+      # Empty values fall back to the conservative defaults in scripts/run_review.sh.
+      BASELINE_BRANCH: ${{ vars.BASELINE_BRANCH }}
+      DRIFT_BRANCH_INTUNE: ${{ vars.DRIFT_BRANCH_INTUNE }}
+      DRIFT_BRANCH_ENTRA: ${{ vars.DRIFT_BRANCH_ENTRA }}
+      USER_NAME: ${{ vars.USER_NAME }}
+      USER_EMAIL: ${{ vars.USER_EMAIL }}
+      PR_DECISION_ALLOWED_REVIEWERS: ${{ vars.PR_DECISION_ALLOWED_REVIEWERS }}
+      ENABLE_PR_REVIEW_SUMMARY: ${{ vars.ENABLE_PR_REVIEW_SUMMARY }}
+      ENABLE_PR_REVIEWER_DECISIONS: ${{ vars.ENABLE_PR_REVIEWER_DECISIONS }}
+      ENABLE_PR_AI_SUMMARY: ${{ vars.ENABLE_PR_AI_SUMMARY }}
+      AZURE_OPENAI_ENDPOINT: ${{ vars.AZURE_OPENAI_ENDPOINT }}
+      AZURE_OPENAI_DEPLOYMENT: ${{ vars.AZURE_OPENAI_DEPLOYMENT }}
+      AZURE_OPENAI_API_VERSION: ${{ vars.AZURE_OPENAI_API_VERSION }}
+      AZURE_OPENAI_API_KEY: ${{ secrets.AZURE_OPENAI_API_KEY }}
+      REQUIRE_CHANGE_TICKETS: ${{ vars.REQUIRE_CHANGE_TICKETS }}
+      CHANGE_TICKET_REGEX: ${{ vars.CHANGE_TICKET_REGEX }}
+      ROLLING_PR_DELAY_REVIEWER_NOTIFICATIONS: ${{ vars.ROLLING_PR_DELAY_REVIEWER_NOTIFICATIONS }}
+      ROLLING_PR_MERGE_STRATEGY: ${{ vars.ROLLING_PR_MERGE_STRATEGY }}
+      AUTO_REMEDIATE_ON_PR_REJECTION: ${{ vars.AUTO_REMEDIATE_ON_PR_REJECTION }}
+      AUTO_REMEDIATE_AFTER_MERGE: ${{ vars.AUTO_REMEDIATE_AFTER_MERGE }}
+      AUTO_REMEDIATE_AFTER_MERGE_LOOKBACK_HOURS: ${{ vars.AUTO_REMEDIATE_AFTER_MERGE_LOOKBACK_HOURS }}
+      AUTO_REMEDIATE_RESTORE_WORKFLOW: ${{ vars.AUTO_REMEDIATE_RESTORE_WORKFLOW }}
+      AUTO_REMEDIATE_DRY_RUN: ${{ vars.AUTO_REMEDIATE_DRY_RUN }}
+      AUTO_REMEDIATE_UPDATE_ASSIGNMENTS: ${{ vars.AUTO_REMEDIATE_UPDATE_ASSIGNMENTS }}
+      AUTO_REMEDIATE_REMOVE_OBJECTS: ${{ vars.AUTO_REMEDIATE_REMOVE_OBJECTS }}
+      AUTO_REMEDIATE_MAX_WORKERS: ${{ vars.AUTO_REMEDIATE_MAX_WORKERS }}
+      AUTO_REMEDIATE_EXCLUDE_CSV: ${{ vars.AUTO_REMEDIATE_EXCLUDE_CSV }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Rolling PR review
+        run: bash scripts/run_review.sh

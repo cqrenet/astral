@@ -1,0 +1,159 @@
+# ASTRAL restore on Gitea Actions: push an approved baseline snapshot back to the tenant.
+# The only workflow that writes to the tenant.
+#
+# Gitea Actions ignores `environment`, so there is no platform approval gate. Controls here:
+#  - non-dry-run restores need the dispatching user in RESTORE_APPROVERS and must run from BASELINE_BRANCH
+#    (auto-remediation runs as the Actions bot, so it stays dry-run unless the bot is listed);
+#  - the restored commit must be in the approved branch history (scripts/restore_checkout_ref.sh);
+#  - inputs reach scripts via env only; dryRun defaults to true.
+# Because repository secrets are readable by any workflow run, only restore operators may have
+# write access to this repository (see docs/gitea-setup.md).
+name: ASTRAL restore
+
+on:
+  workflow_dispatch:
+    inputs:
+      dryRun:
+        description: Dry run only (report, no changes pushed)
+        type: boolean
+        default: true
+      updateAssignments:
+        description: Update assignments
+        type: boolean
+        default: true
+      removeObjectsNotInBaseline:
+        description: Remove objects not present in baseline
+        type: boolean
+        default: false
+      includeEntraUpdate:
+        description: Include Entra (Conditional Access) updates
+        type: boolean
+        default: false
+      baselineBranch:
+        description: Baseline branch to restore from
+        type: string
+        default: main
+      baselineRef:
+        description: Optional historical ref (branch/tag/commit); must be in approved branch history
+        type: string
+        default: ""
+      restoreMode:
+        description: Restore mode (full or selective)
+        type: string
+        default: full
+      restorePathsCsv:
+        description: Selective restore file paths (CSV; repo-relative or intune-relative)
+        type: string
+        default: ""
+      maxWorkers:
+        description: IntuneCD max workers
+        type: string
+        default: "10"
+      excludeCsv:
+        description: Exclude object categories (comma-separated IntuneCD keys)
+        type: string
+        default: ""
+
+concurrency:
+  group: astral-restore
+  cancel-in-progress: false
+
+jobs:
+  restore:
+    name: Restore tenant from approved baseline
+    runs-on: astral-restore
+    permissions:
+      contents: read
+    timeout-minutes: 120
+    env:
+      ASTRAL_SCM: gitea
+      BACKUP_FOLDER: tenant-state
+      INTUNE_BACKUP_SUBDIR: intune
+      INTUNECD_VERSION: "2.5.0"
+      APPROVED_BRANCH: ${{ vars.BASELINE_BRANCH || 'main' }}   # trusted: admin-managed variable
+      DRY_RUN: ${{ github.event.inputs.dryRun || 'true' }}
+    steps:
+      - name: Checkout (read-only, credentials removed afterwards)
+        env:
+          FORGE_TOKEN: ${{ github.token }}
+        run: |
+          git init -q .
+          git remote remove origin 2>/dev/null || true
+          git remote add origin "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY.git"
+          git -c http.extraheader="AUTHORIZATION: basic $(printf 'x-access-token:%s' "$FORGE_TOKEN" | base64 | tr -d '\n')" \
+            fetch --quiet --prune --tags origin '+refs/heads/*:refs/remotes/origin/*'
+          git checkout --quiet --force "$GITHUB_SHA"
+          git clean -ffdxq
+
+      - name: Authorize restore
+        env:
+          RESTORE_APPROVERS: ${{ vars.RESTORE_APPROVERS }}
+          ACTOR: ${{ github.actor }}
+        run: |
+          source scripts/ci.sh
+          if [ "$DRY_RUN" = "true" ]; then echo "Dry run: no approval needed."; exit 0; fi
+          if [ "$GITHUB_REF" != "refs/heads/$APPROVED_BRANCH" ]; then
+            ci_log error "Non-dry-run restore must be dispatched from $APPROVED_BRANCH (got $GITHUB_REF)."; exit 1
+          fi
+          if [ -z "$RESTORE_APPROVERS" ]; then
+            ci_log error "RESTORE_APPROVERS is empty: non-dry-run restore refused."; exit 1
+          fi
+          actor="$(printf '%s' "$ACTOR" | tr '[:upper:]' '[:lower:]')"
+          if ! printf ',%s,' "$RESTORE_APPROVERS" | tr '[:upper:]' '[:lower:]' | tr -d ' ' | grep -qF ",$actor,"; then
+            ci_log error "'$ACTOR' is not in RESTORE_APPROVERS: non-dry-run restore refused."; exit 1
+          fi
+          echo "Non-dry-run restore authorized for $ACTOR."
+
+      # The baseline checkout below may be an older commit; run helpers from this revision.
+      - name: Snapshot restore helper scripts
+        run: |
+          cp -R scripts "$RUNNER_TEMP/astral-scripts"
+          echo "ASTRAL_SCRIPTS=$RUNNER_TEMP/astral-scripts" >> "$GITHUB_ENV"
+
+      - name: Python environment
+        run: |
+          python3 -m venv "$RUNNER_TEMP/astral-venv"
+          "$RUNNER_TEMP/astral-venv/bin/pip" install --quiet "IntuneCD==$INTUNECD_VERSION"
+          echo "$RUNNER_TEMP/astral-venv/bin" >> "$GITHUB_PATH"
+
+      - name: Checkout approved baseline snapshot
+        env:
+          TARGET_REF_RAW: ${{ github.event.inputs.baselineRef }}
+          BASELINE_BRANCH_PARAM: ${{ github.event.inputs.baselineBranch || 'main' }}
+          RESTORE_DATA_DIR: tenant-state/intune
+        run: bash "$ASTRAL_SCRIPTS/restore_checkout_ref.sh"
+
+      - name: Prepare restore payload scope
+        env:
+          RESTORE_MODE: ${{ github.event.inputs.restoreMode || 'full' }}
+          RESTORE_PATHS_CSV: ${{ github.event.inputs.restorePathsCsv }}
+        run: python3 "$ASTRAL_SCRIPTS/restore_prepare_scope.py"
+
+      - name: Get Graph token for restore
+        env:
+          GRAPH_AUTH_METHOD: ${{ vars.RESTORE_GRAPH_AUTH_METHOD || vars.GRAPH_AUTH_METHOD }}
+          AZURE_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
+          AZURE_CLIENT_ID: ${{ vars.RESTORE_AZURE_CLIENT_ID }}
+          AZURE_CLIENT_SECRET: ${{ secrets.RESTORE_AZURE_CLIENT_SECRET }}
+          AZURE_CLIENT_CERTIFICATE: ${{ secrets.RESTORE_AZURE_CLIENT_CERTIFICATE }}
+          INCLUDE_ENTRA_UPDATE: ${{ github.event.inputs.includeEntraUpdate }}
+        run: |
+          args=()
+          for role in DeviceManagementApps.ReadWrite.All DeviceManagementConfiguration.ReadWrite.All \
+                      DeviceManagementManagedDevices.ReadWrite.All DeviceManagementRBAC.ReadWrite.All \
+                      DeviceManagementScripts.ReadWrite.All DeviceManagementServiceConfig.ReadWrite.All Group.Read.All; do
+            args+=(--require "$role")
+          done
+          if [ "$INCLUDE_ENTRA_UPDATE" = "true" ]; then
+            args+=(--require Policy.Read.All --require Policy.ReadWrite.ConditionalAccess)
+          fi
+          python3 "$ASTRAL_SCRIPTS/get_graph_token.py" "${args[@]}"
+
+      - name: Run IntuneCD restore/update
+        env:
+          UPDATE_ASSIGNMENTS: ${{ github.event.inputs.updateAssignments }}
+          REMOVE_UNMANAGED: ${{ github.event.inputs.removeObjectsNotInBaseline }}
+          ENTRA_UPDATE: ${{ github.event.inputs.includeEntraUpdate }}
+          MAX_WORKERS: ${{ github.event.inputs.maxWorkers }}
+          EXCLUDE_CSV: ${{ github.event.inputs.excludeCsv }}
+        run: bash "$ASTRAL_SCRIPTS/run_intunecd_update.sh"

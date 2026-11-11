@@ -1,0 +1,36 @@
+# ASTRAL review sync: apply reviewer /reject decisions, refresh PR summaries, queue post-merge
+# remediation. GitHub counterpart of azure-pipelines-review-sync.yml.
+#
+# Schedule only (no comment triggers): comment-triggered workflows would let any commenter start
+# runs that hold write tokens.
+name: ASTRAL review sync
+
+on:
+  schedule:
+    - cron: "*/20 * * * *"
+  workflow_dispatch:
+
+permissions: {}
+
+jobs:
+  intune:
+    if: vars.ENABLE_WORKLOAD_INTUNE != 'false'
+    uses: ./.github/workflows/astral-review.yml
+    with:
+      workload: intune
+    secrets: inherit
+    permissions:
+      contents: write
+      pull-requests: write
+      actions: write
+
+  entra:
+    if: vars.ENABLE_WORKLOAD_ENTRA != 'false'
+    uses: ./.github/workflows/astral-review.yml
+    with:
+      workload: entra
+    secrets: inherit
+    permissions:
+      contents: write
+      pull-requests: write
+      actions: write
