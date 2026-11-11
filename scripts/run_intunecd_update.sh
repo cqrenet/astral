@@ -62,7 +62,8 @@ if [ -n "$EXCLUDE_CSV_TRIMMED" ]; then
 fi
 
 has_dms_exclude=0
-for item in "${exclude_items[@]}"; do
+# ${arr[@]+...} keeps an empty array legal under `set -u` on bash < 4.4 (the macOS default).
+for item in ${exclude_items[@]+"${exclude_items[@]}"}; do
   if [ "$(echo "$item" | tr '[:upper:]' '[:lower:]')" = "devicemanagementsettings" ]; then
     has_dms_exclude=1
     break
