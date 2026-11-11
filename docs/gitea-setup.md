@@ -100,6 +100,15 @@ Repository **variables**:
 | `AUTO_REMEDIATE_ON_PR_REJECTION` / `AUTO_REMEDIATE_AFTER_MERGE` | `false` | |
 | `AUTO_REMEDIATE_DRY_RUN` | `true` | |
 | `ENABLE_PR_AI_SUMMARY` | `false` | Also `AZURE_OPENAI_ENDPOINT`, `AZURE_OPENAI_DEPLOYMENT` |
+| `ENTRA_INCLUDE_NAMED_LOCATIONS` / `ENTRA_INCLUDE_AUTHENTICATION_STRENGTHS` / `ENTRA_INCLUDE_CONDITIONAL_ACCESS` | `true` | Entra categories to export |
+| `ENTRA_INCLUDE_ENTERPRISE_APPS` / `ENTRA_INCLUDE_APP_REGISTRATIONS` | `true` | Exported in full runs only |
+| `ENTRA_ENTERPRISE_APP_WORKERS` | `8` | Parallel Graph lookups for Enterprise Applications (1-32) |
+| `ENABLE_ENTRA_CONDITIONAL_ACCESS` | `true` | `true` means the Entra workload owns Conditional Access and the Intune export skips it |
+| `EXCLUDE_SCRIPT_BACKUP` | `false` | Skip Intune script categories (also relaxes the script permission check) |
+| `INTUNE_EXCLUDE_CSV` | — | Extra IntuneCD categories to exclude (comma-separated) |
+| `ROLLING_PR_MERGE_STRATEGY` | `rebase` | `rebase`, `squash`, `noFastForward` or `rebaseMerge` |
+| `PROBE_QUIET_WINDOW_MINUTES` / `PROBE_COOLDOWN_MINUTES` | `15` / `30` | Change probe debouncer |
+| `USER_NAME` / `USER_EMAIL` | service defaults | Commit identity when no audit-log author is found |
 
 Repository **secrets**:
 

@@ -125,8 +125,16 @@ Only repository admins can change these. Change them as carefully as code.
 | `USER_NAME` / `USER_EMAIL` | service defaults | Commit identity when no audit-log author is found |
 | `ASTRAL_RUNS_ON` / `ASTRAL_RESTORE_RUNS_ON` | `["self-hosted","astral"]` / `["self-hosted","astral-restore"]` | Runner labels |
 | `PROBE_QUIET_WINDOW_MINUTES` / `PROBE_COOLDOWN_MINUTES` | `15` / `30` | |
+| `ENTRA_INCLUDE_NAMED_LOCATIONS` / `ENTRA_INCLUDE_AUTHENTICATION_STRENGTHS` / `ENTRA_INCLUDE_CONDITIONAL_ACCESS` | `true` | Entra categories to export |
+| `ENTRA_INCLUDE_ENTERPRISE_APPS` / `ENTRA_INCLUDE_APP_REGISTRATIONS` | `true` | Exported in full runs only |
+| `ENTRA_ENTERPRISE_APP_WORKERS` | `8` | Parallel Graph lookups for Enterprise Applications (1-32) |
+| `ENABLE_ENTRA_CONDITIONAL_ACCESS` | `true` | `true` means the Entra workload owns Conditional Access and the Intune export skips it |
+| `EXCLUDE_SCRIPT_BACKUP` | `false` | Skip Intune script categories (also relaxes the script permission check) |
+| `INTUNE_EXCLUDE_CSV` | — | Extra IntuneCD categories to exclude (comma-separated) |
+| `ROLLING_PR_MERGE_STRATEGY` | `rebase` | `rebase`, `squash`, `noFastForward` or `rebaseMerge` |
+| `AUTO_REMEDIATE_RESTORE_WORKFLOW` | `astral-restore.yml` | Workflow file the auto-remediation dispatches |
 
-Other variables from `templates/variables-common.yml` (for example `ENTRA_INCLUDE_*`, `REQUIRE_CHANGE_TICKETS`) can be set with the same names.
+Other variables from `templates/variables-common.yml` and the `variables:` block of `azure-pipelines.yml` (for example `REQUIRE_CHANGE_TICKETS`) can be set with the same names.
 
 ## 6. Security controls built into the workflows
 
