@@ -353,6 +353,7 @@ def _evaluate_debouncer(
 # ---------------------------------------------------------------------------
 
 def main() -> int:
+    common.reserve_stdout_for_data()  # stdout carries the JSON result; logs go to stderr
     args = parse_args()
 
     token = args.token.strip()

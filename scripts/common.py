@@ -41,15 +41,27 @@ class _CurrentStreamHandler(logging.StreamHandler):
         pass
 
 
+# Where log records go. By default INFO and WARNING use stdout and ERROR uses stderr, so a warning can
+# never fail an Azure DevOps step that sets failOnStderr. A script whose stdout carries data (the probe's
+# JSON result) calls reserve_stdout_for_data() so that all logging moves to stderr.
+_stdout_reserved_for_data = False
+
+
+def reserve_stdout_for_data() -> None:
+    """Route every log record to stderr; stdout is then left for the script's machine-readable output."""
+    global _stdout_reserved_for_data
+    _stdout_reserved_for_data = True
+
+
 def _build_logger() -> logging.Logger:
     logger = logging.getLogger("astral")
     if logger.handlers:
         return logger
     formatter = _LogFormatter()
     out = _CurrentStreamHandler("stdout")
-    out.addFilter(lambda record: record.levelno < logging.WARNING)
+    out.addFilter(lambda record: record.levelno < logging.ERROR and not _stdout_reserved_for_data)
     err = _CurrentStreamHandler("stderr")
-    err.setLevel(logging.WARNING)
+    err.addFilter(lambda record: record.levelno >= logging.ERROR or _stdout_reserved_for_data)
     for handler in (out, err):
         handler.setFormatter(formatter)
         logger.addHandler(handler)
@@ -58,8 +70,8 @@ def _build_logger() -> logging.Logger:
     return logger
 
 
-# Shared diagnostic logger: INFO to stdout, WARNING and above to stderr. Machine-readable output
-# (CI commands, JSON results) is still printed directly, never logged.
+# Shared diagnostic logger: INFO and WARNING on stdout, ERROR on stderr (see above). Machine-readable
+# output (CI commands, JSON results) is still printed directly, never logged.
 log = _build_logger()
 
 

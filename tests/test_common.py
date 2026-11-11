@@ -24,15 +24,26 @@ common = load_module()
 
 
 class LoggerTests(unittest.TestCase):
-    def test_info_is_plain_on_stdout_and_warnings_are_prefixed_on_stderr(self) -> None:
+    def _log_all(self):
         out, err = io.StringIO(), io.StringIO()
         with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):  # handlers follow the current streams
             common.log.info("hello")
             common.log.warning("careful")
             common.log.error("broken")
             common.log.debug("hidden at the default level")
-        self.assertEqual(out.getvalue(), "hello\n")
-        self.assertEqual(err.getvalue(), "WARNING: careful\nERROR: broken\n")
+        return out.getvalue(), err.getvalue()
+
+    def test_warnings_stay_on_stdout_so_they_cannot_fail_failonstderr_steps(self) -> None:
+        out, err = self._log_all()
+        self.assertEqual(out, "hello\nWARNING: careful\n")
+        self.assertEqual(err, "ERROR: broken\n")
+
+    def test_reserving_stdout_for_data_moves_every_record_to_stderr(self) -> None:
+        with patch.object(common, "_stdout_reserved_for_data", False):
+            common.reserve_stdout_for_data()
+            out, err = self._log_all()
+        self.assertEqual(out, "")
+        self.assertEqual(err, "hello\nWARNING: careful\nERROR: broken\n")
 
 
 class HelperTests(unittest.TestCase):

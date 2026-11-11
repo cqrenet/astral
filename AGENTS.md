@@ -91,7 +91,7 @@ Workflow at a high level:
   - review threads: `THREAD_STATUS_*`, `thread_status_code`, `is_thread_resolved`, `ticket_path_from_content`, `latest_thread_decision`
   - restore queueing: `RestoreRequest`, `queue_restore_pipeline`, `parse_pipeline_id`, `post_pr_thread`, `build_web_url`
   - HTTP: `request_json`, `retry_after_seconds`
-- Log with `common.log` (`log = common.log`; INFO to stdout as plain text, WARNING/ERROR to stderr with a `LEVEL:` prefix; `LOG_LEVEL` overrides). Keep `print` only for machine-readable output: CI commands (`##vso[...]`, `::add-mask::`) and JSON results such as the probe's stdout.
+- Log with `common.log` (`log = common.log`): INFO and WARNING go to stdout (WARNING with a `WARNING:` prefix), ERROR to stderr, `LOG_LEVEL` overrides. Warnings stay off stderr on purpose: Azure DevOps steps with `failOnStderr: true` must not fail on a warning. A script whose stdout is data (the probe's JSON result) calls `common.reserve_stdout_for_data()` first, which sends every record to stderr. Keep `print` only for machine-readable output: CI commands (`##vso[...]`, `::add-mask::`) and JSON results.
 - `scripts/report_utils.py` holds helpers shared by the `generate_*_report.py` scripts (`safe_text`, `resolve_assignment_target`).
 - Arguments use `argparse` with typed flags; pipeline variables are passed as env vars or CLI args.
 - JSON is written with `indent=4` or `indent=5` and `ensure_ascii=False`.
