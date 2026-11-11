@@ -105,14 +105,12 @@ class ExportEntraBaselineTests(unittest.TestCase):
         for workers in (1, 4):
             with self.subTest(workers=workers):
                 items = [{"id": f"id{i}", "appId": f"app{i}"} for i in range(5)]
-                by_appid: dict = {}
-                by_id: dict = {}
+                caches = self.module._ResolutionCaches()
                 with patch.object(self.module, "enrich_enterprise_application", side_effect=fake_enrich):
-                    warnings = self.module._enrich_enterprise_apps(
-                        items, MagicMock(), by_appid, by_id, {}, None, workers
-                    )
+                    warnings = self.module._enrich_enterprise_apps(items, MagicMock(), caches, None, workers)
                 self.assertEqual(warnings, 0)
-                self.assertEqual(set(by_appid), {f"app{i}" for i in range(5)})
+                self.assertEqual(set(caches.sp_by_appid), {f"app{i}" for i in range(5)})
+                self.assertEqual(set(caches.sp_by_id), {f"id{i}" for i in range(5)})
                 for item in items:
                     self.assertEqual(item["ownersResolved"], [{"id": "o"}])
                     self.assertEqual(item["appOwnerOrganizationResolved"]["displayName"], "Contoso")
@@ -123,9 +121,9 @@ class ExportEntraBaselineTests(unittest.TestCase):
 
         with patch.object(self.module, "enrich_enterprise_application", side_effect=boom):
             with self.assertRaises(RuntimeError):
-                self.module._enrich_enterprise_apps([{"id": "1"}], MagicMock(), {}, {}, {}, None, 1)
+                self.module._enrich_enterprise_apps([{"id": "1"}], MagicMock(), self.module._ResolutionCaches(), None, 1)
             items = [{"id": "1", "appOwnerOrganizationId": "t"}, {"id": "2", "appOwnerOrganizationId": "t"}]
-            warnings = self.module._enrich_enterprise_apps(items, MagicMock(), {}, {}, {}, None, 2)
+            warnings = self.module._enrich_enterprise_apps(items, MagicMock(), self.module._ResolutionCaches(), None, 2)
         self.assertEqual(warnings, 2)
         self.assertEqual(items[0]["ownersResolved"], [])
         self.assertEqual(items[0]["resolutionStatus"]["owners"]["count"], 0)
@@ -137,7 +135,7 @@ class ExportEntraBaselineTests(unittest.TestCase):
         with patch.object(
             self.module, "enrich_enterprise_application", return_value=([], [], self._resolved(""))
         ):
-            self.module._enrich_enterprise_apps([item], MagicMock(), {}, {}, {}, previous, 1)
+            self.module._enrich_enterprise_apps([item], MagicMock(), self.module._ResolutionCaches(), previous, 1)
         self.assertEqual(item["appOwnerOrganizationResolved"]["displayName"], "Old Org")
 
     def _graph(self, objects=None, collections=None):

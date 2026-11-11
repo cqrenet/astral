@@ -13,6 +13,7 @@ import re
 import subprocess
 import threading
 import time
+from dataclasses import dataclass, field
 from typing import Any
 import urllib.error
 import urllib.parse
@@ -905,9 +906,7 @@ def _log_progress(label: str, done: int, total: int) -> None:
 def _enrich_enterprise_apps(
     items: list[Any],
     client: GraphClient,
-    resource_sp_by_appid: dict[str, dict[str, Any] | None],
-    resource_sp_by_id: dict[str, dict[str, Any] | None],
-    local_org_by_id: dict[str, str],
+    caches: _ResolutionCaches,
     previous_lookup: PreviousSnapshotLookup | None,
     workers: int,
 ) -> int:
@@ -922,15 +921,15 @@ def _enrich_enterprise_apps(
     for item in apps:
         app_id = str(item.get("appId") or "").strip()
         object_id = str(item.get("id") or "").strip()
-        if app_id and app_id not in resource_sp_by_appid:
-            resource_sp_by_appid[app_id] = item
-        if object_id and object_id not in resource_sp_by_id:
-            resource_sp_by_id[object_id] = item
+        if app_id and app_id not in caches.sp_by_appid:
+            caches.sp_by_appid[app_id] = item
+        if object_id and object_id not in caches.sp_by_id:
+            caches.sp_by_id[object_id] = item
 
     lock = threading.Lock()
 
     def _enrich(item: dict[str, Any]):
-        return enrich_enterprise_application(item, client, resource_sp_by_id, lock, local_org_by_id)
+        return enrich_enterprise_application(item, client, caches.sp_by_id, lock, caches.org_names)
 
     warnings = 0
 
@@ -938,7 +937,7 @@ def _enrich_enterprise_apps(
         nonlocal warnings
         if error is not None:
             warnings += 1
-            result = _enterprise_app_failure(item, local_org_by_id, error)
+            result = _enterprise_app_failure(item, caches.org_names, error)
         owners, role_assignments, resolved = result
         _store_enterprise_app_enrichment(item, owners, role_assignments, resolved, previous_lookup)
 
@@ -964,7 +963,7 @@ def _enrich_enterprise_apps(
 def _enrich_app_registrations(
     items: list[Any],
     client: GraphClient,
-    resource_sp_by_appid: dict[str, dict[str, Any] | None],
+    caches: _ResolutionCaches,
     previous_lookup: PreviousSnapshotLookup | None,
 ) -> None:
     total = len(items)
@@ -983,7 +982,7 @@ def _enrich_app_registrations(
         ) = resolve_required_resource_access(
             app=item,
             client=client,
-            resource_sp_by_appid=resource_sp_by_appid,
+            resource_sp_by_appid=caches.sp_by_appid,
         )
         needs_backfill = _owners_need_backfill(owners) or _required_resource_access_needs_backfill(required_resolved)
         previous_item = previous_lookup.get(object_id) if previous_lookup and object_id and needs_backfill else None
@@ -1074,20 +1073,25 @@ def _local_org_names(client: GraphClient) -> tuple[dict[str, str], int]:
     return names, 0
 
 
-def _prime_resource_sp_caches(
-    root: pathlib.Path,
-    by_appid: dict[str, dict[str, Any] | None],
-    by_id: dict[str, dict[str, Any] | None],
-) -> None:
+@dataclass
+class _ResolutionCaches:
+    """Lookup tables shared by the enrichment steps of one export run."""
+
+    sp_by_appid: dict[str, dict[str, Any] | None] = field(default_factory=dict)
+    sp_by_id: dict[str, dict[str, Any] | None] = field(default_factory=dict)
+    org_names: dict[str, str] = field(default_factory=dict)  # tenant id -> display name
+
+
+def _prime_resource_sp_caches(root: pathlib.Path, caches: _ResolutionCaches) -> None:
     """Seed the resource service-principal caches from a previous local Enterprise Applications export."""
     cached = _load_resource_sp_cache_from_export(root)
     if not cached:
         return
-    by_appid.update(cached)
+    caches.sp_by_appid.update(cached)
     for sp in cached.values():
         object_id = str(sp.get("id") or "").strip()
         if object_id:
-            by_id[object_id] = sp
+            caches.sp_by_id[object_id] = sp
     log.info(f"Primed resource service-principal cache from local Enterprise Applications export: {len(cached)} objects")
 
 
@@ -1128,12 +1132,11 @@ def main() -> int:
         return 0
 
     client = GraphClient(token)
-    resource_sp_by_appid: dict[str, dict[str, Any] | None] = {}
-    resource_sp_by_id: dict[str, dict[str, Any] | None] = {}
+    caches = _ResolutionCaches()
     if common.to_bool(args.include_app_registrations):
-        _prime_resource_sp_caches(root, resource_sp_by_appid, resource_sp_by_id)
+        _prime_resource_sp_caches(root, caches)
     previous_lookup_by_title = _previous_snapshot_lookups(root, args.previous_snapshot_ref)
-    local_org_by_id, warnings = _local_org_names(client)
+    caches.org_names, warnings = _local_org_names(client)
 
     total_written = 0
     failed_exports: list[tuple[str, str]] = []
@@ -1148,17 +1151,9 @@ def main() -> int:
             continue
 
         if title == "Enterprise Applications":
-            warnings += _enrich_enterprise_apps(
-                items,
-                client,
-                resource_sp_by_appid,
-                resource_sp_by_id,
-                local_org_by_id,
-                previous_lookup_by_title.get(title),
-                workers,
-            )
+            warnings += _enrich_enterprise_apps(items, client, caches, previous_lookup_by_title.get(title), workers)
         elif title == "App Registrations":
-            _enrich_app_registrations(items, client, resource_sp_by_appid, previous_lookup_by_title.get(title))
+            _enrich_app_registrations(items, client, caches, previous_lookup_by_title.get(title))
 
         written = write_collection(
             root=root,
