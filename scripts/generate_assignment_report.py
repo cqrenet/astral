@@ -109,22 +109,57 @@ def parse_filter_values(raw_values: list[str]) -> set[str]:
     return values
 
 
+_EXCLUDED_CATEGORIES = ("App Registrations", "Enterprise Applications")
+
+
+def _placeholder_row(base: dict[str, object], state: str, target: str) -> AssignmentRow:
+    """Row for an object without individual assignments (not exported / unassigned)."""
+    return AssignmentRow(
+        **base,
+        assignment_state=state,
+        assignment_count=0,
+        intent="None",
+        assignment_target=target,
+        target_type="",
+        assignment_filter="",
+        filter_type="",
+    )
+
+
+def _object_rows(base: dict[str, object], assignments: object) -> Iterable[AssignmentRow]:
+    if not isinstance(assignments, list):
+        yield _placeholder_row(base, "NotExported", "Not exported in backup")
+        return
+    entries = [item for item in assignments if isinstance(item, dict)]
+    if not entries:
+        yield _placeholder_row(base, "Unassigned", "No assignments")
+        return
+    for assignment in entries:
+        target = assignment.get("target") if isinstance(assignment.get("target"), dict) else {}
+        target_type = safe_text(target.get("@odata.type"))
+        yield AssignmentRow(
+            **base,
+            assignment_state="Assigned",
+            assignment_count=len(entries),
+            intent=infer_intent(assignment, target_type),
+            assignment_target=resolve_assignment_target(target),
+            target_type=target_type,
+            assignment_filter=safe_text(target.get("deviceAndAppManagementAssignmentFilterId")),
+            filter_type=safe_text(target.get("deviceAndAppManagementAssignmentFilterType")),
+        )
+
+
 def iter_assignment_rows(
     root: Path,
     policy_type_filter: set[str],
     graph_type_filter: set[str],
 ) -> Iterable[AssignmentRow]:
-    excluded_categories = {
-        "App Registrations",
-        "Enterprise Applications",
-    }
     for path in sorted(root.rglob("*.json")):
         try:
             rel_path = path.relative_to(root)
         except ValueError:
             continue
-
-        if rel_path.parts and rel_path.parts[0] in {"reports"}:
+        if rel_path.parts and rel_path.parts[0] == "reports":
             continue
         if "__archive__" in rel_path.parts:
             continue
@@ -136,100 +171,26 @@ def iter_assignment_rows(
         if not isinstance(payload, dict):
             continue
 
-        object_name = safe_text(payload.get("displayName")) or safe_text(payload.get("name"))
-        if not object_name:
-            object_name = path.stem.split("__")[0]
-        object_type = safe_text(payload.get("@odata.type"))
         category = "/".join(rel_path.parent.parts)
-        policy_type = rel_path.parts[0] if rel_path.parts else ""
-
-        if any(
-            category == excluded or category.startswith(f"{excluded}/")
-            for excluded in excluded_categories
-        ):
+        if any(category == excluded or category.startswith(f"{excluded}/") for excluded in _EXCLUDED_CATEGORIES):
             continue
-
+        policy_type = rel_path.parts[0] if rel_path.parts else ""
+        object_type = safe_text(payload.get("@odata.type"))
         if policy_type_filter and policy_type.lower() not in policy_type_filter:
             continue
         if graph_type_filter and object_type.lower() not in graph_type_filter:
             continue
 
-        assignments = payload.get("assignments")
-        if not isinstance(assignments, list):
-            yield AssignmentRow(
-                category=category,
-                policy_type=policy_type,
-                object_name=object_name,
-                object_type=object_type,
-                assignment_state="NotExported",
-                assignment_count=0,
-                intent="None",
-                assignment_target="Not exported in backup",
-                target_type="",
-                assignment_filter="",
-                filter_type="",
-                source_file=rel_path.as_posix(),
-            )
-            continue
-
-        if not assignments:
-            yield AssignmentRow(
-                category=category,
-                policy_type=policy_type,
-                object_name=object_name,
-                object_type=object_type,
-                assignment_state="Unassigned",
-                assignment_count=0,
-                intent="None",
-                assignment_target="No assignments",
-                target_type="",
-                assignment_filter="",
-                filter_type="",
-                source_file=rel_path.as_posix(),
-            )
-            continue
-
-        assignment_count = len([item for item in assignments if isinstance(item, dict)])
-        if assignment_count == 0:
-            yield AssignmentRow(
-                category=category,
-                policy_type=policy_type,
-                object_name=object_name,
-                object_type=object_type,
-                assignment_state="Unassigned",
-                assignment_count=0,
-                intent="None",
-                assignment_target="No assignments",
-                target_type="",
-                assignment_filter="",
-                filter_type="",
-                source_file=rel_path.as_posix(),
-            )
-            continue
-
-        for assignment in assignments:
-            if not isinstance(assignment, dict):
-                continue
-            target = assignment.get("target") if isinstance(assignment.get("target"), dict) else {}
-            target_type = safe_text(target.get("@odata.type"))
-            intent = infer_intent(assignment, target_type)
-            assignment_target = resolve_assignment_target(target)
-            assignment_filter = safe_text(target.get("deviceAndAppManagementAssignmentFilterId"))
-            filter_type = safe_text(target.get("deviceAndAppManagementAssignmentFilterType"))
-            yield AssignmentRow(
-                category=category,
-                policy_type=policy_type,
-                object_name=object_name,
-                object_type=object_type,
-                assignment_state="Assigned",
-                assignment_count=assignment_count,
-                intent=intent,
-                assignment_target=assignment_target,
-                target_type=target_type,
-                assignment_filter=assignment_filter,
-                filter_type=filter_type,
-                source_file=rel_path.as_posix(),
-            )
+        base: dict[str, object] = {
+            "category": category,
+            "policy_type": policy_type,
+            "object_name": (
+                safe_text(payload.get("displayName")) or safe_text(payload.get("name")) or path.stem.split("__")[0]
+            ),
+            "object_type": object_type,
+            "source_file": rel_path.as_posix(),
+        }
+        yield from _object_rows(base, payload.get("assignments"))
 
 
 def write_csv(rows: list[AssignmentRow], output_path: Path) -> None:
