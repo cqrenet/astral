@@ -9,7 +9,7 @@ from typing import Any
 
 import common
 from pr_ai import _format_ai_narrative_markdown
-from pr_base import _debug, _request_json
+from pr_base import PrRef, _debug, _request_json
 from pr_changes import ChangeItem
 from pr_description import DescriptionUpdate
 
@@ -84,9 +84,7 @@ def _extract_thread_ticket(comments: list[dict[str, Any]], ticket_re: re.Pattern
 
 
 def _create_ticket_thread(
-    repo_api: str,
-    pr_id: int,
-    token: str,
+    pr: PrRef,
     path: str,
     ticket_pattern: str,
     change_summary: str,
@@ -107,8 +105,8 @@ def _create_ticket_thread(
         f"{marker}"
     )
     _request_json(
-        f"{repo_api}/pullrequests/{pr_id}/threads?api-version=7.1",
-        token=token,
+        f"{pr.repo_api}/pullrequests/{pr.pr_id}/threads?api-version=7.1",
+        token=pr.token,
         method="POST",
         body={
             "comments": [
@@ -149,16 +147,14 @@ def _build_full_ai_review_thread_content(workload: str, ai_summary: str) -> str:
 
 
 def _create_ai_review_thread(
-    repo_api: str,
-    pr_id: int,
-    token: str,
+    pr: PrRef,
     workload: str,
     ai_summary: str,
 ) -> None:
     content = _build_full_ai_review_thread_content(workload, ai_summary)
     _request_json(
-        f"{repo_api}/pullrequests/{pr_id}/threads?api-version=7.1",
-        token=token,
+        f"{pr.repo_api}/pullrequests/{pr.pr_id}/threads?api-version=7.1",
+        token=pr.token,
         method="POST",
         body={
             "comments": [
@@ -174,16 +170,14 @@ def _create_ai_review_thread(
 
 
 def _add_thread_comment(
-    repo_api: str,
-    pr_id: int,
+    pr: PrRef,
     thread_id: int,
-    token: str,
     content: str,
 ) -> None:
     _debug(f"Adding comment to thread_id={thread_id}")
     _request_json(
-        f"{repo_api}/pullrequests/{pr_id}/threads/{thread_id}/comments?api-version=7.1",
-        token=token,
+        f"{pr.repo_api}/pullrequests/{pr.pr_id}/threads/{thread_id}/comments?api-version=7.1",
+        token=pr.token,
         method="POST",
         body={
             "parentCommentId": 0,
@@ -194,22 +188,20 @@ def _add_thread_comment(
 
 
 def _sync_full_ai_review_thread(
-    repo_api: str,
-    pr_id: int,
-    token: str,
+    pr: PrRef,
     workload: str,
     ai_summary: str,
 ) -> bool:
     marker = _ai_review_thread_marker(workload)
     desired_content = _build_full_ai_review_thread_content(workload, ai_summary)
     threads_payload = _request_json(
-        f"{repo_api}/pullrequests/{pr_id}/threads?api-version=7.1",
-        token=token,
+        f"{pr.repo_api}/pullrequests/{pr.pr_id}/threads?api-version=7.1",
+        token=pr.token,
     )
     threads = threads_payload.get("value", []) if isinstance(threads_payload, dict) else []
     thread = _find_marked_thread(threads, marker)
     if thread is None:
-        _create_ai_review_thread(repo_api, pr_id, token, workload, ai_summary)
+        _create_ai_review_thread(pr, workload, ai_summary)
         return True
 
     comments = thread.get("comments", []) if isinstance(thread.get("comments"), list) else []
@@ -218,12 +210,12 @@ def _sync_full_ai_review_thread(
 
     thread_id = _thread_id(thread)
     if thread_id <= 0:
-        _create_ai_review_thread(repo_api, pr_id, token, workload, ai_summary)
+        _create_ai_review_thread(pr, workload, ai_summary)
         return True
 
     if common.is_thread_resolved(thread):
-        _set_thread_status(repo_api, pr_id, thread_id, token, common.THREAD_STATUS_ACTIVE)
-    _add_thread_comment(repo_api, pr_id, thread_id, token, desired_content)
+        _set_thread_status(pr, thread_id, common.THREAD_STATUS_ACTIVE)
+    _add_thread_comment(pr, thread_id, desired_content)
     return True
 
 
@@ -242,16 +234,14 @@ def _build_full_deterministic_thread_content(workload: str, deterministic_summar
 
 
 def _create_deterministic_thread(
-    repo_api: str,
-    pr_id: int,
-    token: str,
+    pr: PrRef,
     workload: str,
     deterministic_summary: str,
 ) -> None:
     content = _build_full_deterministic_thread_content(workload, deterministic_summary)
     _request_json(
-        f"{repo_api}/pullrequests/{pr_id}/threads?api-version=7.1",
-        token=token,
+        f"{pr.repo_api}/pullrequests/{pr.pr_id}/threads?api-version=7.1",
+        token=pr.token,
         method="POST",
         body={
             "comments": [
@@ -267,22 +257,20 @@ def _create_deterministic_thread(
 
 
 def _sync_deterministic_thread(
-    repo_api: str,
-    pr_id: int,
-    token: str,
+    pr: PrRef,
     workload: str,
     deterministic_summary: str,
 ) -> bool:
     marker = _deterministic_thread_marker(workload)
     desired_content = _build_full_deterministic_thread_content(workload, deterministic_summary)
     threads_payload = _request_json(
-        f"{repo_api}/pullrequests/{pr_id}/threads?api-version=7.1",
-        token=token,
+        f"{pr.repo_api}/pullrequests/{pr.pr_id}/threads?api-version=7.1",
+        token=pr.token,
     )
     threads = threads_payload.get("value", []) if isinstance(threads_payload, dict) else []
     thread = _find_marked_thread(threads, marker)
     if thread is None:
-        _create_deterministic_thread(repo_api, pr_id, token, workload, deterministic_summary)
+        _create_deterministic_thread(pr, workload, deterministic_summary)
         return True
 
     comments = thread.get("comments", []) if isinstance(thread.get("comments"), list) else []
@@ -291,25 +279,23 @@ def _sync_deterministic_thread(
 
     thread_id = _thread_id(thread)
     if thread_id <= 0:
-        _create_deterministic_thread(repo_api, pr_id, token, workload, deterministic_summary)
+        _create_deterministic_thread(pr, workload, deterministic_summary)
         return True
 
     if common.is_thread_resolved(thread):
-        _set_thread_status(repo_api, pr_id, thread_id, token, common.THREAD_STATUS_ACTIVE)
-    _add_thread_comment(repo_api, pr_id, thread_id, token, desired_content)
+        _set_thread_status(pr, thread_id, common.THREAD_STATUS_ACTIVE)
+    _add_thread_comment(pr, thread_id, desired_content)
     return True
 
 
 def _close_deterministic_thread(
-    repo_api: str,
-    pr_id: int,
-    token: str,
+    pr: PrRef,
     workload: str,
 ) -> bool:
     marker = _deterministic_thread_marker(workload)
     threads_payload = _request_json(
-        f"{repo_api}/pullrequests/{pr_id}/threads?api-version=7.1",
-        token=token,
+        f"{pr.repo_api}/pullrequests/{pr.pr_id}/threads?api-version=7.1",
+        token=pr.token,
     )
     threads = threads_payload.get("value", []) if isinstance(threads_payload, dict) else []
     thread = _find_marked_thread(threads, marker)
@@ -320,7 +306,7 @@ def _close_deterministic_thread(
         return False
     if common.is_thread_resolved(thread):
         return False
-    _set_thread_status(repo_api, pr_id, thread_id, token, common.THREAD_STATUS_CLOSED)
+    _set_thread_status(pr, thread_id, common.THREAD_STATUS_CLOSED)
     return True
 
 
@@ -350,15 +336,13 @@ def _build_full_reviewer_guide_thread_content(workload: str) -> str:
 
 
 def _create_reviewer_guide_thread(
-    repo_api: str,
-    pr_id: int,
-    token: str,
+    pr: PrRef,
     workload: str,
 ) -> None:
     content = _build_full_reviewer_guide_thread_content(workload)
     _request_json(
-        f"{repo_api}/pullrequests/{pr_id}/threads?api-version=7.1",
-        token=token,
+        f"{pr.repo_api}/pullrequests/{pr.pr_id}/threads?api-version=7.1",
+        token=pr.token,
         method="POST",
         body={
             "comments": [
@@ -374,21 +358,19 @@ def _create_reviewer_guide_thread(
 
 
 def _sync_reviewer_guide_thread(
-    repo_api: str,
-    pr_id: int,
-    token: str,
+    pr: PrRef,
     workload: str,
 ) -> bool:
     marker = _reviewer_guide_thread_marker(workload)
     desired_content = _build_full_reviewer_guide_thread_content(workload)
     threads_payload = _request_json(
-        f"{repo_api}/pullrequests/{pr_id}/threads?api-version=7.1",
-        token=token,
+        f"{pr.repo_api}/pullrequests/{pr.pr_id}/threads?api-version=7.1",
+        token=pr.token,
     )
     threads = threads_payload.get("value", []) if isinstance(threads_payload, dict) else []
     thread = _find_marked_thread(threads, marker)
     if thread is None:
-        _create_reviewer_guide_thread(repo_api, pr_id, token, workload)
+        _create_reviewer_guide_thread(pr, workload)
         return True
 
     comments = thread.get("comments", []) if isinstance(thread.get("comments"), list) else []
@@ -397,26 +379,24 @@ def _sync_reviewer_guide_thread(
 
     thread_id = _thread_id(thread)
     if thread_id <= 0:
-        _create_reviewer_guide_thread(repo_api, pr_id, token, workload)
+        _create_reviewer_guide_thread(pr, workload)
         return True
 
     if common.is_thread_resolved(thread):
-        _set_thread_status(repo_api, pr_id, thread_id, token, common.THREAD_STATUS_ACTIVE)
-    _add_thread_comment(repo_api, pr_id, thread_id, token, desired_content)
+        _set_thread_status(pr, thread_id, common.THREAD_STATUS_ACTIVE)
+    _add_thread_comment(pr, thread_id, desired_content)
     return True
 
 
 def _set_thread_status(
-    repo_api: str,
-    pr_id: int,
+    pr: PrRef,
     thread_id: int,
-    token: str,
     status: int,
 ) -> None:
     _debug(f"Updating thread status: thread_id={thread_id}, status={status}")
     _request_json(
-        f"{repo_api}/pullrequests/{pr_id}/threads/{thread_id}?api-version=7.1",
-        token=token,
+        f"{pr.repo_api}/pullrequests/{pr.pr_id}/threads/{thread_id}?api-version=7.1",
+        token=pr.token,
         method="PATCH",
         body={"status": status},
     )
@@ -474,20 +454,16 @@ def _refresh_ticket_thread(
     change_summary: str,
     risk_summary: str,
     *,
-    repo_api: str,
-    pr_id: int,
-    token: str,
+    pr: PrRef,
 ) -> None:
     """Re-open a resolved thread whose path drifted again and post the latest change if it is new."""
     thread_id = _thread_id(thread)
     if common.is_thread_resolved(thread) and thread_id > 0:
         _debug(f"Re-opening resolved auto thread for changed path: thread_id={thread_id}, path={path}")
-        _set_thread_status(repo_api, pr_id, thread_id, token, common.THREAD_STATUS_ACTIVE)
+        _set_thread_status(pr, thread_id, common.THREAD_STATUS_ACTIVE)
         _add_thread_comment(
-            repo_api=repo_api,
-            pr_id=pr_id,
+            pr=pr,
             thread_id=thread_id,
-            token=token,
             content=(
                 "Policy drift changed again for this path; re-opening thread for fresh review. "
                 "Use `/accept` or `/reject` and resolve after decision."
@@ -499,10 +475,8 @@ def _refresh_ticket_thread(
         risk_summary=risk_summary,
     ):
         _add_thread_comment(
-            repo_api=repo_api,
-            pr_id=pr_id,
+            pr=pr,
             thread_id=thread_id,
-            token=token,
             content=f"Detected change (auto): {change_summary}\n\nRisk context: {risk_summary}",
         )
     _debug(
@@ -512,9 +486,7 @@ def _refresh_ticket_thread(
 
 
 def _enforce_change_ticket_threads(
-    repo_api: str,
-    pr_id: int,
-    token: str,
+    pr: PrRef,
     changes: list[ChangeItem],
     ticket_pattern: str,
     change_context: dict[str, tuple[str, str]],
@@ -527,7 +499,7 @@ def _enforce_change_ticket_threads(
     if tracked_paths:
         _debug(f"Tracked paths preview: {'; '.join(tracked_paths[:10])}")
 
-    threads = _request_json(f"{repo_api}/pullrequests/{pr_id}/threads?api-version=7.1", token=token).get("value", [])
+    threads = _request_json(f"{pr.repo_api}/pullrequests/{pr.pr_id}/threads?api-version=7.1", token=pr.token).get("value", [])
     _debug(f"Fetched PR threads: total={len(threads)}")
     auto_threads_by_path = _index_auto_threads(threads)
     _debug(f"Detected auto ticket threads: total={len(auto_threads_by_path)}")
@@ -539,7 +511,7 @@ def _enforce_change_ticket_threads(
         thread_id = _thread_id(thread)
         if path not in tracked_set and not common.is_thread_resolved(thread) and thread_id > 0:
             _debug(f"Closing stale auto thread: thread_id={thread_id}, path={path}")
-            _set_thread_status(repo_api, pr_id, thread_id, token, common.THREAD_STATUS_CLOSED)
+            _set_thread_status(pr, thread_id, common.THREAD_STATUS_CLOSED)
             closed_count += 1
 
     created_count = 0
@@ -550,14 +522,10 @@ def _enforce_change_ticket_threads(
         thread = auto_threads_by_path.get(path)
         if thread:
             _refresh_ticket_thread(
-                thread, path, change_summary, risk_summary, repo_api=repo_api, pr_id=pr_id, token=token
-            )
+                thread, path, change_summary, risk_summary, pr=pr, )
             continue
         _create_ticket_thread(
-            repo_api=repo_api,
-            pr_id=pr_id,
-            token=token,
-            path=path,
+            pr=pr, path=path,
             ticket_pattern=ticket_pattern,
             change_summary=change_summary,
             risk_summary=risk_summary,
@@ -576,51 +544,49 @@ def _log_thread_sync(synced: bool, pr_id: Any, workload: str, what: str, up_to_d
 
 def _sync_summary_threads(
     *,
-    repo_api: str,
-    pr_id: int,
-    token: str,
+    pr: PrRef,
     workload: str,
     deterministic: str,
     ai_summary: str | None,
     update: DescriptionUpdate,
 ) -> None:
     """Keep the full-detail PR threads consistent with what the description holds. Never raises."""
-    common_args = {"repo_api": repo_api, "pr_id": pr_id, "token": token, "workload": workload}
+    common_args = {"pr": pr, "workload": workload}
     if update.compacted:
         try:
             synced = _sync_deterministic_thread(**common_args, deterministic_summary=deterministic)
             _log_thread_sync(
-                synced, pr_id, workload, "full deterministic summary thread",
+                synced, pr.pr_id, workload, "full deterministic summary thread",
                 "Full deterministic summary thread already up to date",
             )
         except Exception as exc:
-            log.warning(f"Failed to sync full deterministic summary thread for PR #{pr_id}: {exc}")
+            log.warning(f"Failed to sync full deterministic summary thread for PR #{pr.pr_id}: {exc}")
     else:
         try:
             if _close_deterministic_thread(**common_args):
                 log.info(
-                    f"Closed full deterministic summary thread for PR #{pr_id} ({workload}) "
+                    f"Closed full deterministic summary thread for PR #{pr.pr_id} ({workload}) "
                     "because description now fits."
                 )
         except Exception as exc:
-            log.warning(f"Failed to close deterministic summary thread for PR #{pr_id}: {exc}")
+            log.warning(f"Failed to close deterministic summary thread for PR #{pr.pr_id}: {exc}")
 
     log.info(
-        f"Updated automated review summary for PR #{pr_id} ({workload})."
+        f"Updated automated review summary for PR #{pr.pr_id} ({workload})."
         if update.summary_updated
-        else f"Automated review summary already up to date for PR #{pr_id} ({workload})."
+        else f"Automated review summary already up to date for PR #{pr.pr_id} ({workload})."
     )
     if ai_summary and update.ai_moved_to_thread:
         try:
             synced = _sync_full_ai_review_thread(**common_args, ai_summary=ai_summary)
             _log_thread_sync(
-                synced, pr_id, workload, "full AI reviewer narrative thread",
+                synced, pr.pr_id, workload, "full AI reviewer narrative thread",
                 "Full AI reviewer narrative thread already up to date",
             )
         except Exception as exc:
-            log.warning(f"Failed to sync full AI reviewer narrative thread for PR #{pr_id}: {exc}")
+            log.warning(f"Failed to sync full AI reviewer narrative thread for PR #{pr.pr_id}: {exc}")
     try:
         synced = _sync_reviewer_guide_thread(**common_args)
-        _log_thread_sync(synced, pr_id, workload, "reviewer guide thread", "Reviewer guide thread already up to date")
+        _log_thread_sync(synced, pr.pr_id, workload, "reviewer guide thread", "Reviewer guide thread already up to date")
     except Exception as exc:
-        log.warning(f"Failed to sync reviewer guide thread for PR #{pr_id}: {exc}")
+        log.warning(f"Failed to sync reviewer guide thread for PR #{pr.pr_id}: {exc}")

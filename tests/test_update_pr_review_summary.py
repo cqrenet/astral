@@ -608,9 +608,7 @@ class UpdatePrReviewSummaryTests(unittest.TestCase):
 
         with patch.object(self.pr_threads, "_request_json", side_effect=request_json):
             updated = self.pr_threads._sync_full_ai_review_thread(
-                repo_api="https://dev.azure.com/org/project/_apis/git/repositories/repo",
-                pr_id=77,
-                token="token",
+                pr=self.pr_base.PrRef("https://dev.azure.com/org/project/_apis/git/repositories/repo", 77, "token"),
                 workload="intune",
                 ai_summary="Plain-language summary\nEverything looks consistent.",
             )
@@ -631,9 +629,7 @@ class UpdatePrReviewSummaryTests(unittest.TestCase):
 
         with patch.object(self.pr_threads, "_request_json", side_effect=request_json):
             updated = self.pr_threads._sync_full_ai_review_thread(
-                repo_api="https://dev.azure.com/org/project/_apis/git/repositories/repo",
-                pr_id=77,
-                token="token",
+                pr=self.pr_base.PrRef("https://dev.azure.com/org/project/_apis/git/repositories/repo", 77, "token"),
                 workload="intune",
                 ai_summary="Plain-language summary\nEverything looks consistent.",
             )
@@ -1279,11 +1275,11 @@ class EnforceTicketThreadsTests(unittest.TestCase):
         ]
         calls = {"created": [], "status": [], "comments": []}
         with patch.object(self.pr_threads, "_request_json", return_value={"value": threads}), patch.object(self.pr_threads, "_create_ticket_thread", side_effect=lambda **kw: calls["created"].append(kw["path"])
-        ), patch.object(self.pr_threads, "_set_thread_status", side_effect=lambda *a: calls["status"].append((a[2], a[4]))
+        ), patch.object(self.pr_threads, "_set_thread_status", side_effect=lambda pr, thread_id, status: calls["status"].append((thread_id, status))
         ), patch.object(self.pr_threads, "_add_thread_comment", side_effect=lambda **kw: calls["comments"].append(kw["thread_id"])
         ):
             created, closed = self.pr_threads._enforce_change_ticket_threads(
-                "https://x/repo", 5, "tok",
+                self.pr_base.PrRef("https://x/repo", 5, "tok"),
                 [self._change(new_path), self._change(again_path), self._change("tenant-state/reports/a.md")],
                 r"[A-Z]+-\d+",
                 {},
@@ -1396,7 +1392,7 @@ class RefreshSummaryFlowTests(unittest.TestCase):
                 patch.object(self.module, "_enforce_change_ticket_threads", return_value=(1, 0)) as enforce:
             run.run_ticket_gate()
         kwargs = enforce.call_args.kwargs
-        self.assertEqual((kwargs["pr_id"], kwargs["changes"], kwargs["change_context"]), (7, [change], {"p": ("c", "r")}))
+        self.assertEqual((kwargs["pr"].pr_id, kwargs["changes"], kwargs["change_context"]), (7, [change], {"p": ("c", "r")}))
         self.assertEqual(kwargs["ticket_pattern"], r"[A-Z][A-Z0-9]+-\d+")
 
     def test_failure_is_non_fatal_unless_ticket_gate_is_required(self) -> None:

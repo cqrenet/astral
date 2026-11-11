@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import os
+from dataclasses import dataclass
 from typing import Any
 
 import common
@@ -71,3 +72,13 @@ def _load_policy_excerpt(repo_root: str, branch: str, path: str, max_chars: int 
     if max_chars and len(content) > max_chars:
         return content[:max_chars] + "...(truncated)"
     return content
+
+
+@dataclass(frozen=True)
+class PrRef:
+    """One pull request and the credentials to call its Azure DevOps REST API."""
+
+    repo_api: str
+    pr_id: int
+    token: str
+

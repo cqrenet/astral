@@ -19,6 +19,7 @@ from urllib.parse import urlencode
 
 import common  # same directory as this script
 from pr_base import (
+    PrRef,
     _debug,
     _delay_reviewer_notifications_enabled,
     _env,
@@ -185,6 +186,10 @@ class _Run:
     is_draft: bool
     require_ticket_gate: bool
 
+    @property
+    def pr_ref(self) -> PrRef:
+        return PrRef(self.repo_api, self.pr_id, self.token)
+
     def publish_draft(self, description: str, reason: str) -> None:
         published = _publish_draft_pr(
             repo_api=self.repo_api,
@@ -203,9 +208,7 @@ class _Run:
             log.info("Change-needed thread sync disabled (set REQUIRE_CHANGE_TICKETS=true).")
             return
         created, closed = _enforce_change_ticket_threads(
-            repo_api=self.repo_api,
-            pr_id=self.pr_id,
-            token=self.token,
+            pr=self.pr_ref,
             changes=self.changes,
             ticket_pattern=_env("CHANGE_TICKET_REGEX", required=False, default=r"[A-Z][A-Z0-9]+-\d+"),
             change_context=_build_ticket_change_context(
@@ -300,9 +303,7 @@ def _refresh_summary(args: argparse.Namespace, require_ticket_gate: bool) -> int
         token=token,
     )
     _sync_summary_threads(
-        repo_api=repo_api,
-        pr_id=run.pr_id,
-        token=token,
+        pr=run.pr_ref,
         workload=args.workload,
         deterministic=deterministic,
         ai_summary=ai_summary,
