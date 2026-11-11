@@ -191,6 +191,23 @@ def _find_active_rolling_pr(repo_api: str, token: str, source_ref: str, target_r
     return items[0] if items else None
 
 
+def _collect_changes(args: argparse.Namespace, baseline_branch: str, drift_branch: str) -> tuple[list[ChangeItem], int]:
+    """Policy changes between the branches, minus operational-only drift; returns (changes, ignored count)."""
+    diff_output = _run_diff_name_status(args.repo_root, baseline_branch, drift_branch)
+    changes = _parse_changes(diff_output, args.backup_folder, args.reports_subdir)
+    _debug(f"Parsed non-doc/report changes for summary: count={len(changes)}")
+    changes, ignored = _filter_operational_noise_changes(
+        repo_root=args.repo_root,
+        baseline_branch=baseline_branch,
+        drift_branch=drift_branch,
+        workload=args.workload,
+        changes=changes,
+    )
+    if ignored > 0:
+        print(f"Ignored operational-only drift changes from summary/ticket scope: {ignored}")
+    return changes, ignored
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Update rolling PR reviewer summary")
     parser.add_argument("--repo-root", required=True)
@@ -232,21 +249,7 @@ def main() -> int:
 
         if not _fetch_drift_branch(args.repo_root, baseline_branch, drift_branch):
             return 0
-        diff_output = _run_diff_name_status(args.repo_root, baseline_branch, drift_branch)
-        changes = _parse_changes(diff_output, args.backup_folder, args.reports_subdir)
-        _debug(f"Parsed non-doc/report changes for summary: count={len(changes)}")
-        changes, ignored_operational_count = _filter_operational_noise_changes(
-            repo_root=args.repo_root,
-            baseline_branch=baseline_branch,
-            drift_branch=drift_branch,
-            workload=args.workload,
-            changes=changes,
-        )
-        if ignored_operational_count > 0:
-            print(
-                "Ignored operational-only drift changes from summary/ticket scope: "
-                f"{ignored_operational_count}"
-            )
+        changes, ignored_operational_count = _collect_changes(args, baseline_branch, drift_branch)
         deterministic = _build_deterministic_summary(
             changes,
             drift_branch,
