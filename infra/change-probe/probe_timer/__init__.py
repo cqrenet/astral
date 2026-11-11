@@ -52,86 +52,75 @@ def _save_state(connection_string: str, state: dict[str, Any]) -> None:
     )
 
 
-def main(mytimer: func.TimerRequest, msg: func.Out[str]) -> None:
-    utc_now = mytimer.schedule_status.get("Last", "n/a") if mytimer.schedule_status else "n/a"
-    logging.info(f"Probe timer triggered at {utc_now}")
-
+def _auth_args() -> list[str] | None:
+    """Probe CLI arguments for Graph authentication: a ready token, else the app credentials; None if neither."""
+    token = os.environ.get("GRAPH_TOKEN", "").strip()
+    if token:
+        return ["--token", token]
     client_id = os.environ.get("PROBE_APP_ID", "").strip()
     client_secret = os.environ.get("PROBE_APP_SECRET", "").strip()
     tenant_id = os.environ.get("TENANT_ID", "").strip()
-    token = os.environ.get("GRAPH_TOKEN", "").strip()
+    if client_id and client_secret and tenant_id:
+        return ["--client-id", client_id, "--client-secret", client_secret, "--tenant-id", tenant_id]
+    return None
 
-    auth_args: list[str] = []
-    if token:
-        auth_args = ["--token", token]
-    elif client_id and client_secret and tenant_id:
-        auth_args = [
-            "--client-id", client_id,
-            "--client-secret", client_secret,
-            "--tenant-id", tenant_id,
-        ]
-    else:
+
+def _run_probe(cmd: list[str]) -> dict[str, Any] | None:
+    """Run the probe script and parse its JSON result; None (after logging why) when it did not produce one."""
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+    except subprocess.TimeoutExpired:
+        logging.error("Probe script timed out after 60 seconds.")
+        return None
+    except Exception as exc:
+        logging.error(f"Failed to run probe script ({exc}).")
+        return None
+    if result.returncode != 0:
+        logging.error(f"Probe script failed (exit {result.returncode}): {result.stderr}")
+        return None
+    try:
+        return json.loads(result.stdout)
+    except json.JSONDecodeError as exc:
+        logging.error(f"Probe script returned invalid JSON ({exc}): {result.stdout[:500]}")
+        return None
+
+
+def main(mytimer: func.TimerRequest, msg: func.Out[str]) -> None:
+    last_run = mytimer.schedule_status.get("Last", "n/a") if mytimer.schedule_status else "n/a"
+    logging.info(f"Probe timer triggered at {last_run}")
+
+    auth_args = _auth_args()
+    if auth_args is None:
         logging.error("No Graph authentication configured (PROBE_APP_ID/SECRET/TENANT_ID or GRAPH_TOKEN).")
         return
-
     connection_string = os.environ.get("AzureWebJobsStorage", "").strip()
     if not connection_string:
         logging.error("AzureWebJobsStorage connection string is missing.")
         return
-
-    state = _load_state(connection_string)
-    state_json = json.dumps(state) if state else ""
-    quiet_window = os.environ.get("PROBE_QUIET_WINDOW_MINUTES", "15")
-    cooldown = os.environ.get("PROBE_COOLDOWN_MINUTES", "30")
-
     probe_script = os.path.join(_repo_root(), "scripts", "probe_tenant_changes.py")
     if not os.path.exists(probe_script):
         logging.error(f"Probe script not found at {probe_script}")
         return
 
+    state = _load_state(connection_string)
     cmd = [
         sys.executable,
         probe_script,
         *auth_args,
-        "--quiet-window-minutes", quiet_window,
-        "--cooldown-minutes", cooldown,
+        "--quiet-window-minutes", os.environ.get("PROBE_QUIET_WINDOW_MINUTES", "15"),
+        "--cooldown-minutes", os.environ.get("PROBE_COOLDOWN_MINUTES", "30"),
     ]
-    if state_json:
-        cmd.extend(["--state-json", state_json])
+    if state:
+        cmd.extend(["--state-json", json.dumps(state)])
 
     logging.info(f"Running probe script: {probe_script}")
-    try:
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
-    except subprocess.TimeoutExpired:
-        logging.error("Probe script timed out after 60 seconds.")
-        return
-    except Exception as exc:
-        logging.error(f"Failed to run probe script ({exc}).")
+    output = _run_probe(cmd)
+    if output is None:
         return
 
-    if result.returncode != 0:
-        logging.error(f"Probe script failed (exit {result.returncode}): {result.stderr}")
-        return
-
-    try:
-        output = json.loads(result.stdout)
-    except json.JSONDecodeError as exc:
-        logging.error(f"Probe script returned invalid JSON ({exc}): {result.stdout[:500]}")
-        return
-
-    new_state = output.get("new_state", state)
-    _save_state(connection_string, new_state)
-
-    trigger = output.get("trigger", False)
+    _save_state(connection_string, output.get("new_state", state))
     reason = output.get("reason", "no reason given")
-    logging.info(f"Probe result: trigger={trigger}, reason={reason}")
-
-    if trigger:
-        queue_payload = json.dumps(
-            {
-                "reason": reason,
-                "checked_at": output.get("checked_at", ""),
-            }
-        )
-        msg.set(queue_payload)
+    logging.info(f"Probe result: trigger={output.get('trigger', False)}, reason={reason}")
+    if output.get("trigger", False):
+        msg.set(json.dumps({"reason": reason, "checked_at": output.get("checked_at", "")}))
         logging.info("Queued backup trigger message.")
