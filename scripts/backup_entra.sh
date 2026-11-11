@@ -20,11 +20,13 @@ reports="$BACKUP_FOLDER/$REPORTS_SUBDIR/entra"
 git checkout --quiet --force -B "$DRIFT_BRANCH_ENTRA" "origin/$BASELINE_BRANCH"
 
 full=0
-if [ "${FORCE_FULL_RUN:-false}" = "true" ] || [ "$(TZ="${BACKUP_TIMEZONE:-UTC}" date +%H)" = "${FULL_RUN_HOUR:-02}" ]; then full=1; fi
+if ci_is_full_run; then full=1; fi
 RUN_MODE=$([ "$full" = 1 ] && echo full || echo light)
 # App categories are exported in full runs only; light runs keep them from the drift branch.
-export ENTRA_INCLUDE_ENTERPRISE_APPS_EFFECTIVE=$([ "$ENTRA_INCLUDE_ENTERPRISE_APPS" = "true" ] && [ "$full" = 1 ] && echo true || echo false)
-export ENTRA_INCLUDE_APP_REGISTRATIONS_EFFECTIVE=$([ "$ENTRA_INCLUDE_APP_REGISTRATIONS" = "true" ] && [ "$full" = 1 ] && echo true || echo false)
+effective_in_this_run() { if [ "$1" = "true" ] && [ "$full" = 1 ]; then echo true; else echo false; fi; }
+ENTRA_INCLUDE_ENTERPRISE_APPS_EFFECTIVE="$(effective_in_this_run "$ENTRA_INCLUDE_ENTERPRISE_APPS")"
+ENTRA_INCLUDE_APP_REGISTRATIONS_EFFECTIVE="$(effective_in_this_run "$ENTRA_INCLUDE_APP_REGISTRATIONS")"
+export ENTRA_INCLUDE_ENTERPRISE_APPS_EFFECTIVE ENTRA_INCLUDE_APP_REGISTRATIONS_EFFECTIVE
 echo "Run mode (Entra): $RUN_MODE; enterprise apps: $ENTRA_INCLUDE_ENTERPRISE_APPS_EFFECTIVE; app registrations: $ENTRA_INCLUDE_APP_REGISTRATIONS_EFFECTIVE"
 
 bash scripts/reset_entra_export.sh

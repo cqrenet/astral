@@ -16,7 +16,7 @@ reports="$BACKUP_FOLDER/$REPORTS_SUBDIR/intune"
 
 git checkout --quiet --force -B "$DRIFT_BRANCH_INTUNE" "origin/$BASELINE_BRANCH"
 
-if [ "${FORCE_FULL_RUN:-false}" = "true" ] || [ "$(TZ="${BACKUP_TIMEZONE:-UTC}" date +%H)" = "${FULL_RUN_HOUR:-02}" ]; then
+if ci_is_full_run; then
   RUN_MODE=full
 else
   RUN_MODE=light
@@ -25,7 +25,8 @@ echo "Run mode: $RUN_MODE"
 
 rm -rf "$root" "$reports"
 mkdir -p "$root"
-export BACKUP_START="$(date -u +%Y.%m.%d:%H.%M.%S)"
+BACKUP_START="$(date -u +%Y.%m.%d:%H.%M.%S)"
+export BACKUP_START
 INTUNE_ROOT="$PWD/$root" bash scripts/run_intune_backup.sh
 
 python3 scripts/filter_intune_partial_settings_noise.py --repo-root "$PWD" --backup-root "$PWD/$root" \
