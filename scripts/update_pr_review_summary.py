@@ -132,16 +132,10 @@ def _build_ticket_change_context(
 
 def _fetch_drift_branch(repo_root: str, baseline_branch: str, drift_branch: str) -> bool:
     """Fetch both branches; False when the drift branch does not exist on origin."""
-    _run_git(repo_root, ["fetch", "--quiet", "origin", baseline_branch])
-    try:
-        _run_git(repo_root, ["fetch", "--quiet", "origin", drift_branch])
-    except RuntimeError as exc:
-        message = str(exc).lower()
-        if "couldn't find remote ref" in message or "could not find remote ref" in message:
-            log.info(f"Drift branch '{drift_branch}' not found on origin; skipping summary update.")
-            return False
-        raise
-    return True
+    if common.fetch_branches(repo_root, baseline_branch, drift_branch):
+        return True
+    log.info(f"Drift branch '{drift_branch}' not found on origin; skipping summary update.")
+    return False
 
 
 def _find_active_rolling_pr(repo_api: str, token: str, source_ref: str, target_ref: str) -> dict[str, Any] | None:

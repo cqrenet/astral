@@ -441,6 +441,19 @@ def run_git(repo_root: str | os.PathLike[str], args: list[str], check: bool = Tr
     return git_proc(repo_root, args, check=check).stdout.strip()
 
 
+def fetch_branches(repo_root: str | os.PathLike[str], baseline_branch: str, drift_branch: str) -> bool:
+    """Fetch baseline and drift branches from origin; False when the drift branch does not exist there."""
+    run_git(repo_root, ["fetch", "--quiet", "origin", baseline_branch])
+    try:
+        run_git(repo_root, ["fetch", "--quiet", "origin", drift_branch])
+    except RuntimeError as exc:
+        message = str(exc).lower()
+        if "couldn't find remote ref" in message or "could not find remote ref" in message:
+            return False
+        raise
+    return True
+
+
 def git_show(repo_root: str | os.PathLike[str], ref: str, rel_path: str) -> bytes | None:
     """File content at *ref* as bytes, or None when the path does not exist there."""
     proc = git_proc(repo_root, ["show", f"{ref}:{rel_path}"], check=False, text=False)
