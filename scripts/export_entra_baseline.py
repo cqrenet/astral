@@ -564,36 +564,69 @@ def _is_unresolved_marker(value: Any) -> bool:
     return text.lower() == "unresolved"
 
 
+def _text(value: Any) -> str:
+    return str(value or "").strip()
+
+
 def _owner_key(owner: dict[str, Any]) -> str:
-    return (
-        str(owner.get("id") or "").strip()
-        or str(owner.get("appId") or "").strip()
-        or str(owner.get("userPrincipalName") or "").strip().casefold()
-    )
+    return _text(owner.get("id")) or _text(owner.get("appId")) or _text(owner.get("userPrincipalName")).casefold()
+
+
+def _index_dicts(items: list[Any], key_fn: Any) -> dict[Any, dict[str, Any]]:
+    """Dict items by key (the last one wins); items without a usable key are skipped."""
+    indexed: dict[Any, dict[str, Any]] = {}
+    for item in items:
+        if isinstance(item, dict):
+            key = key_fn(item)
+            if key:
+                indexed[key] = item
+    return indexed
+
+
+def _fill_missing(target: dict[str, Any], previous: dict[str, Any], fields: tuple[str, ...]) -> None:
+    """Copy non-empty values from *previous* into fields that are empty on *target*."""
+    for field in fields:
+        if not _text(target.get(field)):
+            value = _text(previous.get(field))
+            if value:
+                target[field] = value
+
+
+def _fill_resource_name(target: dict[str, Any], previous: dict[str, Any]) -> None:
+    if _is_unresolved_marker(target.get("resourceDisplayName")):
+        name = _text(previous.get("resourceDisplayName"))
+        if name and not _is_unresolved_marker(name):
+            target["resourceDisplayName"] = name
 
 
 def _merge_owner_resolution(
     current: list[dict[str, str]],
     previous: list[dict[str, Any]],
 ) -> list[dict[str, str]]:
-    previous_by_key: dict[str, dict[str, Any]] = {}
-    for item in previous:
-        if not isinstance(item, dict):
-            continue
-        key = _owner_key(item)
-        if key:
-            previous_by_key[key] = item
-
+    previous_by_key = _index_dicts(previous, _owner_key)
     merged: list[dict[str, str]] = []
     for item in current:
         enriched = dict(item)
-        key = _owner_key(enriched)
-        prev = previous_by_key.get(key, {})
-        if not str(enriched.get("displayName") or "").strip():
-            prev_name = str(prev.get("displayName") or "").strip()
-            if prev_name:
-                enriched["displayName"] = prev_name
+        _fill_missing(enriched, previous_by_key.get(_owner_key(enriched), {}), ("displayName",))
         merged.append(enriched)
+    return merged
+
+
+def _permission_key(perm: dict[str, Any]) -> tuple[str, str]:
+    return (_text(perm.get("id")), _text(perm.get("type")).lower())
+
+
+def _merge_permissions(current: list[Any], previous: list[Any]) -> list[Any]:
+    previous_by_key = _index_dicts(previous, _permission_key)  # tuple keys are never empty
+    merged: list[Any] = []
+    for perm in current:
+        if not isinstance(perm, dict):
+            merged.append(perm)
+            continue
+        merged_perm = dict(perm)
+        prev = previous_by_key.get(_permission_key(merged_perm), {})
+        _fill_missing(merged_perm, prev, ("value", "displayName", "description"))
+        merged.append(merged_perm)
     return merged
 
 
@@ -601,100 +634,40 @@ def _merge_required_resource_access_resolution(
     current: list[dict[str, Any]],
     previous: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
-    previous_by_resource: dict[str, dict[str, Any]] = {}
-    for item in previous:
-        if not isinstance(item, dict):
-            continue
-        key = str(item.get("resourceAppId") or "").strip()
-        if key:
-            previous_by_resource[key] = item
-
+    previous_by_resource = _index_dicts(previous, lambda item: _text(item.get("resourceAppId")))
     merged: list[dict[str, Any]] = []
     for item in current:
         if not isinstance(item, dict):
             merged.append(item)
             continue
         enriched = dict(item)
-        key = str(enriched.get("resourceAppId") or "").strip()
-        prev = previous_by_resource.get(key, {})
-        if _is_unresolved_marker(enriched.get("resourceDisplayName")):
-            prev_name = str(prev.get("resourceDisplayName") or "").strip()
-            if prev_name and not _is_unresolved_marker(prev_name):
-                enriched["resourceDisplayName"] = prev_name
-
-        current_perms = enriched.get("permissions")
-        previous_perms = prev.get("permissions") if isinstance(prev, dict) else None
+        prev = previous_by_resource.get(_text(enriched.get("resourceAppId")), {})
+        _fill_resource_name(enriched, prev)
+        current_perms, previous_perms = enriched.get("permissions"), prev.get("permissions")
         if isinstance(current_perms, list) and isinstance(previous_perms, list):
-            previous_by_perm: dict[tuple[str, str], dict[str, Any]] = {}
-            for perm in previous_perms:
-                if not isinstance(perm, dict):
-                    continue
-                perm_key = (
-                    str(perm.get("id") or "").strip(),
-                    str(perm.get("type") or "").strip().lower(),
-                )
-                previous_by_perm[perm_key] = perm
-            merged_perms: list[dict[str, Any]] = []
-            for perm in current_perms:
-                if not isinstance(perm, dict):
-                    merged_perms.append(perm)
-                    continue
-                merged_perm = dict(perm)
-                perm_key = (
-                    str(merged_perm.get("id") or "").strip(),
-                    str(merged_perm.get("type") or "").strip().lower(),
-                )
-                prev_perm = previous_by_perm.get(perm_key, {})
-                for field in ("value", "displayName", "description"):
-                    if not str(merged_perm.get(field) or "").strip():
-                        prev_value = str(prev_perm.get(field) or "").strip()
-                        if prev_value:
-                            merged_perm[field] = prev_value
-                merged_perms.append(merged_perm)
-            enriched["permissions"] = merged_perms
+            enriched["permissions"] = _merge_permissions(current_perms, previous_perms)
         merged.append(enriched)
     return merged
+
+
+def _role_assignment_key(item: dict[str, Any]) -> tuple[str, str, str]:
+    return (_text(item.get("resourceId")), _text(item.get("appRoleId")), _text(item.get("principalType")))
 
 
 def _merge_app_role_assignments_resolution(
     current: list[dict[str, Any]],
     previous: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
-    previous_by_key: dict[tuple[str, str, str], dict[str, Any]] = {}
-    for item in previous:
-        if not isinstance(item, dict):
-            continue
-        key = (
-            str(item.get("resourceId") or "").strip(),
-            str(item.get("appRoleId") or "").strip(),
-            str(item.get("principalType") or "").strip(),
-        )
-        previous_by_key[key] = item
-
+    previous_by_key = _index_dicts(previous, _role_assignment_key)
     merged: list[dict[str, Any]] = []
     for item in current:
         if not isinstance(item, dict):
             merged.append(item)
             continue
         enriched = dict(item)
-        key = (
-            str(enriched.get("resourceId") or "").strip(),
-            str(enriched.get("appRoleId") or "").strip(),
-            str(enriched.get("principalType") or "").strip(),
-        )
-        prev = previous_by_key.get(key, {})
-        if _is_unresolved_marker(enriched.get("resourceDisplayName")):
-            prev_name = str(prev.get("resourceDisplayName") or "").strip()
-            if prev_name and not _is_unresolved_marker(prev_name):
-                enriched["resourceDisplayName"] = prev_name
-        if not str(enriched.get("appRoleValue") or "").strip():
-            prev_value = str(prev.get("appRoleValue") or "").strip()
-            if prev_value:
-                enriched["appRoleValue"] = prev_value
-        if not str(enriched.get("appRoleDisplayName") or "").strip():
-            prev_name = str(prev.get("appRoleDisplayName") or "").strip()
-            if prev_name:
-                enriched["appRoleDisplayName"] = prev_name
+        prev = previous_by_key.get(_role_assignment_key(enriched), {})
+        _fill_resource_name(enriched, prev)
+        _fill_missing(enriched, prev, ("appRoleValue", "appRoleDisplayName"))
         merged.append(enriched)
     return merged
 
