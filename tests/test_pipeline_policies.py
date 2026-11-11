@@ -95,6 +95,16 @@ class PipelinePolicyTests(unittest.TestCase):
                         with self.subTest(file=rel, step=step.get("displayName"), script=script):
                             self.assertIn("PR_DECISION_ALLOWED_REVIEWERS", step.get("env") or {})
 
+    def test_github_actions_are_pinned_to_a_commit(self) -> None:
+        # A tag can be moved; these workflows hold write tokens and cloud identities. Local reusable workflows are exempt.
+        for path in glob.glob(str(ROOT / ".github/workflows/*.yml")):
+            for job_name, job in (_load(path).get("jobs") or {}).items():
+                for step in [job] + list(job.get("steps") or []):
+                    used = step.get("uses")
+                    if used and not used.startswith("./"):
+                        with self.subTest(path=os.path.relpath(path, ROOT), job=job_name, uses=used):
+                            self.assertRegex(used, r"@[0-9a-f]{40}$")
+
     def test_restore_mode_is_constrained_everywhere(self) -> None:
         ado = {p["name"]: p for p in _load(str(ROOT / "azure-pipelines-restore.yml"))["parameters"]}
         self.assertEqual(ado["restoreMode"].get("values"), ["full", "selective"])

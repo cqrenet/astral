@@ -143,6 +143,7 @@ Other variables from `templates/variables-common.yml` and the `variables:` block
 - Restore accepts only commits in the `BASELINE_BRANCH` history, and only plain ref names (no git option injection).
 - Graph tokens are masked before any output and checked for the required roles before use.
 - Paths, authors and commit messages from tenant data reach git through files and environment variables, never as command-line text.
+- Third-party actions are pinned to a commit SHA (`actions/checkout`), not a tag. To update one, resolve the new tag with `git ls-remote https://github.com/actions/checkout 'refs/tags/vX.Y.Z'` and change the SHA and its version comment together.
 - No workflow runs on comment or pull request events, so commenters cannot start runs that hold write tokens.
 
 ## 7. Not yet available on GitHub

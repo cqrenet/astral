@@ -29,7 +29,7 @@ jobs:
       GRAPH_AUTH_METHOD: ${{ vars.GRAPH_AUTH_METHOD }}
       AZURE_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262   # v4.4.0
 
       - name: Get Graph token
         env:
