@@ -208,63 +208,65 @@ def _remote_diff_is_empty(repo_root: pathlib.Path, drift_branch: str, workload_r
     return common.git_proc(repo_root, ["diff", "--quiet", f"origin/{drift_branch}", "--", workload_root], check=False).returncode == 0
 
 
-def _build_author_groups(
-    changed_files: list[str],
-    audits: list[dict],
-    fallback: Identity,
-) -> tuple[dict[str, dict[str, list[str] | list[Identity]]], int]:
-    identities_by_resource: dict[str, dict[str, Identity]] = defaultdict(dict)
+def _identities_by_resource(audits: list[dict]) -> dict[str, dict[str, Identity]]:
+    """Identities of successful audit events, indexed by the id of each resource they touched."""
+    by_resource: dict[str, dict[str, Identity]] = defaultdict(dict)
     for audit in audits:
         result = str(audit.get("result") or "").strip().lower()
         if result and result != "success":
             continue
         identity = _extract_identity_from_audit(audit)
-        if identity is None:
+        targets = audit.get("targetResources")
+        if identity is None or not isinstance(targets, list):
             continue
-        target_resources = audit.get("targetResources")
-        if not isinstance(target_resources, list):
-            continue
-        for target in target_resources:
-            if not isinstance(target, dict):
-                continue
-            resource_id = str(target.get("id") or "").strip()
+        for target in targets:
+            resource_id = str(target.get("id") or "").strip() if isinstance(target, dict) else ""
             if resource_id:
-                identities_by_resource[resource_id][identity.key] = identity
+                by_resource[resource_id][identity.key] = identity
+    return by_resource
 
-    resolved_by_category: dict[str, dict[str, Identity]] = defaultdict(dict)
+
+def _attribute_files(
+    changed_files: list[str],
+    by_resource: dict[str, dict[str, Identity]],
+    fallback: Identity,
+) -> tuple[dict[str, list[Identity]], int]:
+    """Identities per changed file: its own audit trail, else its category's, else the fallback.
+
+    Also returns how many files have a resource id that no audit event mentions.
+    """
     file_identities: dict[str, list[Identity]] = {}
+    resolved_by_category: dict[str, dict[str, Identity]] = defaultdict(dict)
     unresolved_count = 0
-
     for path in changed_files:
         resource_id = _resource_id_from_path(path)
-        identities = list(identities_by_resource.get(resource_id, {}).values())
-        if identities:
-            file_identities[path] = sorted(identities, key=lambda item: item.key)
-            for identity in file_identities[path]:
-                resolved_by_category[_category_key(path)][identity.key] = identity
-        else:
-            file_identities[path] = []
-            if resource_id:
-                unresolved_count += 1
+        identities = sorted(by_resource.get(resource_id, {}).values(), key=lambda item: item.key)
+        file_identities[path] = identities
+        for identity in identities:
+            resolved_by_category[_category_key(path)][identity.key] = identity
+        if not identities and resource_id:
+            unresolved_count += 1
 
     for path in changed_files:
-        if file_identities[path]:
-            continue
-        category_identities = list(resolved_by_category.get(_category_key(path), {}).values())
-        if category_identities:
-            file_identities[path] = sorted(category_identities, key=lambda item: item.key)
-        else:
-            file_identities[path] = [fallback]
+        if not file_identities[path]:
+            category = resolved_by_category.get(_category_key(path), {})
+            file_identities[path] = sorted(category.values(), key=lambda item: item.key) or [fallback]
+    return file_identities, unresolved_count
 
+
+def _build_author_groups(
+    changed_files: list[str],
+    audits: list[dict],
+    fallback: Identity,
+) -> tuple[dict[str, dict[str, list[str] | list[Identity]]], int]:
+    """Group changed files by the set of identities that changed them; also the unresolved-file count."""
+    file_identities, unresolved_count = _attribute_files(changed_files, _identities_by_resource(audits), fallback)
     grouped: dict[str, dict[str, list[str] | list[Identity]]] = {}
     for path in changed_files:
-        identities = file_identities[path] or [fallback]
+        identities = file_identities[path]
         group_key = "&".join(identity.key for identity in identities)
         entry = grouped.setdefault(group_key, {"files": [], "identities": identities})
-        files = entry["files"]
-        assert isinstance(files, list)
-        files.append(path)
-
+        entry["files"].append(path)  # type: ignore[union-attr]
     return grouped, unresolved_count
 
 
