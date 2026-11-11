@@ -329,6 +329,26 @@ def _flatten_json(obj: Any, prefix: str = "") -> dict[str, Any]:
     return flat
 
 
+def _flat_key_changes(old_flat: dict[str, Any], new_flat: dict[str, Any]) -> list[str]:
+    """Differences between two flattened payloads, ordered: state changes, value changes, added/removed keys."""
+    state_changes: list[str] = []
+    value_changes: list[str] = []
+    structure_changes: list[str] = []
+    for key in sorted(set(old_flat) | set(new_flat)):
+        old_val, new_val = old_flat.get(key), new_flat.get(key)
+        if old_val == new_val:
+            continue
+        if key not in old_flat:
+            structure_changes.append(f"{key} added")
+        elif key not in new_flat:
+            structure_changes.append(f"{key} removed")
+        else:
+            change_text = f"{key}: {_format_scalar(old_val)} -> {_format_scalar(new_val)}"
+            is_state = key.lower().endswith(".state") or key.lower() == "state"
+            (state_changes if is_state else value_changes).append(change_text)
+    return state_changes + value_changes + structure_changes
+
+
 def _extract_semantic_change(old_excerpt: str, new_excerpt: str, path: str = "") -> str:
     """
     Derive a semantic description of configuration changes by flattening JSON
@@ -346,26 +366,9 @@ def _extract_semantic_change(old_excerpt: str, new_excerpt: str, path: str = "")
     try:
         old_json = json.loads(old_excerpt) if old_excerpt else {}
         new_json = json.loads(new_excerpt) if new_excerpt else {}
-        old_flat = _flatten_json(old_json)
-        new_flat = _flatten_json(new_json)
-
-        state_changes: list[str] = []
-        value_changes: list[str] = []
-        structure_changes: list[str] = []
-        for key in sorted(set(old_flat) | set(new_flat)):
-            old_val, new_val = old_flat.get(key), new_flat.get(key)
-            if old_val == new_val:
-                continue
-            if key not in old_flat:
-                structure_changes.append(f"{key} added")
-            elif key not in new_flat:
-                structure_changes.append(f"{key} removed")
-            else:
-                change_text = f"{key}: {_format_scalar(old_val)} -> {_format_scalar(new_val)}"
-                is_state = key.lower().endswith(".state") or key.lower() == "state"
-                (state_changes if is_state else value_changes).append(change_text)
-
-        ordered = _describe_assignment_changes(old_json, new_json) + state_changes + value_changes + structure_changes
+        ordered = _describe_assignment_changes(old_json, new_json) + _flat_key_changes(
+            _flatten_json(old_json), _flatten_json(new_json)
+        )
         return "; ".join(ordered[:8]) if ordered else "No semantic key changes detected"
     except Exception:
         return "Configuration content modified" if old_excerpt != new_excerpt else ""
