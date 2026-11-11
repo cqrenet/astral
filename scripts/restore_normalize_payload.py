@@ -15,205 +15,196 @@ import pathlib
 import re
 import urllib.parse
 import urllib.request
+from collections.abc import Callable
+from typing import Any
+
 import common
 
 log = common.log
 
-root = pathlib.Path(os.environ["RESTORE_PATH_ENV"]).resolve()
-if not root.exists():
-    log.info(f"Restore source folder not found; payload normalization skipped: {root}")
-    raise SystemExit(0)
-
-graph_token = os.environ.get("GRAPH_TOKEN", "").strip()
-guid_re = re.compile(
+GUID_RE = re.compile(
     r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-5][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$"
 )
-group_id_cache = {}
+# Keys that survive on an assignment target; everything else is a display-only label.
+ALLOWED_TARGET_KEYS = {
+    "@odata.type",
+    "groupId",
+    "collectionId",
+    "deviceAndAppManagementAssignmentFilterId",
+    "deviceAndAppManagementAssignmentFilterType",
+}
+DROP_MARKER = "__drop_assignment_target__"
 
-def is_guid(value):
-    return bool(guid_re.match(str(value or "").strip()))
+GroupResolver = Callable[[Any], "str | None"]
 
-def resolve_group_id(group_name):
-    name = str(group_name or "").strip()
-    if not name or not graph_token:
-        return None
 
-    cache_key = name.lower()
-    if cache_key in group_id_cache:
-        return group_id_cache[cache_key]
+def is_guid(value: Any) -> bool:
+    return bool(GUID_RE.match(str(value or "").strip()))
 
-    filter_value = name.replace("'", "''")
-    query = urllib.parse.urlencode(
-        {
-            "$select": "id,displayName",
-            "$filter": f"displayName eq '{filter_value}'",
-        }
-    )
-    url = f"https://graph.microsoft.com/v1.0/groups?{query}"
-    request = urllib.request.Request(
-        url,
-        headers={
-            "Authorization": f"Bearer {graph_token}",
-            "Accept": "application/json",
-        },
-        method="GET",
-    )
-    try:
-        with urllib.request.urlopen(request, timeout=30) as response:
-            payload = json.loads(response.read().decode("utf-8"))
-    except Exception:
-        group_id_cache[cache_key] = None
-        return None
 
-    values = payload.get("value", []) if isinstance(payload, dict) else []
-    exact = [
-        item for item in values
-        if str(item.get("displayName", "")) == name and is_guid(item.get("id"))
-    ]
-    if len(exact) == 1:
-        resolved = exact[0]["id"]
-        group_id_cache[cache_key] = resolved
-        return resolved
+def make_group_resolver(graph_token: str) -> GroupResolver:
+    """Resolve a group display name to its object id via Graph (cached; None when ambiguous or unknown)."""
+    cache: dict[str, str | None] = {}
 
-    ids = [item.get("id") for item in values if is_guid(item.get("id"))]
-    resolved = ids[0] if len(ids) == 1 else None
-    group_id_cache[cache_key] = resolved
-    return resolved
+    def resolve(group_name: Any) -> str | None:
+        name = str(group_name or "").strip()
+        if not name or not graph_token:
+            return None
+        key = name.lower()
+        if key in cache:
+            return cache[key]
+        odata_name = name.replace("'", "''")
+        query = urllib.parse.urlencode({"$select": "id,displayName", "$filter": f"displayName eq '{odata_name}'"})
+        request = urllib.request.Request(
+            f"https://graph.microsoft.com/v1.0/groups?{query}",
+            headers={"Authorization": f"Bearer {graph_token}", "Accept": "application/json"},
+            method="GET",
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=30) as response:
+                payload = json.loads(response.read().decode("utf-8"))
+        except Exception:
+            cache[key] = None
+            return None
 
-def strip_assignment_display_labels(node):
-    removed = 0
-    allowed_assignment_target_keys = {
-        "@odata.type",
-        "groupId",
-        "collectionId",
-        "deviceAndAppManagementAssignmentFilterId",
-        "deviceAndAppManagementAssignmentFilterType",
-    }
+        values = payload.get("value", []) if isinstance(payload, dict) else []
+        exact = [item for item in values if str(item.get("displayName", "")) == name and is_guid(item.get("id"))]
+        if len(exact) == 1:
+            cache[key] = exact[0]["id"]
+        else:
+            ids = [item.get("id") for item in values if is_guid(item.get("id"))]
+            cache[key] = ids[0] if len(ids) == 1 else None
+        return cache[key]
+
+    return resolve
+
+
+def _walk(node: Any, visit: Callable[[dict[str, Any]], int]) -> int:
+    """Apply *visit* to every dict in the tree (parents before children); returns the summed counts."""
+    total = 0
     if isinstance(node, dict):
-        odata_type = str(node.get("@odata.type", "") or "").lower()
-        is_assignment_target = "assignmenttarget" in odata_type
+        total += visit(node)
+        for value in node.values():
+            total += _walk(value, visit)
+    elif isinstance(node, list):
+        for item in node:
+            total += _walk(item, visit)
+    return total
 
-        if is_assignment_target:
-            group_name = (
-                node.get("groupName")
-                or node.get("groupDisplayName")
-                or node.get("displayName")
-            )
-            group_id = str(node.get("groupId", "") or "").strip()
-            is_group_target = "groupassignmenttarget" in odata_type
-            if is_group_target and not is_guid(group_id):
-                resolved_group_id = resolve_group_id(group_name)
-                if resolved_group_id:
-                    node["groupId"] = resolved_group_id
-                    group_id = resolved_group_id
 
-            for key in list(node.keys()):
-                if key.startswith("@odata."):
-                    continue
-                if key not in allowed_assignment_target_keys:
-                    if key in node:
-                        node.pop(key, None)
-                        removed += 1
+def _clean_assignment_target(node: dict[str, Any], odata_type: str, resolve_group: GroupResolver) -> int:
+    """Strip display labels from an assignment target, resolving a missing group id by name."""
+    removed = 0
+    is_group_target = "groupassignmenttarget" in odata_type
+    if is_group_target and not is_guid(node.get("groupId")):
+        group_name = node.get("groupName") or node.get("groupDisplayName") or node.get("displayName")
+        resolved = resolve_group(group_name)
+        if resolved:
+            node["groupId"] = resolved
+    for key in list(node.keys()):
+        if not key.startswith("@odata.") and key not in ALLOWED_TARGET_KEYS:
+            node.pop(key)
+            removed += 1
+    if is_group_target and not is_guid(node.get("groupId")):
+        node[DROP_MARKER] = True  # pruned from the assignments list later
+    return removed
 
-            # Keep only valid group assignment targets for update payload.
-            if is_group_target and not is_guid(node.get("groupId")):
-                node["__drop_assignment_target__"] = True
-        elif "groupId" in node:
+
+def strip_assignment_display_labels(node: Any, resolve_group: GroupResolver = lambda name: None) -> int:
+    """Remove display-only assignment labels everywhere; returns how many keys were removed."""
+
+    def visit(item: dict[str, Any]) -> int:
+        removed = 0
+        odata_type = str(item.get("@odata.type", "") or "").lower()
+        if "assignmenttarget" in odata_type:
+            removed += _clean_assignment_target(item, odata_type, resolve_group)
+        elif "groupId" in item:
             for key in ("groupDisplayName", "groupName", "displayName", "groupType"):
-                if key in node:
-                    node.pop(key, None)
+                if key in item:
+                    item.pop(key)
                     removed += 1
-
-        if "targetDisplayName" in node and isinstance(node.get("target"), dict):
-            node.pop("targetDisplayName", None)
+        if "targetDisplayName" in item and isinstance(item.get("target"), dict):
+            item.pop("targetDisplayName")
             removed += 1
+        return removed
 
-        for value in node.values():
-            removed += strip_assignment_display_labels(value)
-    elif isinstance(node, list):
-        for item in node:
-            removed += strip_assignment_display_labels(item)
-    return removed
+    return _walk(node, visit)
 
-def prune_invalid_assignment_targets(node):
-    removed = 0
-    if isinstance(node, dict):
-        assignments = node.get("assignments")
-        if isinstance(assignments, list):
-            filtered = []
-            for assignment in assignments:
-                target = assignment.get("target") if isinstance(assignment, dict) else None
-                if isinstance(target, dict) and target.get("__drop_assignment_target__") is True:
-                    removed += 1
-                    continue
-                filtered.append(assignment)
-            if len(filtered) != len(assignments):
-                node["assignments"] = filtered
-        for value in node.values():
-            removed += prune_invalid_assignment_targets(value)
-    elif isinstance(node, list):
-        for item in node:
-            removed += prune_invalid_assignment_targets(item)
-    return removed
 
-def remove_internal_markers(node):
-    removed = 0
-    if isinstance(node, dict):
-        if "__drop_assignment_target__" in node:
-            node.pop("__drop_assignment_target__", None)
-            removed += 1
-        for value in node.values():
-            removed += remove_internal_markers(value)
-    elif isinstance(node, list):
-        for item in node:
-            removed += remove_internal_markers(item)
-    return removed
+def prune_invalid_assignment_targets(node: Any) -> int:
+    """Drop assignments whose target was marked for dropping; returns how many were removed."""
 
-normalized_payload_json = 0
-sanitized_assignment_labels = 0
-invalid_assignment_targets_removed = 0
-files_changed = 0
+    def visit(item: dict[str, Any]) -> int:
+        assignments = item.get("assignments")
+        if not isinstance(assignments, list):
+            return 0
+        kept = [
+            a
+            for a in assignments
+            if not (isinstance(a, dict) and isinstance(a.get("target"), dict) and a["target"].get(DROP_MARKER) is True)
+        ]
+        if len(kept) != len(assignments):
+            item["assignments"] = kept
+        return len(assignments) - len(kept)
 
-for path in sorted(root.rglob("*.json")):
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except Exception:
-        continue
+    return _walk(node, visit)
 
-    file_changed = False
 
-    # IntuneCD expects payloadJson as base64 string; backup may store dict/list.
-    # Some exports can be list-root JSON, so only access payloadJson on dict roots.
-    if isinstance(data, dict):
-        payload = data.get("payloadJson")
-        if isinstance(payload, (dict, list)):
-            payload_json = json.dumps(payload, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
-            data["payloadJson"] = base64.b64encode(payload_json).decode("ascii")
-            normalized_payload_json += 1
-            file_changed = True
+def _pop_marker(item: dict[str, Any]) -> int:
+    if DROP_MARKER in item:
+        item.pop(DROP_MARKER)
+        return 1
+    return 0
 
-    removed = strip_assignment_display_labels(data)
-    if removed > 0:
-        sanitized_assignment_labels += removed
-        file_changed = True
 
-    dropped = prune_invalid_assignment_targets(data)
-    if dropped > 0:
-        invalid_assignment_targets_removed += dropped
-        file_changed = True
+def remove_internal_markers(node: Any) -> int:
+    return _walk(node, _pop_marker)
 
-    # Clean up internal markers used by prune flow.
-    if remove_internal_markers(data) > 0:
-        file_changed = True
 
-    if file_changed:
-        path.write_text(json.dumps(data, indent=4, ensure_ascii=False) + "\n", encoding="utf-8")
-        files_changed += 1
+def encode_payload_json(data: Any) -> bool:
+    """IntuneCD expects payloadJson as a base64 string; backups may store a dict or list."""
+    if not isinstance(data, dict) or not isinstance(data.get("payloadJson"), (dict, list)):
+        return False
+    raw = json.dumps(data["payloadJson"], separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+    data["payloadJson"] = base64.b64encode(raw).decode("ascii")
+    return True
 
-log.info(
-    "Restore payload normalization complete: "
-    f"filesChanged={files_changed}, "
-    f"appConfigPayloadJsonNormalized={normalized_payload_json}, "
-    f"assignmentDisplayLabelsRemoved={sanitized_assignment_labels}, "
-    f"invalidAssignmentTargetsRemoved={invalid_assignment_targets_removed}"
-)
+
+def main() -> int:
+    root = pathlib.Path(os.environ["RESTORE_PATH_ENV"]).resolve()
+    if not root.exists():
+        log.info(f"Restore source folder not found; payload normalization skipped: {root}")
+        return 0
+
+    resolve_group = make_group_resolver(os.environ.get("GRAPH_TOKEN", "").strip())
+    normalized_payload_json = labels_removed = targets_removed = files_changed = 0
+    for path in sorted(root.rglob("*.json")):
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+
+        encoded = encode_payload_json(data)
+        labels = strip_assignment_display_labels(data, resolve_group)
+        dropped = prune_invalid_assignment_targets(data)
+        markers = remove_internal_markers(data)
+
+        normalized_payload_json += encoded
+        labels_removed += labels
+        targets_removed += dropped
+        if encoded or labels or dropped or markers:
+            path.write_text(json.dumps(data, indent=4, ensure_ascii=False) + "\n", encoding="utf-8")
+            files_changed += 1
+
+    log.info(
+        "Restore payload normalization complete: "
+        f"filesChanged={files_changed}, "
+        f"appConfigPayloadJsonNormalized={normalized_payload_json}, "
+        f"assignmentDisplayLabelsRemoved={labels_removed}, "
+        f"invalidAssignmentTargetsRemoved={targets_removed}"
+    )
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
