@@ -23,14 +23,15 @@ A few points to highlight up front:
 - AI-assisted review summaries are optional and can be enabled or disabled independently of the backup and restore functions
 - when AI is enabled, the intended model is a customer-controlled Azure OpenAI deployment rather than an unrelated public AI service
 - the AI summary feature is advisory and is intended to help non-technical reviewers such as PMs or management understand technical Intune and Entra changes in plain language
+- an optional MCP server (Azure Container Apps) exposes tenant state and drift history to AI assistants such as Claude or Copilot; it is the one inbound endpoint in the platform and requires authentication — this is covered in the security package
 
-The source repository is private because it contains operational implementation details and tenant-specific configuration material. If your review requires deeper technical evidence, we can provide a controlled walkthrough of the implementation, configuration, and pipeline behavior.
+The source repository is publicly available at https://github.com/cqrenet/astral. If your review requires deeper technical evidence, we can provide a walkthrough of the implementation, configuration, and pipeline behavior.
 
 If useful, I can also provide:
 
 - a live architecture walkthrough
 - a permission-by-permission review of the Microsoft Graph access model
-- a demonstration of deployment modes and AI-assisted review summaries
+- a demonstration of deployment modes, AI-assisted review summaries, and MCP server queries
 
 Please let me know if your team would like any additional material in a different format.
 
