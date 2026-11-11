@@ -347,6 +347,20 @@ def retry_after_seconds(error: urllib.error.HTTPError) -> float | None:
         return None
 
 
+_RETRY_HTTP_CODES = {429, 500, 502, 503, 504}
+
+
+def _raise_http_error(method: str, url: str, exc: urllib.error.HTTPError) -> None:
+    """Raise a RuntimeError carrying the response body (first 2 KiB) when there is one, else re-raise."""
+    try:
+        detail = exc.read().decode("utf-8", errors="replace")[:2048]
+    except Exception:
+        detail = ""
+    if detail:
+        raise RuntimeError(f"{method} {url} failed: HTTP Error {exc.code}: {exc.reason} — {detail}") from exc
+    raise exc
+
+
 def request_json(
     url: str,
     method: str = "GET",
@@ -360,7 +374,8 @@ def request_json(
 
     If *token* is provided, an Authorization header is added automatically.
     If *max_retries* is greater than zero, transient HTTP errors (429, 500,
-    502, 503, 504) are retried with exponential back-off.
+    502, 503, 504) and network errors are retried with exponential back-off
+    (or the server's Retry-After).
 
     On GitHub and Gitea, Azure DevOps REST calls (URLs containing /_apis/) are
     translated by forge_compat, so the PR/review scripts run unchanged on all platforms.
@@ -373,58 +388,32 @@ def request_json(
 
         return forge_compat.request_json(url, method=method, body=body, headers=headers, token=token)
 
-    req_headers: dict[str, str] = {
-        "Accept": "application/json",
-    }
+    req_headers: dict[str, str] = {"Accept": "application/json"}
     if token is not None:
         req_headers["Authorization"] = f"Bearer {token}"
     if headers is not None:
         req_headers.update(headers)
-
     payload: bytes | None = None
     if body is not None:
         payload = json.dumps(body).encode("utf-8")
         req_headers.setdefault("Content-Type", "application/json")
 
-    retry_codes = {429, 500, 502, 503, 504}
-    last_error: Exception | None = None
-
     for attempt in range(max_retries + 1):
-        req = urllib.request.Request(
-            url,
-            data=payload,
-            method=method,
-            headers=req_headers,
-        )
+        is_last_attempt = attempt == max_retries
+        request = urllib.request.Request(url, data=payload, method=method, headers=req_headers)
         try:
-            with urllib.request.urlopen(req, timeout=timeout) as resp:
+            with urllib.request.urlopen(request, timeout=timeout) as resp:
                 return json.loads(resp.read().decode("utf-8"))
         except urllib.error.HTTPError as exc:
-            last_error = exc
-            if exc.code not in retry_codes or attempt == max_retries:
-                body = ""
-                try:
-                    body = exc.read().decode("utf-8", errors="replace")[:2048]
-                except Exception:
-                    pass
-                if body:
-                    raise RuntimeError(
-                        f"{method} {url} failed: HTTP Error {exc.code}: {exc.reason} — {body}"
-                    ) from exc
+            if exc.code not in _RETRY_HTTP_CODES or is_last_attempt:
+                _raise_http_error(method, url, exc)
+            delay = retry_after_seconds(exc)
+            time.sleep(delay if delay is not None else 2**attempt)
+        except urllib.error.URLError:
+            if is_last_attempt:
                 raise
-            retry_after = retry_after_seconds(exc)
-            sleep = retry_after if retry_after is not None else (2 ** attempt)
-            time.sleep(sleep)
-        except urllib.error.URLError as exc:
-            last_error = exc
-            if attempt == max_retries:
-                raise
-            time.sleep(2 ** attempt)
-
-    # Should never be reached; satisfy type checker.
-    if last_error is not None:
-        raise last_error
-    raise RuntimeError("request_json exhausted all retries")
+            time.sleep(2**attempt)
+    raise RuntimeError("request_json exhausted all retries")  # only reachable with max_retries < 0
 
 
 def git_proc(

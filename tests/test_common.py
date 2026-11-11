@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import contextlib
 import importlib.util
 import io
+import json
 import os
+import urllib.error
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -82,6 +85,84 @@ class HelperTests(unittest.TestCase):
         self.assertNotIn("excludeCsv", params)  # sentinel "none" means no exclusions
         self.assertTrue(params["dryRun"])  # fail safe default
         self.assertNotIn("restorePathsCsv", common.RestoreRequest(1, "main").template_parameters())
+
+
+class _Resp:
+    def __init__(self, payload) -> None:
+        self._body = json.dumps(payload).encode()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    def read(self) -> bytes:
+        return self._body
+
+
+def _http_error(code: int, body: str = "", retry_after: str | None = None) -> urllib.error.HTTPError:
+    headers = {"Retry-After": retry_after} if retry_after else {}
+    return urllib.error.HTTPError("https://x", code, "reason", headers, io.BytesIO(body.encode()))
+
+
+class RequestJsonTests(unittest.TestCase):
+    @contextlib.contextmanager
+    def _server(self, responses):
+        """Patch urlopen and sleep; yields (requests seen, sleeps made)."""
+        calls, sleeps = [], []
+
+        def fake_urlopen(request, timeout):
+            calls.append(request)
+            outcome = responses[len(calls) - 1]
+            if isinstance(outcome, Exception):
+                raise outcome
+            return _Resp(outcome)
+
+        with patch.dict(os.environ, {"ASTRAL_SCM": "ado"}), \
+                patch.object(common.urllib.request, "urlopen", fake_urlopen), \
+                patch.object(common.time, "sleep", sleeps.append):
+            yield calls, sleeps
+
+    def test_sends_auth_json_body_and_returns_parsed_response(self) -> None:
+        with self._server([{"ok": True}]) as (calls, _):
+            result = common.request_json("https://x/api", method="POST", body={"a": 1}, token="tok", headers={"X-Y": "z"})
+        self.assertEqual(result, {"ok": True})
+        request = calls[0]
+        self.assertEqual(request.get_header("Authorization"), "Bearer tok")
+        self.assertEqual(request.get_header("Content-type"), "application/json")
+        self.assertEqual(request.get_header("X-y"), "z")
+        self.assertEqual(json.loads(request.data), {"a": 1})
+
+    def test_retries_transient_errors_with_backoff_and_retry_after(self) -> None:
+        responses = [_http_error(503), _http_error(429, retry_after="7"), urllib.error.URLError("dns"), {"ok": 1}]
+        with self._server(responses) as (calls, sleeps):
+            result = common.request_json("https://x/api", max_retries=3)
+        self.assertEqual(result, {"ok": 1})
+        self.assertEqual(len(calls), 4)
+        self.assertEqual(sleeps, [1, 7.0, 4])  # 2**0, Retry-After, 2**2
+
+    def test_non_retryable_error_includes_response_body(self) -> None:
+        with self._server([_http_error(400, body="bad field")]) as (_, sleeps):
+            with self.assertRaises(RuntimeError) as ctx:
+                common.request_json("https://x/api", max_retries=3)
+        self.assertIn("HTTP Error 400", str(ctx.exception))
+        self.assertIn("bad field", str(ctx.exception))
+        self.assertEqual(sleeps, [])
+
+    def test_exhausted_retries_raise_the_last_error(self) -> None:
+        with self._server([_http_error(503, body="down"), _http_error(503, body="still down")]):
+            with self.assertRaises(RuntimeError) as ctx:
+                common.request_json("https://x/api", max_retries=1)
+        self.assertIn("still down", str(ctx.exception))
+        with self._server([urllib.error.URLError("offline")] * 2):
+            with self.assertRaises(urllib.error.URLError):
+                common.request_json("https://x/api", max_retries=1)
+
+    def test_error_without_body_is_reraised_as_http_error(self) -> None:
+        with self._server([_http_error(404)]):
+            with self.assertRaises(urllib.error.HTTPError):
+                common.request_json("https://x/api")
 
 
 if __name__ == "__main__":
