@@ -262,6 +262,20 @@ class UpdatePrReviewSummaryTests(unittest.TestCase):
         self.assertIn("#### Recommended Reviewer Checks", compact)
         self.assertIn("#### Rollback Considerations", compact)
 
+    def test_extract_ai_text_handles_content_shapes_and_refusals(self) -> None:
+        extract = self.pr_ai._extract_ai_text_from_payload
+
+        def reply(content, finish="stop", **message):
+            return {"choices": [{"finish_reason": finish, "message": {"content": content, **message}}]}
+
+        self.assertEqual(extract(reply("  hi ")), ("hi", ""))
+        self.assertEqual(extract(reply(["a", {"text": " b "}, {"value": "c"}, {"text": ""}, 5])), ("a\nb\nc", ""))
+        self.assertEqual(extract(reply("", refusal="no")), ("", "model refusal: no"))
+        self.assertEqual(extract(reply("", finish="")), ("", "empty message content"))
+        self.assertEqual(extract(reply("")), ("", "finish_reason=stop"))
+        self.assertEqual(extract(reply("partial", finish="length")), ("", "finish_reason=length (partial content suppressed)"))
+        self.assertEqual(extract({"choices": []}), ("", "no choices"))
+
     def test_extract_ai_text_from_payload_rejects_truncated_response(self) -> None:
         text, error = self.pr_ai._extract_ai_text_from_payload(
             {

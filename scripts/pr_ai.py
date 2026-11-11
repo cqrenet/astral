@@ -87,7 +87,29 @@ def _normalize_aoai_endpoint(endpoint: str) -> str:
     return cleaned
 
 
+def _message_text(content: Any) -> str:
+    """Text of a chat message: a string, or a list of strings / {text|content|value} parts."""
+    if isinstance(content, str):
+        return content.strip()
+    if not isinstance(content, list):
+        return ""
+    parts: list[str] = []
+    for item in content:
+        if isinstance(item, str):
+            candidates = [item]
+        elif isinstance(item, dict):
+            candidates = [item.get(key) for key in ("text", "content", "value")]
+        else:
+            continue
+        # The first non-empty string field of a part wins.
+        text = next((c.strip() for c in candidates if isinstance(c, str) and c.strip()), "")
+        if text:
+            parts.append(text)
+    return "\n".join(parts).strip()
+
+
 def _extract_ai_text_from_payload(payload: dict[str, Any]) -> tuple[str, str]:
+    """(text, error) from a chat-completions response; text is empty when unusable."""
     choices = payload.get("choices", [])
     if not choices:
         return ("", "no choices")
@@ -95,44 +117,17 @@ def _extract_ai_text_from_payload(payload: dict[str, Any]) -> tuple[str, str]:
     first = choices[0] if isinstance(choices[0], dict) else {}
     finish_reason = str(first.get("finish_reason") or "").strip()
     message = first.get("message", {}) if isinstance(first.get("message"), dict) else {}
-    content = message.get("content", "")
-    text = ""
+    text = _message_text(message.get("content", ""))
 
-    if isinstance(content, str):
-        text = content.strip()
-    elif isinstance(content, list):
-        parts: list[str] = []
-        for item in content:
-            if isinstance(item, str):
-                if item.strip():
-                    parts.append(item.strip())
-                continue
-            if not isinstance(item, dict):
-                continue
-            for key in ("text", "content", "value"):
-                value = item.get(key)
-                if isinstance(value, str) and value.strip():
-                    parts.append(value.strip())
-                    break
-        text = "\n".join(parts).strip()
-
-    normalized_finish_reason = finish_reason.lower()
-    if normalized_finish_reason and normalized_finish_reason != "stop":
+    if finish_reason and finish_reason.lower() != "stop":
         detail = f"finish_reason={finish_reason}"
-        if text:
-            detail += " (partial content suppressed)"
-        return ("", detail)
-
+        return ("", detail + (" (partial content suppressed)" if text else ""))
     if text:
         return (text, "")
-
     refusal = message.get("refusal")
     if isinstance(refusal, str) and refusal.strip():
         return ("", f"model refusal: {refusal.strip()}")
-
-    if finish_reason:
-        return ("", f"finish_reason={finish_reason}")
-    return ("", "empty message content")
+    return ("", f"finish_reason={finish_reason}" if finish_reason else "empty message content")
 
 
 def _build_fallback_narrative(
