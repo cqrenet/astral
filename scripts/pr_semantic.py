@@ -39,35 +39,36 @@ ENTRA_ENRICHMENT_KEY_NAMES = {
 
 
 def _assignment_entries(payload: Any) -> list[dict[str, str]]:
-    if not isinstance(payload, dict):
-        return []
-    assignments = payload.get("assignments")
-    if not isinstance(assignments, list):
+    """Flat, string-only view of the assignments in a policy payload."""
+    if not isinstance(payload, dict) or not isinstance(payload.get("assignments"), list):
         return []
 
+    def text(source: dict[str, Any], key: str) -> str:
+        return str(source.get(key, "") or "")
+
     entries: list[dict[str, str]] = []
-    for assignment in assignments:
+    for assignment in payload["assignments"]:
         if not isinstance(assignment, dict):
             continue
         target = assignment.get("target", {})
         if not isinstance(target, dict):
             target = {}
         group_name = (
-            str(target.get("groupDisplayName", "") or "")
-            or str(target.get("groupName", "") or "")
-            or str(target.get("displayName", "") or "")
-            or str(assignment.get("targetDisplayName", "") or "")
+            text(target, "groupDisplayName")
+            or text(target, "groupName")
+            or text(target, "displayName")
+            or text(assignment, "targetDisplayName")
         )
         entries.append(
             {
-                "source": str(assignment.get("source", "") or ""),
-                "intent": str(assignment.get("intent", "") or ""),
-                "target_type": str(target.get("@odata.type", "") or ""),
-                "group_id": str(target.get("groupId", "") or ""),
+                "source": text(assignment, "source"),
+                "intent": text(assignment, "intent"),
+                "target_type": text(target, "@odata.type"),
+                "group_id": text(target, "groupId"),
                 "group_name": group_name,
-                "collection_id": str(target.get("collectionId", "") or ""),
-                "filter_type": str(target.get("deviceAndAppManagementAssignmentFilterType", "") or ""),
-                "filter_id": str(target.get("deviceAndAppManagementAssignmentFilterId", "") or ""),
+                "collection_id": text(target, "collectionId"),
+                "filter_type": text(target, "deviceAndAppManagementAssignmentFilterType"),
+                "filter_id": text(target, "deviceAndAppManagementAssignmentFilterId"),
             }
         )
     return entries
