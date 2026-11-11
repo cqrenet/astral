@@ -55,3 +55,17 @@ def _request_json(url: str, token: str, method: str = "GET", body: dict[str, Any
     if isinstance(result, dict):
         return result
     return {"value": result} if result is not None else {}
+
+
+def _load_policy_excerpt(repo_root: str, branch: str, path: str, max_chars: int = 0) -> str:
+    """Contents of *path* on origin/<branch> (stripped, optionally truncated); '' when unavailable."""
+    try:
+        content = common.git_show_text(repo_root, f"origin/{common.normalize_branch(branch)}", path)
+    except Exception:
+        return ""
+    if content is None:
+        return ""
+    content = content.strip()
+    if max_chars and len(content) > max_chars:
+        return content[:max_chars] + "...(truncated)"
+    return content

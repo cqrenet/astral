@@ -12,35 +12,24 @@ from __future__ import annotations
 
 import argparse
 import os
-import subprocess
 import sys
 from typing import Any
 from urllib.parse import urlencode
 
 import common  # same directory as this script
-from pr_ai import (
-    _AzureOpenAIClient,
-    _build_fallback_narrative,
-    _chat_messages,
-    _fallback_reason,
-    _minimal_reviewer_instruction,
-    _reviewer_instruction,
+from pr_base import (
+    _debug,
+    _delay_reviewer_notifications_enabled,
+    _env,
+    _env_bool,
+    _load_policy_excerpt,
+    _request_json,
+    _run_git,
 )
-from pr_base import _debug, _delay_reviewer_notifications_enabled, _env, _env_bool, _request_json, _run_git
-from pr_change_source import _build_change_source_assessment, _classify_change_source
-from pr_changes import (
-    ChangeItem,
-    _build_change_facts,
-    _build_deterministic_summary,
-    _change_scope,
-    _changes_fingerprint,
-    _classify_posture,
-    _detect_hotspots,
-    _fit_payload_budget,
-    _parse_changes,
-)
-from pr_description import _compact_deterministic_summary, _publish_description, _summary_is_current
-from pr_semantic import _extract_semantic_change, _is_entra_enrichment_only_json_change, _policy_fingerprint
+from pr_changes import ChangeItem, _build_deterministic_summary, _changes_fingerprint, _parse_changes
+from pr_description import _publish_description, _summary_is_current
+from pr_review import _call_azure_openai
+from pr_semantic import _extract_semantic_change, _is_entra_enrichment_only_json_change
 from pr_threads import _enforce_change_ticket_threads, _sync_summary_threads
 
 
@@ -87,205 +76,6 @@ def _filter_operational_noise_changes(
             continue
         filtered.append(item)
     return (filtered, skipped)
-
-
-def _load_policy_excerpt(repo_root: str, branch: str, path: str, max_chars: int = 0) -> str:
-    """
-    Load a small excerpt of a file from a given git branch for AI context.
-    """
-    try:
-        normalized_branch = common.normalize_branch(branch)
-        result = subprocess.run(
-            ["git", "show", f"origin/{normalized_branch}:{path}"],
-            cwd=repo_root,
-            capture_output=True,
-            text=True,
-            check=False,
-        )
-        if result.returncode != 0:
-            return ""
-        content = result.stdout.strip()
-        if max_chars and len(content) > max_chars:
-            return content[:max_chars] + "...(truncated)"
-        return content
-    except Exception:
-        return ""
-
-
-def _compact_change_records(
-    changes: list[ChangeItem], repo_root: str, baseline_branch: str, drift_branch: str
-) -> list[dict[str, Any]]:
-    """Highest-risk changes (max 80) as the per-change records sent to the model."""
-    candidates = [
-        item for item in changes if not common.is_doc_like(item.path) and not common.is_report_like(item.path)
-    ]
-    shortlist = sorted(
-        candidates,
-        key=lambda item: (
-            -item.risk_score,
-            0 if item.operation == "Deleted" else 1,
-            0 if "conditional access" in item.path.lower() else 1,
-            item.path.lower(),
-        ),
-    )[:80]
-    records: list[dict[str, Any]] = []
-    for item in shortlist:
-        baseline_path = item.old_path if item.operation == "Renamed" and item.old_path else item.path
-        old_excerpt = _load_policy_excerpt(repo_root, baseline_branch, baseline_path)
-        new_excerpt = _load_policy_excerpt(repo_root, drift_branch, item.path)
-        semantic_change = _extract_semantic_change(old_excerpt, new_excerpt, item.path)
-        old_fingerprint = _policy_fingerprint(old_excerpt)
-        new_fingerprint = _policy_fingerprint(new_excerpt)
-        source = _classify_change_source(item, semantic_change)
-        records.append(
-            {
-                "operation": item.operation,
-                "path": item.path,
-                "old_path": item.old_path or "",
-                "policy_type": item.policy_type,
-                "severity": item.severity,
-                "risk": item.risk_label,
-                "reason": item.reason,
-                "semantic_change": semantic_change,
-                "old_fingerprint": old_fingerprint,
-                "new_fingerprint": new_fingerprint,
-                "fingerprint_changed": old_fingerprint != new_fingerprint,
-                "change_source": source["label"],
-                "change_source_reasons": source["reasons"],
-                "change_source_scores": {
-                    "admin": source["admin_score"],
-                    "infrastructure": source["infrastructure_score"],
-                },
-            }
-        )
-    return records
-
-
-def _call_azure_openai(
-    changes: list[ChangeItem],
-    deterministic_summary: str,
-    workload: str,
-    repo_root: str,
-    baseline_branch: str,
-    drift_branch: str,
-) -> tuple[str | None, str | None]:
-    """Reviewer narrative via Azure OpenAI -> (text, error).
-
-    Escalation: full payload; on timeout a compact payload; then (unless the failure
-    was an auth error) a minimal payload; finally a deterministic fallback narrative.
-    """
-    if _env("ENABLE_PR_AI_SUMMARY", required=False, default="true").lower() != "true":
-        return (None, None)
-
-    endpoint = _env("AZURE_OPENAI_ENDPOINT", required=False)
-    deployment = _env("AZURE_OPENAI_DEPLOYMENT", required=False)
-    api_key = _env("AZURE_OPENAI_API_KEY", required=False)
-    if not endpoint or not deployment or not api_key:
-        return (None, "Azure OpenAI is not configured (endpoint/deployment/api-key missing)")
-
-    max_ai_tokens = max(256, common.env_int("PR_AI_MAX_TOKENS", 1200))
-    ai_timeout = max(10, common.env_int("PR_AI_REQUEST_TIMEOUT_SECONDS", 60))
-    compact_timeout = max(ai_timeout, common.env_int("PR_AI_COMPACT_TIMEOUT_SECONDS", max(90, ai_timeout)))
-    minimal_timeout = max(compact_timeout, common.env_int("PR_AI_MINIMAL_TIMEOUT_SECONDS", max(120, compact_timeout)))
-    client = _AzureOpenAIClient(
-        endpoint=endpoint,
-        deployment=deployment,
-        api_key=api_key,
-        api_version=_env("AZURE_OPENAI_API_VERSION", required=False, default="2024-12-01-preview"),
-        max_attempts=max(1, common.env_int("PR_AI_REQUEST_MAX_ATTEMPTS", 3)),
-    )
-
-    if not any(not common.is_doc_like(c.path) and not common.is_report_like(c.path) for c in changes):
-        return (None, "AI summary skipped: only report/documentation changes detected")
-
-    compact_changes = _compact_change_records(changes, repo_root, baseline_branch, drift_branch)
-    change_scope = _change_scope(changes)
-    security_sensitive = any(item.risk_score >= 3 for item in changes)
-    top_changed_areas = _detect_hotspots(changes)
-    posture_change = _classify_posture(changes)
-    change_source_assessment = _build_change_source_assessment(compact_changes)
-
-    user_payload: dict[str, Any] = {
-        "workload": workload,
-        "change_scope": change_scope,
-        "security_sensitive": security_sensitive,
-        "baseline_alignment": "proposed_change_to_authoritative_config",
-        "baseline_profile": os.environ.get("SECURITY_BASELINE_PROFILE", "authoritative-main"),
-        "posture_change": posture_change,
-        "top_changed_areas": top_changed_areas,
-        "change_facts": _build_change_facts(changes),
-        "change_source_assessment": change_source_assessment,
-        "deterministic_summary": deterministic_summary,
-        "instruction": _reviewer_instruction(),
-    }
-    sampled_changes, payload_truncated = _fit_payload_budget(
-        payload=user_payload,
-        sampled_changes=compact_changes,
-        max_bytes=max(16000, common.env_int("PR_AI_PAYLOAD_MAX_BYTES", 120000)),
-    )
-    user_payload["sampled_changes"] = sampled_changes
-    user_payload["sampled_changes_total"] = len(compact_changes)
-    user_payload["sampled_changes_used"] = len(sampled_changes)
-    user_payload["sampled_changes_truncated"] = payload_truncated
-
-    content, last_error = client.complete(_chat_messages("", user_payload), max_ai_tokens, ai_timeout)
-    if content:
-        return (content, None)
-
-    # If the full payload times out, retry once with a compact payload.
-    timed_out = "timed out" in last_error.lower() or "timeout" in last_error.lower()
-    if timed_out and len(sampled_changes) > 12:
-        compact_limit = max(8, common.env_int("PR_AI_COMPACT_CHANGE_LIMIT", 12))
-        compact_payload = dict(user_payload)
-        compact_payload["sampled_changes"] = sampled_changes[:compact_limit]
-        compact_payload["sampled_changes_used"] = len(compact_payload["sampled_changes"])
-        compact_payload["sampled_changes_truncated"] = True
-        compact_tokens = max(256, min(max_ai_tokens, common.env_int("PR_AI_COMPACT_MAX_TOKENS", 600)))
-        content, error = client.complete(_chat_messages("", compact_payload), compact_tokens, compact_timeout)
-        if content:
-            return (content, None)
-        last_error = f"{last_error} | compact-retry: {error}".strip(" |")
-
-    # Last resort: minimal prompt, unless the failure looks like bad credentials.
-    if not any(marker in last_error.lower() for marker in ("401", "403", "unauthorized", "forbidden")):
-        minimal_limit = max(3, common.env_int("PR_AI_MINIMAL_CHANGE_LIMIT", 5))
-        minimal_payload = {
-            "workload": workload,
-            "change_scope": change_scope,
-            "security_sensitive": security_sensitive,
-            "posture_change": posture_change,
-            "top_changed_areas": top_changed_areas,
-            "change_source_assessment": change_source_assessment,
-            "deterministic_summary": _compact_deterministic_summary(deterministic_summary),
-            "changes": [
-                {
-                    key: item.get(key)
-                    for key in ("operation", "path", "risk", "semantic_change", "change_source", "change_source_reasons")
-                }
-                for item in sampled_changes[:minimal_limit]
-            ],
-            "instruction": _minimal_reviewer_instruction(),
-        }
-        minimal_tokens = max(256, min(max_ai_tokens, common.env_int("PR_AI_MINIMAL_MAX_TOKENS", 400)))
-        messages = _chat_messages(" Prioritize clarity, practical risk framing, and reviewer actionability.", minimal_payload)
-        content, error = client.complete(messages, minimal_tokens, minimal_timeout)
-        if content:
-            return (content, None)
-        if error:
-            last_error = f"{last_error} | minimal-retry: {error}".strip(" |")
-
-    print(f"WARNING: Azure OpenAI summary fallback triggered: {last_error}")
-    return (
-        _build_fallback_narrative(
-            workload=workload,
-            changes=changes,
-            compact_changes=compact_changes,
-            top_changed_areas=top_changed_areas,
-            change_source_assessment=change_source_assessment,
-            fallback_reason=_fallback_reason(last_error),
-        ),
-        None,
-    )
 
 
 def _publish_draft_pr(

@@ -15,7 +15,7 @@ from unittest.mock import patch
 MODULE_PATH = Path(__file__).resolve().parents[1] / "scripts" / "update_pr_review_summary.py"
 sys.path.insert(0, str(MODULE_PATH.parent))  # the script imports its pr_* sibling modules
 
-PR_MODULES = ("pr_base", "pr_changes", "pr_semantic", "pr_change_source", "pr_ai", "pr_description", "pr_threads")
+PR_MODULES = ("pr_base", "pr_changes", "pr_semantic", "pr_change_source", "pr_ai", "pr_description", "pr_threads", "pr_review")
 
 
 def _bind_pr_modules(cls) -> None:
@@ -433,9 +433,9 @@ class UpdatePrReviewSummaryTests(unittest.TestCase):
             )
 
         with patch.dict(os.environ, env, clear=False), patch.object(
-            self.module, "_load_policy_excerpt", return_value="{}"
+            self.pr_review, "_load_policy_excerpt", return_value="{}"
         ), patch.object(self.pr_ai, "urlopen", side_effect=_fake_urlopen):
-            content, error = self.module._call_azure_openai(
+            content, error = self.pr_review._call_azure_openai(
                 changes=[change],
                 deterministic_summary="deterministic",
                 workload="intune",
@@ -515,9 +515,9 @@ class UpdatePrReviewSummaryTests(unittest.TestCase):
             return _FakeResponse(next(responses))
 
         with patch.dict(os.environ, env, clear=False), patch.object(
-            self.module, "_load_policy_excerpt", return_value="{}"
+            self.pr_review, "_load_policy_excerpt", return_value="{}"
         ), patch.object(self.pr_ai, "urlopen", side_effect=_fake_urlopen):
-            content, error = self.module._call_azure_openai(
+            content, error = self.pr_review._call_azure_openai(
                 changes=[change],
                 deterministic_summary="deterministic",
                 workload="intune",
@@ -856,7 +856,7 @@ class UpdatePrReviewSummaryTests(unittest.TestCase):
         }
 
         with patch.dict(os.environ, env, clear=False), patch.object(
-            self.module, "_load_policy_excerpt", return_value="{}"
+            self.pr_review, "_load_policy_excerpt", return_value="{}"
         ), patch.object(
             self.pr_ai,
             "urlopen",
@@ -875,7 +875,7 @@ class UpdatePrReviewSummaryTests(unittest.TestCase):
                 ),
             ],
         ), patch("time.sleep", return_value=None):
-            content, error = self.module._call_azure_openai(
+            content, error = self.pr_review._call_azure_openai(
                 changes=[change],
                 deterministic_summary="deterministic",
                 workload="intune",
@@ -908,7 +908,7 @@ class UpdatePrReviewSummaryTests(unittest.TestCase):
         }
 
         with patch.dict(os.environ, env, clear=False), patch.object(
-            self.module, "_load_policy_excerpt", return_value="{}"
+            self.pr_review, "_load_policy_excerpt", return_value="{}"
         ), patch.object(
             self.pr_ai,
             "urlopen",
@@ -923,7 +923,7 @@ class UpdatePrReviewSummaryTests(unittest.TestCase):
                 TimeoutError("The read operation timed out"),
             ],
         ), patch("time.sleep", return_value=None):
-            content, error = self.module._call_azure_openai(
+            content, error = self.pr_review._call_azure_openai(
                 changes=[change],
                 deterministic_summary="deterministic",
                 workload="intune",
@@ -990,11 +990,11 @@ class UpdatePrReviewSummaryTests(unittest.TestCase):
         ]
 
         with patch.dict(os.environ, env, clear=False), patch.object(
-            self.module, "_load_policy_excerpt", return_value="{}"
+            self.pr_review, "_load_policy_excerpt", return_value="{}"
         ), patch.object(
             self.pr_ai, "urlopen", side_effect=side_effects
         ), patch("time.sleep", return_value=None):
-            content, error = self.module._call_azure_openai(
+            content, error = self.pr_review._call_azure_openai(
                 changes=[change],
                 deterministic_summary="deterministic",
                 workload="intune",
@@ -1063,11 +1063,11 @@ class UpdatePrReviewSummaryTests(unittest.TestCase):
             )
 
         with patch.dict(os.environ, env, clear=False), patch.object(
-            self.module, "_load_policy_excerpt", return_value="{}"
+            self.pr_review, "_load_policy_excerpt", return_value="{}"
         ), patch.object(
             self.pr_ai, "urlopen", side_effect=_fake_urlopen
         ), patch("time.sleep", return_value=None):
-            content, error = self.module._call_azure_openai(
+            content, error = self.pr_review._call_azure_openai(
                 changes=[change],
                 deterministic_summary="deterministic",
                 workload="intune",
@@ -1136,11 +1136,11 @@ class UpdatePrReviewSummaryTests(unittest.TestCase):
         ]
 
         with patch.dict(os.environ, env, clear=False), patch.object(
-            self.module, "_load_policy_excerpt", return_value="{}"
+            self.pr_review, "_load_policy_excerpt", return_value="{}"
         ), patch.object(
             self.pr_ai, "urlopen", side_effect=side_effects
         ), patch("time.sleep", return_value=None):
-            content, error = self.module._call_azure_openai(
+            content, error = self.pr_review._call_azure_openai(
                 changes=changes,
                 deterministic_summary="deterministic",
                 workload="intune",
@@ -1251,6 +1251,32 @@ class EnforceTicketThreadsTests(unittest.TestCase):
         self.assertIn((11, common.THREAD_STATUS_CLOSED), calls["status"])  # stale thread closed
         self.assertIn((10, common.THREAD_STATUS_ACTIVE), calls["status"])  # resolved thread re-opened
         self.assertEqual(calls["comments"].count(10), 2)  # reopen note + latest detected change
+
+
+class LoadPolicyExcerptTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.module = load_module()
+        _bind_pr_modules(cls)
+
+    def test_reads_file_from_origin_branch_and_truncates(self) -> None:
+        import subprocess
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as td:
+            def git(*args):
+                subprocess.run(["git", "-c", "user.email=t@t", "-c", "user.name=t", *args], cwd=td, check=True, capture_output=True)
+
+            git("init", "-q", "-b", "main")
+            Path(td, "a.json").write_text('  {"k": "0123456789"}\n')
+            git("add", ".")
+            git("commit", "-q", "-m", "x")
+            git("update-ref", "refs/remotes/origin/main", "HEAD")
+            load = self.pr_base._load_policy_excerpt
+            self.assertEqual(load(td, "refs/heads/main", "a.json"), '{"k": "0123456789"}')
+            self.assertEqual(load(td, "main", "a.json", max_chars=5), '{"k":...(truncated)')
+            self.assertEqual(load(td, "main", "missing.json"), "")
+            self.assertEqual(load("/nonexistent-dir", "main", "a.json"), "")
 
 
 if __name__ == "__main__":
