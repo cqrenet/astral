@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import os
 import importlib.util
 import sys
 import unittest
@@ -121,6 +122,20 @@ class QueuePostMergeRestoreTests(unittest.TestCase):
         with patch.object(self.module.common, "queue_restore_pipeline", side_effect=RuntimeError("HTTP 500")):
             with self.assertRaises(RuntimeError):
                 self.module._queue_restore("https://c", "p", {}, request)
+
+    def test_restore_request_reads_settings_and_defaults_to_dry_run(self) -> None:
+        with patch.dict(os.environ, {"AUTO_REMEDIATE_EXCLUDE_CSV": "Scripts", "AUTO_REMEDIATE_REMOVE_OBJECTS": "true"}, clear=False):
+            os.environ.pop("AUTO_REMEDIATE_DRY_RUN", None)
+            request = self.module._restore_request(42, "main", 7, "selective", "a.json")
+        self.assertTrue(request.dry_run)  # fail safe
+        self.assertTrue(request.remove_unmanaged)
+        self.assertEqual((request.max_workers, request.exclude_csv, request.restore_mode), (7, "Scripts", "selective"))
+
+    def test_ado_headers(self) -> None:
+        self.assertEqual(
+            self.module.common.ado_headers("tok"),
+            {"Authorization": "Bearer tok", "Content-Type": "application/json", "Accept": "application/json"},
+        )
 
     def test_queue_restore_pipeline_includes_selective_params(self) -> None:
         captured: dict[str, object] = {}

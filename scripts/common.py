@@ -558,6 +558,11 @@ def build_web_url(queued: dict[str, Any], collection_uri: str, project: str) -> 
     return url
 
 
+def ado_headers(token: str) -> dict[str, str]:
+    """Request headers for Azure DevOps REST calls made with a bearer token."""
+    return {"Authorization": f"Bearer {token}", "Content-Type": "application/json", "Accept": "application/json"}
+
+
 def post_pr_thread(repo_api: str, headers: dict[str, str], pr_id: int, content: str) -> None:
     """Open a new active PR thread with one comment."""
     request_json(

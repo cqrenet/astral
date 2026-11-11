@@ -189,6 +189,24 @@ def _find_candidate(
     return None
 
 
+def _restore_request(
+    definition_id: int | str, baseline_branch: str, max_workers: int, restore_mode: str, restore_paths_csv: str
+) -> common.RestoreRequest:
+    """The restore run's parameters, from the AUTO_REMEDIATE_* settings (dry run unless explicitly disabled)."""
+    return common.RestoreRequest(
+        definition_id=definition_id,
+        baseline_branch=baseline_branch,
+        include_entra_update=_env_bool("AUTO_REMEDIATE_INCLUDE_ENTRA_UPDATE", False),
+        dry_run=_env_bool("AUTO_REMEDIATE_DRY_RUN", True),  # fail safe: unset = dry run
+        update_assignments=_env_bool("AUTO_REMEDIATE_UPDATE_ASSIGNMENTS", True),
+        remove_unmanaged=_env_bool("AUTO_REMEDIATE_REMOVE_OBJECTS", False),
+        max_workers=max_workers,
+        exclude_csv=_env_text("AUTO_REMEDIATE_EXCLUDE_CSV", ""),
+        restore_mode=restore_mode,
+        restore_paths_csv=restore_paths_csv,
+    )
+
+
 def _queue_restore(
     collection_uri: str, project: str, headers: dict[str, str], request: common.RestoreRequest
 ) -> dict[str, Any] | None:
@@ -267,17 +285,13 @@ def main() -> int:
         log.info("Post-merge auto-remediation queue skipped: AUTO_REMEDIATE_RESTORE_PIPELINE_ID is empty.")
         return 0
     definition_id = common.parse_pipeline_id(definition_raw, "AUTO_REMEDIATE_RESTORE_PIPELINE_ID")
-    max_workers = _int_env("AUTO_REMEDIATE_MAX_WORKERS", "10")
+    max_workers = _int_env("AUTO_REMEDIATE_MAX_WORKERS", "10")  # validate up front, before any API call
     lookback_hours = _int_env("AUTO_REMEDIATE_AFTER_MERGE_LOOKBACK_HOURS", "168")
 
     collection_uri = os.environ["SYSTEM_COLLECTIONURI"].rstrip("/")
     project = os.environ["SYSTEM_TEAMPROJECT"]
     repo_api = f"{collection_uri}/{project}/_apis/git/repositories/{os.environ['BUILD_REPOSITORY_ID']}"
-    headers = {
-        "Authorization": f"Bearer {token}",
-        "Content-Type": "application/json",
-        "Accept": "application/json",
-    }
+    headers = common.ado_headers(token)
 
     completed = _query_completed_prs(
         repo_api,
@@ -296,18 +310,7 @@ def main() -> int:
 
     restore_mode, restore_paths_csv = _restore_scope(args.workload, _rejected_ticket_paths(candidate_threads, allowed))
 
-    request = common.RestoreRequest(
-        definition_id=definition_id,
-        baseline_branch=args.baseline_branch,
-        include_entra_update=_env_bool("AUTO_REMEDIATE_INCLUDE_ENTRA_UPDATE", False),
-        dry_run=_env_bool("AUTO_REMEDIATE_DRY_RUN", True),  # fail safe: unset = dry run
-        update_assignments=_env_bool("AUTO_REMEDIATE_UPDATE_ASSIGNMENTS", True),
-        remove_unmanaged=_env_bool("AUTO_REMEDIATE_REMOVE_OBJECTS", False),
-        max_workers=max_workers,
-        exclude_csv=_env_text("AUTO_REMEDIATE_EXCLUDE_CSV", ""),
-        restore_mode=restore_mode,
-        restore_paths_csv=restore_paths_csv,
-    )
+    request = _restore_request(definition_id, args.baseline_branch, max_workers, restore_mode, restore_paths_csv)
     queued = _queue_restore(collection_uri, project, headers, request)
     if queued is None:
         return 0

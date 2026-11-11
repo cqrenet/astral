@@ -427,11 +427,7 @@ def main() -> int:
         collection_uri=os.environ["SYSTEM_COLLECTIONURI"].rstrip("/"),
         project=os.environ["SYSTEM_TEAMPROJECT"],
         repo_id=os.environ["BUILD_REPOSITORY_ID"],
-        headers={
-            "Authorization": f"Bearer {token}",
-            "Content-Type": "application/json",
-            "Accept": "application/json",
-        },
+        headers=common.ado_headers(token),
     )
 
     pr_merge_strategy = common.normalize_merge_strategy(_env_text("ROLLING_PR_MERGE_STRATEGY", "rebase"))
