@@ -191,6 +191,17 @@ def _classify_change_source(item: ChangeItem, semantic_change: str = "") -> dict
     }
 
 
+def _dominant_source(counts: Counter[str], admin_total: int, infrastructure_total: int) -> str:
+    """Overall attribution: needs a score lead of 3 and at least as many per-change votes as the other side."""
+    admin_votes = counts.get("likely_admin_driven", 0)
+    infrastructure_votes = counts.get("likely_infrastructure_driven", 0)
+    if admin_total >= infrastructure_total + 3 and admin_votes >= infrastructure_votes:
+        return "primarily_admin_driven"
+    if infrastructure_total >= admin_total + 3 and infrastructure_votes >= admin_votes:
+        return "primarily_infrastructure_driven"
+    return "mixed_or_uncertain"
+
+
 def _build_change_source_assessment(compact_changes: list[dict[str, Any]]) -> dict[str, Any]:
     counts: Counter[str] = Counter()
     signal_counter: Counter[str] = Counter()
@@ -198,8 +209,7 @@ def _build_change_source_assessment(compact_changes: list[dict[str, Any]]) -> di
     infrastructure_total = 0
 
     for item in compact_changes:
-        label = str(item.get("change_source") or "mixed_or_uncertain")
-        counts[label] += 1
+        counts[str(item.get("change_source") or "mixed_or_uncertain")] += 1
         scores = item.get("change_source_scores", {})
         if isinstance(scores, dict):
             admin_total += int(scores.get("admin", 0) or 0)
@@ -210,15 +220,9 @@ def _build_change_source_assessment(compact_changes: list[dict[str, Any]]) -> di
                 if isinstance(reason, str) and reason.strip():
                     signal_counter[reason.strip()] += 1
 
-    if not compact_changes:
-        dominant_source = "mixed_or_uncertain"
-    elif admin_total >= infrastructure_total + 3 and counts.get("likely_admin_driven", 0) >= counts.get("likely_infrastructure_driven", 0):
-        dominant_source = "primarily_admin_driven"
-    elif infrastructure_total >= admin_total + 3 and counts.get("likely_infrastructure_driven", 0) >= counts.get("likely_admin_driven", 0):
-        dominant_source = "primarily_infrastructure_driven"
-    else:
-        dominant_source = "mixed_or_uncertain"
-
+    dominant_source = (
+        _dominant_source(counts, admin_total, infrastructure_total) if compact_changes else "mixed_or_uncertain"
+    )
     score_gap = abs(admin_total - infrastructure_total)
     if dominant_source == "mixed_or_uncertain":
         confidence = "medium" if score_gap >= 3 else "low"
@@ -229,14 +233,10 @@ def _build_change_source_assessment(compact_changes: list[dict[str, Any]]) -> di
         "dominant_source": dominant_source,
         "confidence": confidence,
         "counts": {
-            "likely_admin_driven": counts.get("likely_admin_driven", 0),
-            "likely_infrastructure_driven": counts.get("likely_infrastructure_driven", 0),
-            "mixed_or_uncertain": counts.get("mixed_or_uncertain", 0),
+            label: counts.get(label, 0)
+            for label in ("likely_admin_driven", "likely_infrastructure_driven", "mixed_or_uncertain")
         },
-        "score_totals": {
-            "admin": admin_total,
-            "infrastructure": infrastructure_total,
-        },
+        "score_totals": {"admin": admin_total, "infrastructure": infrastructure_total},
         "top_signals": [reason for reason, _ in signal_counter.most_common(5)],
     }
 
