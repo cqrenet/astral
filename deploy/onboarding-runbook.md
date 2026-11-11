@@ -17,7 +17,7 @@ This guide walks through deploying ASTRAL into a new Azure DevOps organization a
 ## Step 2: Create the tenant variable group
 
 1. In Azure DevOps, go to **Pipelines > Library** and create a new Variable Group.
-2. Recommended name: `vg-astral-tenant` (you can choose any name).
+2. Recommended name: `vg-astral` (you can choose any name).
 3. Add the variables from `templates/variables-tenant.yml`. Use your real tenant values:
 
    | Variable | Example value | Notes |
@@ -30,6 +30,7 @@ This guide walks through deploying ASTRAL into a new Azure DevOps organization a
    | `BACKUP_TIMEZONE` | `Europe/Prague` | Valid tz database name |
    | `FULL_RUN_HOUR` | `00` | Hour that triggers full export |
    | `AUTO_REMEDIATE_RESTORE_PIPELINE_ID` | *(leave empty)* | Filled in Step 8 |
+   | `PR_DECISION_ALLOWED_REVIEWERS` | `alice@contoso.com,bob@contoso.com` | Reviewers whose `/reject`, `/accept` and Reject votes are honored. Empty = decisions ignored. Restrict who can edit this variable group. |
 
 4. If you plan to use Azure OpenAI summaries, also add:
    - `ENABLE_PR_AI_SUMMARY` = `true`
@@ -43,7 +44,7 @@ Open each pipeline YAML and uncomment the variable group line near the top:
 
 ```yaml
 variables:
-  - group: vg-astral-tenant   # <-- uncomment this line
+  - group: vg-astral   # <-- uncomment this line
   - template: templates/variables-common.yml
 ```
 
@@ -51,59 +52,119 @@ Do this for:
 - `azure-pipelines.yml`
 - `azure-pipelines-review-sync.yml`
 - `azure-pipelines-restore.yml`
+- `deploy/validate-deployment.yml`
+- `deploy/update-from-upstream.yml`
 
 Commit and push the changes.
 
-## Step 4: Run the tenant bootstrap script
+## Steps 4 & 5: Bootstrap and service connection
 
-Run `deploy/bootstrap-tenant.ps1` in a PowerShell session authenticated to your target tenant.
+There are two paths. **Path A (automatic)** is simpler — ADO creates the app registration for you. **Path B (manual)** gives you full control and works if you don't have Azure subscription Owner role.
+
+---
+
+### Path A: Automatic service connection (recommended)
+
+**Step 4A — Create the service connection**
+
+1. In Azure DevOps, go to **Project settings → Service connections**.
+2. Click **New service connection → Azure Resource Manager → Next**.
+3. Select **App registration (automatic)** with **Workload identity federation**. Click **Next**.
+4. Select **Scope level: Subscription** and choose any subscription in your tenant (ASTRAL uses Microsoft Graph, not ARM resources — the subscription is required by the form only).
+5. Enter the **Service connection name** matching `SERVICE_CONNECTION_NAME` (e.g. `sc-astral-backup`).
+6. **Do not tick "Grant access permission to all pipelines"** — leave it unchecked. You will authorize only the three ASTRAL pipelines individually in Step 7.
+7. Click **Save**. ADO creates the app registration and federated credential automatically.
+8. On the service connection overview page, click **Manage App registration** — this opens the Entra app registration. Copy the **Application (client) ID** from there.
+
+**Step 5A — Assign Graph permissions**
+
+Run `deploy/bootstrap-tenant.ps1` with `-ExistingAppId` pointing to the ADO-created app:
 
 ```powershell
-# Example
-.\deploy\bootstrap-tenant.ps1 -TenantName "contoso.onmicrosoft.com" -ServiceConnectionName "sc-astral-backup"
+.\deploy\bootstrap-tenant.ps1 `
+  -TenantName "contoso.onmicrosoft.com" `
+  -ExistingAppId "<app-id-from-service-connection>"
 ```
 
-The script will:
-1. Create a single-tenant app registration.
-2. Add required Microsoft Graph application permissions.
-3. Grant admin consent.
-4. Create a workload federated credential for Azure DevOps.
-5. Print the App ID and instructions for creating the Azure DevOps service connection.
+The script assigns all required Microsoft Graph application permissions and grants admin consent. No app registration or federated credential is created — those already exist.
 
-## Step 5: Create the Azure DevOps service connection
+---
 
-1. In Azure DevOps, go to **Project settings > Service connections**.
-2. Click **New service connection > Azure Resource Manager > Workload identity federation (manual)**.
-3. Fill in:
-   - **Subscription**: leave blank or select if you also want ARM access (not required).
-   - **Tenant ID**: your Microsoft 365 tenant ID.
-   - **Service Connection Name**: the same value you set in `SERVICE_CONNECTION_NAME` (e.g. `sc-astral-backup`).
-   - **App ID**: from the bootstrap script output.
-4. Save the service connection.
+### Path B: Manual service connection
+
+**Step 4B — Create the service connection draft**
+
+1. In Azure DevOps, go to **Project settings → Service connections**.
+2. Click **New service connection → Azure Resource Manager → Next**.
+3. Select **App registration or Managed identity (manual)** with **Workload identity federation**. Click **Next**.
+4. Enter the **Service connection name** matching `SERVICE_CONNECTION_NAME` (e.g. `sc-astral-backup`). Click **Next**.
+5. In Step 2 (App registration details):
+   - **Environment**: Azure Cloud
+   - **Scope level**: Subscription — enter any valid subscription in your tenant
+   - Leave **Application (client) ID** and **Directory (tenant) ID** blank for now
+   - **Do not tick "Grant access permission to all pipelines"** — leave it unchecked. You will authorize only the three ASTRAL pipelines individually in Step 7.
+6. **Copy the generated Issuer and Subject identifier** values shown by ADO.
+7. Click **Keep as draft**.
+
+**Step 5B — Bootstrap and add the federated credential**
+
+Run `deploy/bootstrap-tenant.ps1` to create the app registration, assign permissions, and grant admin consent:
+
+```powershell
+.\deploy\bootstrap-tenant.ps1 `
+  -TenantName "contoso.onmicrosoft.com" `
+  -ServiceConnectionName "sc-astral-backup"
+```
+
+Note the **App ID** and **Tenant ID** from the output.
+
+Then add the federated credential to the new app:
+
+1. In the [Azure portal](https://portal.azure.com), open **Entra ID → App registrations** and find the app created by the script.
+2. Go to **Certificates & secrets → Federated credentials → Add credential**.
+3. Select scenario **Other issuer**.
+4. Paste the **Issuer** and **Subject identifier** copied from ADO in Step 4B.
+5. Set **Type** to **Explicit subject identifier**, give it a name (e.g. `astral-ado-federation`), and click **Add**.
+
+**Complete the service connection**
+
+1. Return to the ADO draft service connection.
+2. Fill in **Application (client) ID** and **Directory (tenant) ID** from the bootstrap output.
+3. Click **Finish setup → Verify and save**.
+
+---
 
 ## Step 6: Import the pipelines
 
-1. Go to **Pipelines > Create pipeline > Azure Repos Git**.
-2. Select your repository.
-3. Choose **Existing Azure Pipelines YAML file**.
-4. Import each of the three YAMLs one by one:
-   - `azure-pipelines.yml` (main backup)
-   - `azure-pipelines-review-sync.yml` (review sync)
-   - `azure-pipelines-restore.yml` (restore)
+For each pipeline: **Pipelines → New pipeline → Azure Repos Git → select your repository → Existing Azure Pipelines YAML file → select the file → Save** (do not run yet). After saving, immediately rename the pipeline via **⋮ → Rename/move** — ADO defaults to the filename which is not descriptive.
+
+| YAML file | Suggested pipeline name |
+| --- | --- |
+| `azure-pipelines.yml` | `ASTRAL — Backup` |
+| `azure-pipelines-review-sync.yml` | `ASTRAL — Review Sync` |
+| `azure-pipelines-restore.yml` | `ASTRAL — Restore` |
 
 ## Step 7: Grant repository permissions to the build identity
 
 1. Go to **Project settings > Repositories**.
 2. Select your repository.
-3. Under **Security**, grant the **Build Service** account:
+3. Under **Security**, find **ASTRAL-[project] Build Service** and grant:
    - Contribute
    - Create branch
-   - Force push
-   - Create pull request
-   - Edit pull request
-   - Tag creation (if you enable tagging)
+   - Force push (rewrite history, delete branches and tags)
+   - Contribute to pull requests
+   - Create tag (only if you enable snapshot tagging)
 
-4. Under **Pipelines**, grant the build service **Queue builds** permission on `azure-pipelines-restore.yml` if you plan to use auto-remediation.
+4. On the same **Security** page, scroll down to the **Pipeline permissions** section.
+   Click **+** and add all three pipelines:
+   - `ASTRAL — Main Backup`
+   - `ASTRAL — Review Sync`
+   - `ASTRAL — Restore`
+
+   This is required because you did not tick "Grant access to all pipelines" when creating the service connection.
+
+5. If you plan to use auto-remediation, also grant the build service **Queue builds** permission on the `ASTRAL — Restore` pipeline:
+   Go to **Pipelines → ASTRAL — Restore → ⋮ → Manage security**, find the Build Service account and set **Queue builds** to Allow.
 
 ## Step 8: Set the restore pipeline definition ID
 
@@ -111,42 +172,82 @@ After importing `azure-pipelines-restore.yml`, find its definition ID:
 
 1. Open the restore pipeline in Azure DevOps.
 2. The URL contains `definitionId=XX`. Note the number.
-3. Go back to your variable group (`vg-astral-tenant`) and set:
+3. Go back to your variable group (`vg-astral`) and set:
    - `AUTO_REMEDIATE_RESTORE_PIPELINE_ID` = `XX`
 
 ## Step 9: Validate the deployment
 
-1. Import `deploy/validate-deployment.yml` as a one-time pipeline.
+1. Import `deploy/validate-deployment.yml` as a one-time pipeline. Rename it to `ASTRAL — Validate`.
 2. Run it.
-3. Verify that all checks pass:
+3. The run will appear to hang in the pipeline list. Open the run by clicking on it, then look for the yellow banner **"This pipeline needs permission to access N resources before this run can continue"**. Click **View**, then **Permit** for each resource (typically the service connection and the variable group). The run will then proceed automatically.
+4. Verify that all checks pass:
    - Graph token acquisition
    - Required roles present
    - Test read from Graph
    - Test PR creation and abandonment
 
-## Step 10: Run the first backup
+> This permission prompt appears once per pipeline per resource. The three main pipelines will show the same prompt on their first run — approve them the same way.
+
+## Step 10: Configure branch policies on main
+
+Without branch policies, rolling PRs can be merged without any review, which defeats the purpose of the platform. This step protects `main` so that drift can only land after a human approves it.
+
+1. Go to **Project settings → Repositories → ASTRAL → Policies**.
+2. Under **Branch policies**, click **main**.
+3. Enable and configure the following:
+
+   **Require a minimum number of reviewers**
+   - Minimum reviewers: `1` (or more depending on your team)
+   - Check **Allow requestors to approve their own changes**: leave off — the pipeline creates the PR, reviewers should be humans
+   - Check **Reset all approval votes when there are new changes**: on — ensures a re-review if drift is updated
+
+   **Limit merge types**
+   - Enable **Rebase and fast-forward** only (or whichever strategy matches `ROLLING_PR_MERGE_STRATEGY` in your variable group — default is `rebase`)
+   - Disabling squash and basic merge keeps the Git history clean and preserves individual drift commits
+
+4. Optionally, add **Required reviewers** to automatically add specific people or groups to every drift PR.
+
+> The build service identity creates the rolling PRs. It is not a human reviewer — do not add it to any required reviewer group.
+
+## Step 10b: Configure branch policies on drift branches (optional)
+
+The drift branches (`drift/intune`, `drift/entra`) are written to directly by the pipeline. They should **not** have reviewer policies — the pipeline needs to force-push to them. No action needed here; this is just a reminder not to accidentally apply `main` policies to the drift branches.
+
+## Step 11: Run the first backup
 
 1. Queue a manual run of `azure-pipelines.yml`.
 2. Set `forceFullRun=true` to get a complete initial snapshot.
 3. Verify that `tenant-state/` is populated and a rolling PR is created.
 
-## Step 11: Provision the event-driven change probe (optional but recommended)
+## Step 12: Provision the event-driven change probe (optional but recommended)
 
 The change probe replaces the previous hourly polling model with responsive, event-driven backup triggers.
 
 ### Option A: Automated provisioning
 
-Run the unified provisioning script:
+Run the unified provisioning script. It provisions the change probe (Azure Function App) and optionally the MCP server (Azure Container Apps) in the same run:
 
 ```powershell
-.\deploy\provision-change-probe.ps1 `
-  -TenantName "contoso.onmicrosoft.com" `
-  -ResourceGroupName "rg-astral-probe" `
+# Deploy change probe + MCP server (recommended)
+.\deploy\provision.ps1 `
+  -ResourceGroup "rg-astral-probe" `
   -Location "westeurope" `
-  -DeployFunctionApp
+  -DeployMcpServer
+
+# Deploy change probe only (skip MCP server)
+.\deploy\provision.ps1 `
+  -ResourceGroup "rg-astral-probe" `
+  -Location "westeurope" `
+  -SkipMcpServer
+
+# Deploy MCP server only (change probe already exists)
+.\deploy\provision.ps1 `
+  -ResourceGroup "rg-astral-probe" `
+  -Location "westeurope" `
+  -DeployMcpOnly
 ```
 
-The script will create an Entra app, grant admin consent, provision Azure resources, and deploy the Function App.
+If you run the script without `-DeployMcpServer` or `-SkipMcpServer` it will prompt interactively. The script creates an Entra app, grants admin consent, provisions Azure resources, and deploys the selected components.
 
 ### Option B: Manual provisioning
 

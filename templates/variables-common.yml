@@ -32,12 +32,13 @@ variables:
     value: false
   - name: AZURE_OPENAI_API_VERSION
     value: "2024-12-01-preview"
+  # Opt-in: auto-remediation writes to the production tenant.
   - name: AUTO_REMEDIATE_AFTER_MERGE
-    value: true
+    value: false
   - name: AUTO_REMEDIATE_AFTER_MERGE_LOOKBACK_HOURS
     value: 168
   - name: AUTO_REMEDIATE_DRY_RUN
-    value: false
+    value: true
   - name: AUTO_REMEDIATE_UPDATE_ASSIGNMENTS
     value: true
   - name: AUTO_REMEDIATE_REMOVE_OBJECTS

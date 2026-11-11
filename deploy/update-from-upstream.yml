@@ -21,15 +21,17 @@ pr: none
 
 parameters:
   - name: upstreamRef
-    displayName: "Upstream ref to pull (leave blank for latest main, or enter a tag e.g. v1.2.0)"
+    displayName: "Upstream ref to pull (latest = pull latest main, or enter a tag e.g. v1.2.0)"
     type: string
-    default: ""
+    default: "latest"
   - name: dryRun
     displayName: "Dry run (show incoming changes without merging)"
     type: boolean
     default: false
 
 variables:
+  # Uncomment after creating your tenant variable group (see onboarding runbook Step 3).
+  # - group: vg-astral
   - template: ../templates/variables-common.yml
 
 jobs:
@@ -66,12 +68,12 @@ jobs:
             echo "Fetching from $UPSTREAM_URL ..."
             git fetch upstream --tags
 
-            if [ -n "$UPSTREAM_REF" ]; then
-              FETCH_REF="$UPSTREAM_REF"
-              echo "Pinned ref: $FETCH_REF"
-            else
+            if [ "$UPSTREAM_REF" = "latest" ] || [ -z "$UPSTREAM_REF" ]; then
               FETCH_REF="upstream/main"
               echo "Using latest upstream main."
+            else
+              FETCH_REF="$UPSTREAM_REF"
+              echo "Pinned ref: $FETCH_REF"
             fi
 
             # Resolve to a commit SHA for display
@@ -132,33 +134,52 @@ jobs:
             FETCH_REF="$(FETCH_REF)"
             UPSTREAM_SHA="$(UPSTREAM_SHA)"
             UPSTREAM_REF_LABEL="${{ parameters.upstreamRef }}"
-            if [ -z "$UPSTREAM_REF_LABEL" ]; then
+            if [ "$UPSTREAM_REF_LABEL" = "latest" ] || [ -z "$UPSTREAM_REF_LABEL" ]; then
               UPSTREAM_REF_LABEL="main @ ${UPSTREAM_SHA:0:7}"
             fi
 
-            git checkout main
+            git checkout -B main origin/main
 
-            # Attempt merge
-            if git merge --no-ff "$FETCH_REF" -m "Update from upstream ASTRAL ${UPSTREAM_REF_LABEL}
-
-Upstream: https://github.com/cqrenet/astral
-Ref: $UPSTREAM_REF_LABEL ($UPSTREAM_SHA)"; then
+            # Attempt merge — commit message stored in variable to avoid YAML parsing issues
+            COMMIT_MSG=$(printf 'Update from upstream ASTRAL %s\n\nSource: https://github.com/cqrenet/astral\nRef: %s (%s)' \
+              "$UPSTREAM_REF_LABEL" "$UPSTREAM_REF_LABEL" "$UPSTREAM_SHA")
+            if git merge --no-ff "$FETCH_REF" -m "$COMMIT_MSG"; then
               echo "Merge succeeded."
             else
-              echo ""
-              echo "##[error]Merge conflicts detected. The pipeline has stopped without pushing."
-              echo ""
-              echo "Conflicting files:"
-              git diff --name-only --diff-filter=U
-              echo ""
-              echo "To resolve:"
-              echo "  1. Clone this ADO repo locally."
-              echo "  2. git remote add upstream https://github.com/cqrenet/astral"
-              echo "  3. git fetch upstream"
-              echo "  4. git merge $FETCH_REF"
-              echo "  5. Resolve conflicts, commit, and push."
-              git merge --abort || true
-              exit 1
+              # Auto-resolve conflicts in files that should always keep the local version.
+              # These are files that contain deployment-specific configuration and must
+              # never be overwritten by upstream changes.
+              LOCAL_ALWAYS_OURS=(
+                "deploy/update-from-upstream.yml"
+              )
+              REMAINING_CONFLICTS=()
+              for f in "${LOCAL_ALWAYS_OURS[@]}"; do
+                if git diff --name-only --diff-filter=U | grep -qxF "$f"; then
+                  git checkout --ours "$f"
+                  git add "$f"
+                  echo "Auto-resolved conflict in $f (kept local version)."
+                fi
+              done
+
+              # Check whether all conflicts are now resolved
+              REMAINING_CONFLICTS=( $(git diff --name-only --diff-filter=U) )
+              if [ "${#REMAINING_CONFLICTS[@]}" -eq 0 ]; then
+                git commit --no-edit
+                echo "All conflicts auto-resolved. Merge complete."
+              else
+                echo ""
+                echo "##[error]Merge conflicts in files that require manual resolution:"
+                printf '  %s\n' "${REMAINING_CONFLICTS[@]}"
+                echo ""
+                echo "To resolve:"
+                echo "  1. Clone this ADO repo locally."
+                echo "  2. git remote add upstream https://github.com/cqrenet/astral"
+                echo "  3. git fetch upstream"
+                echo "  4. git merge $FETCH_REF"
+                echo "  5. Resolve conflicts, commit, and push."
+                git merge --abort || true
+                exit 1
+              fi
             fi
           workingDirectory: "$(Build.SourcesDirectory)"
 
@@ -171,9 +192,9 @@ Ref: $UPSTREAM_REF_LABEL ($UPSTREAM_SHA)"; then
             set -euo pipefail
             git push origin main
             echo "Update pushed successfully."
+          workingDirectory: "$(Build.SourcesDirectory)"
         env:
           SYSTEM_ACCESSTOKEN: $(System.AccessToken)
-        workingDirectory: "$(Build.SourcesDirectory)"
 
       - task: Bash@3
         displayName: Dry run summary

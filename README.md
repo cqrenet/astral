@@ -11,15 +11,19 @@ This repository is designed to be forked or downloaded into your own Azure DevOp
 Quick start:
 
 1. Fork or import this repository into an Azure DevOps project.
-2. Review `templates/variables-tenant.yml` and create a matching Azure DevOps Variable Group in your project (e.g. `vg-astral-tenant`).
+2. Review `templates/variables-tenant.yml` and create a matching Azure DevOps Variable Group in your project (e.g. `vg-astral`).
 3. Uncomment the variable group reference in the three pipeline YAMLs.
-4. Run `deploy/provision-change-probe.ps1` to create the Azure AD app registration, assign Graph permissions, configure the federated credential, and provision the event-driven change probe (Azure Function App) and optionally the MCP server (Azure Container Apps).
+4. Run `deploy/provision.ps1` to create the Azure AD app registration, assign Graph permissions, configure the federated credential, and provision the event-driven change probe (Azure Function App) and optionally the MCP server (Azure Container Apps).
 5. Create the Azure DevOps service connection using the app registration details from the bootstrap script.
 6. Import the three pipelines (`azure-pipelines.yml`, `azure-pipelines-review-sync.yml`, `azure-pipelines-restore.yml`) into Azure DevOps.
 7. Run `deploy/validate-deployment.yml` to verify connectivity and permissions.
 8. Set `AUTO_REMEDIATE_RESTORE_PIPELINE_ID` in your variable group after the restore pipeline is imported.
 
 See [`deploy/onboarding-runbook.md`](deploy/onboarding-runbook.md) for the full step-by-step guide.
+
+**GitHub Enterprise (including GitHub Enterprise Server):** the same scripts run as GitHub Actions workflows in [`.github/workflows/`](.github/workflows/) (backup, review sync, restore, change probe). See [`docs/github-enterprise-setup.md`](docs/github-enterprise-setup.md) for runners, identities, environments and repository rules.
+
+**Gitea:** the same scripts run as Gitea Actions workflows in [`.gitea/workflows/`](.gitea/workflows/), with no dependency on Microsoft or GitHub infrastructure besides Microsoft Graph itself. See [`docs/gitea-setup.md`](docs/gitea-setup.md), including how to move an existing Azure DevOps instance.
 
 ## Updates
 
@@ -92,7 +96,7 @@ Current scope behavior:
 - `azure-pipelines-restore.yml`: baseline restore pipeline with full or selective scope.
 - `infra/change-probe/`: Azure Function App for event-driven change detection.
 - `infra/mcp-server/`: MCP server (Azure Container Apps) for AI assistant integration — policy lookup, search, drift history, and assignment reports.
-- `deploy/provision-change-probe.ps1`: unified provisioning script for the change probe and MCP server infrastructure.
+- `deploy/provision.ps1`: unified provisioning script for the change probe and MCP server infrastructure.
 - `docs/m365-baseline-roadmap.md`: expansion roadmap beyond current workload scope.
 - `docs/security-review-package.md`: implementation-focused security review package.
 - `docs/security-review-questionnaire.md`: short-form security review answers.
@@ -170,7 +174,7 @@ Because Microsoft Graph change notifications and delta queries do not support In
 - **`queue_consumer`** (queue trigger): dequeues messages and calls the Azure DevOps REST API to queue the backup pipeline.
 - **Debouncer**: 15-minute quiet window + 30-minute cooldown prevents backup storms during bulk changes.
 - **State**: stored in Azure Table Storage (`ProbeState` table).
-- **Provisioning**: `deploy/provision-change-probe.ps1` creates the Entra app, grants admin consent, provisions Resource Group / Storage Account / Function App, and configures app settings.
+- **Provisioning**: `deploy/provision.ps1` creates the Entra app, grants admin consent, provisions Resource Group / Storage Account / Function App, and configures app settings.
 
 Full mode adds:
 
@@ -209,6 +213,8 @@ Reviewer thread commands:
 - `/reject`: remove that file-level drift from the rolling PR by resetting it to baseline
 - `/accept`: keep that file in PR scope
 
+Only authors listed in `PR_DECISION_ALLOWED_REVIEWERS` (comma-separated UPNs/emails or ADO identity IDs, set in the `vg-astral` variable group) are honored, for thread commands and for PR Reject votes. If the list is empty, reviewer decisions are ignored. The command must start the line (`/reject`, not "reject").
+
 Supported remediation paths:
 
 1. Reject and abandon a whole rolling PR.
@@ -216,6 +222,9 @@ Supported remediation paths:
 2. Reject selected files in ticket threads, then merge the accepted remainder.
    The review-sync pipeline can queue restore after merge so the tenant is reconciled to the merged baseline.
 3. Queue `azure-pipelines-restore.yml` manually for full or selective historical rollback.
+   The ref must be in the approved baseline branch history; unreviewed branches and tags are refused.
+
+Auto-remediation (paths 1 and 2) is off by default. Enable it with `AUTO_REMEDIATE_ON_PR_REJECTION=true` / `AUTO_REMEDIATE_AFTER_MERGE=true`, and set `AUTO_REMEDIATE_DRY_RUN=false` only after a dry run has been reviewed.
 
 ## Key Variables
 
@@ -482,3 +491,9 @@ The repository includes focused unit tests for:
 - Intune partial-export noise filtering
 - Entra enrichment-noise filtering
 - MCP server query layer and data source behavior
+
+## Acknowledgements
+
+ASTRAL's Intune export is built on [IntuneCD](https://github.com/almenscorner/IntuneCD) by [Tobias Almén](https://github.com/almenscorner). IntuneCD handles the export of Intune configuration — device configurations, compliance policies, applications, scripts, and more — directly from the Microsoft Graph API. Without it, ASTRAL would need to reimplement a large surface area of the Intune export layer from scratch. If you find ASTRAL useful, IntuneCD is where the Intune export work actually happens — it deserves your support, or at least a star.
+
+The Entra export (Conditional Access, named locations, app registrations, and related policies) is implemented directly in ASTRAL using the Microsoft Graph API.

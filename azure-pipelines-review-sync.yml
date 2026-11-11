@@ -11,9 +11,11 @@ schedules:
     batch: true
 
 variables:
-  # Tenant-specific values are expected in a variable group (see templates/variables-tenant.yml).
-  # Uncomment the line below after creating the group in your Azure DevOps project.
-  - group: vg-astral-cqre
+  # Variable group containing tenant-specific secrets and values.
+  # Name must be exactly "vg-astral" — ADO resolves group references at compile
+  # time as literal strings, so this cannot be parameterised. The bootstrap script
+  # (deploy/bootstrap-tenant.ps1) creates a group with this name automatically.
+  - group: vg-astral
   - template: templates/variables-common.yml
 
 jobs:
@@ -62,6 +64,7 @@ jobs:
           failOnStderr: false
         env:
           SYSTEM_ACCESSTOKEN: $(System.AccessToken)
+          PR_DECISION_ALLOWED_REVIEWERS: $(PR_DECISION_ALLOWED_REVIEWERS)
           SYSTEM_COLLECTIONURI: $(System.CollectionUri)
           SYSTEM_TEAMPROJECT: $(System.TeamProject)
           BUILD_REPOSITORY_ID: $(Build.Repository.ID)
@@ -84,6 +87,7 @@ jobs:
           failOnStderr: false
         env:
           SYSTEM_ACCESSTOKEN: $(System.AccessToken)
+          PR_DECISION_ALLOWED_REVIEWERS: $(PR_DECISION_ALLOWED_REVIEWERS)
           SYSTEM_COLLECTIONURI: $(System.CollectionUri)
           SYSTEM_TEAMPROJECT: $(System.TeamProject)
           BUILD_REPOSITORY_ID: $(Build.Repository.ID)
@@ -112,6 +116,7 @@ jobs:
           failOnStderr: false
         env:
           SYSTEM_ACCESSTOKEN: $(System.AccessToken)
+          PR_DECISION_ALLOWED_REVIEWERS: $(PR_DECISION_ALLOWED_REVIEWERS)
           SYSTEM_COLLECTIONURI: $(System.CollectionUri)
           SYSTEM_TEAMPROJECT: $(System.TeamProject)
           BUILD_REPOSITORY_ID: $(Build.Repository.ID)
@@ -170,6 +175,7 @@ jobs:
           failOnStderr: false
         env:
           SYSTEM_ACCESSTOKEN: $(System.AccessToken)
+          PR_DECISION_ALLOWED_REVIEWERS: $(PR_DECISION_ALLOWED_REVIEWERS)
           SYSTEM_COLLECTIONURI: $(System.CollectionUri)
           SYSTEM_TEAMPROJECT: $(System.TeamProject)
           BUILD_REPOSITORY_ID: $(Build.Repository.ID)
@@ -192,6 +198,7 @@ jobs:
           failOnStderr: false
         env:
           SYSTEM_ACCESSTOKEN: $(System.AccessToken)
+          PR_DECISION_ALLOWED_REVIEWERS: $(PR_DECISION_ALLOWED_REVIEWERS)
           SYSTEM_COLLECTIONURI: $(System.CollectionUri)
           SYSTEM_TEAMPROJECT: $(System.TeamProject)
           BUILD_REPOSITORY_ID: $(Build.Repository.ID)
@@ -220,6 +227,7 @@ jobs:
           failOnStderr: false
         env:
           SYSTEM_ACCESSTOKEN: $(System.AccessToken)
+          PR_DECISION_ALLOWED_REVIEWERS: $(PR_DECISION_ALLOWED_REVIEWERS)
           SYSTEM_COLLECTIONURI: $(System.CollectionUri)
           SYSTEM_TEAMPROJECT: $(System.TeamProject)
           BUILD_REPOSITORY_ID: $(Build.Repository.ID)
