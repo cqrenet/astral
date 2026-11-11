@@ -83,38 +83,46 @@ def _latest_pr_by_creation(prs: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return sorted(prs, key=lambda x: x.get("creationDate", ""), reverse=True)
 
 
-def _is_workload_config_path(path: str, workload_dir: str, backup_folder: str, reports_subdir: str) -> bool:
-    lp = common.normalize_repo_path(path).lower()
-    backup_norm = common.normalize_repo_path(backup_folder).lower().strip("/")
-    workload_norm = common.normalize_repo_path(workload_dir).lower().strip("/")
-    reports_norm = common.normalize_repo_path(reports_subdir).lower().strip("/")
+@dataclass(frozen=True)
+class _WorkloadScope:
+    """Where one workload's configuration lives in the repository."""
 
-    if not backup_norm or not workload_norm:
-        return False
+    workload_dir: str
+    backup_folder: str
+    reports_subdir: str
 
-    workload_prefix = f"{backup_norm}/{workload_norm}/"
-    if not lp.startswith(workload_prefix):
-        return False
+    @property
+    def prefix(self) -> str:
+        """'<backup folder>/<workload dir>', or '' when either part is blank."""
+        backup = common.normalize_repo_path(self.backup_folder).strip("/")
+        workload = common.normalize_repo_path(self.workload_dir).strip("/")
+        return f"{backup}/{workload}" if backup and workload else ""
 
-    if reports_norm and lp.startswith(f"{backup_norm}/{reports_norm}/"):
-        return False
+    def contains(self, path: str) -> bool:
+        """True for tenant configuration files of this workload (not docs, reports or other workloads)."""
+        lp = common.normalize_repo_path(path).lower()
+        backup = common.normalize_repo_path(self.backup_folder).lower().strip("/")
+        workload = common.normalize_repo_path(self.workload_dir).lower().strip("/")
+        reports = common.normalize_repo_path(self.reports_subdir).lower().strip("/")
+        if not backup or not workload or not lp.startswith(f"{backup}/{workload}/"):
+            return False
+        if reports and lp.startswith(f"{backup}/{reports}/"):
+            return False
+        return not (common.is_doc_like(lp) or common.is_report_like(lp))
 
-    if common.is_doc_like(lp) or common.is_report_like(lp):
-        return False
-    return True
 
-
-def _config_fingerprint_from_local_tree(
-    repo_root: str, commitish: str, workload_dir: str, backup_folder: str, reports_subdir: str
-) -> str:
-    backup_norm = common.normalize_repo_path(backup_folder).strip("/")
-    workload_norm = common.normalize_repo_path(workload_dir).strip("/")
-    path_prefix = f"{backup_norm}/{workload_norm}" if backup_norm and workload_norm else ""
-    if not path_prefix:
+def _fingerprint(pairs: list[str]) -> str:
+    """Stable hash of 'path<TAB>blob id' pairs; '' when there are none."""
+    if not pairs:
         return ""
+    return hashlib.sha256("\n".join(sorted(pairs, key=str.lower)).encode("utf-8")).hexdigest()
 
+
+def _config_fingerprint_from_local_tree(repo_root: str, commitish: str, scope: _WorkloadScope) -> str:
+    if not scope.prefix:
+        return ""
     try:
-        out = _run_git(repo_root, ["ls-tree", "-r", "--full-tree", commitish, "--", path_prefix])
+        out = _run_git(repo_root, ["ls-tree", "-r", "--full-tree", commitish, "--", scope.prefix])
     except Exception:
         return ""
 
@@ -127,72 +135,33 @@ def _config_fingerprint_from_local_tree(
         if len(parts) < 3 or parts[1] != "blob":
             continue
         blob_id = parts[2].strip()
-        if not blob_id:
-            continue
-        if not _is_workload_config_path(rel_path, workload_dir, backup_folder, reports_subdir):
-            continue
-        pairs.append(f"{common.normalize_repo_path(rel_path)}\t{blob_id}")
-
-    if not pairs:
-        return ""
-    pairs.sort(key=lambda item: item.lower())
-    joined = "\n".join(pairs).encode("utf-8")
-    return hashlib.sha256(joined).hexdigest()
+        if blob_id and scope.contains(rel_path):
+            pairs.append(f"{common.normalize_repo_path(rel_path)}\t{blob_id}")
+    return _fingerprint(pairs)
 
 
-def _config_fingerprint_from_tree_api(
-    repo_api: str, headers: dict[str, str], tree_id: str, workload_dir: str, backup_folder: str, reports_subdir: str
-) -> str:
+def _config_fingerprint_from_tree_api(repo_api: str, headers: dict[str, str], tree_id: str, scope: _WorkloadScope) -> str:
     if not tree_id:
         return ""
-    url = f"{repo_api}/trees/{tree_id}?recursive=true&api-version=7.1"
-    payload = _request_json(url, headers=headers)
+    payload = _request_json(f"{repo_api}/trees/{tree_id}?recursive=true&api-version=7.1", headers=headers)
     entries = payload.get("treeEntries", []) if isinstance(payload, dict) else []
 
     pairs: list[str] = []
     for entry in entries:
-        if not isinstance(entry, dict):
-            continue
-        if str(entry.get("gitObjectType", "")).lower() != "blob":
+        if not isinstance(entry, dict) or str(entry.get("gitObjectType", "")).lower() != "blob":
             continue
         rel_path = str(entry.get("relativePath", ""))
-        if not _is_workload_config_path(rel_path, workload_dir, backup_folder, reports_subdir):
-            continue
         blob_id = str(entry.get("objectId", "")).strip()
-        if not blob_id:
-            continue
-        pairs.append(f"{common.normalize_repo_path(rel_path)}\t{blob_id}")
-
-    if not pairs:
-        return ""
-    pairs.sort(key=lambda item: item.lower())
-    joined = "\n".join(pairs).encode("utf-8")
-    return hashlib.sha256(joined).hexdigest()
+        if blob_id and scope.contains(rel_path):
+            pairs.append(f"{common.normalize_repo_path(rel_path)}\t{blob_id}")
+    return _fingerprint(pairs)
 
 
 def _workload_config_diff_exists(
-    repo_root: str,
-    baseline_commitish: str,
-    drift_commitish: str,
-    workload_dir: str,
-    backup_folder: str,
-    reports_subdir: str,
+    repo_root: str, baseline_commitish: str, drift_commitish: str, scope: _WorkloadScope
 ) -> bool:
-    baseline_fingerprint = _config_fingerprint_from_local_tree(
-        repo_root=repo_root,
-        commitish=baseline_commitish,
-        workload_dir=workload_dir,
-        backup_folder=backup_folder,
-        reports_subdir=reports_subdir,
-    )
-    drift_fingerprint = _config_fingerprint_from_local_tree(
-        repo_root=repo_root,
-        commitish=drift_commitish,
-        workload_dir=workload_dir,
-        backup_folder=backup_folder,
-        reports_subdir=reports_subdir,
-    )
-
+    baseline_fingerprint = _config_fingerprint_from_local_tree(repo_root, baseline_commitish, scope)
+    drift_fingerprint = _config_fingerprint_from_local_tree(repo_root, drift_commitish, scope)
     if baseline_fingerprint and drift_fingerprint:
         return baseline_fingerprint != drift_fingerprint
 
@@ -202,32 +171,29 @@ def _workload_config_diff_exists(
         return True
 
 
+def _abandoned_pr_commit(pr: dict[str, Any]) -> str:
+    return (
+        ((pr.get("lastMergeSourceCommit") or {}).get("commitId"))
+        or ((pr.get("lastMergeCommit") or {}).get("commitId"))
+        or ""
+    ).strip()
+
+
 def _find_matching_abandoned_pr(
     repo_api: str,
     headers: dict[str, str],
     abandoned_prs: list[dict[str, Any]],
     drift_tree: str,
     repo_root: str,
-    workload_dir: str,
-    backup_folder: str,
-    reports_subdir: str,
+    scope: _WorkloadScope,
     drift_commitish: str,
 ) -> tuple[dict[str, Any] | None, str]:
-    current_config_fingerprint = _config_fingerprint_from_local_tree(
-        repo_root=repo_root,
-        commitish=drift_commitish,
-        workload_dir=workload_dir,
-        backup_folder=backup_folder,
-        reports_subdir=reports_subdir,
-    )
-    tree_fingerprint_cache: dict[str, str] = {}
+    """Latest abandoned PR whose tree equals the drift tree, or whose configuration fingerprint does."""
+    current_fingerprint = _config_fingerprint_from_local_tree(repo_root, drift_commitish, scope)
+    fingerprint_by_tree: dict[str, str] = {}
 
     for pr in _latest_pr_by_creation(abandoned_prs):
-        commit_id = (
-            ((pr.get("lastMergeSourceCommit") or {}).get("commitId"))
-            or ((pr.get("lastMergeCommit") or {}).get("commitId"))
-            or ""
-        ).strip()
+        commit_id = _abandoned_pr_commit(pr)
         if not commit_id:
             continue
         try:
@@ -236,23 +202,15 @@ def _find_matching_abandoned_pr(
             continue
         if pr_tree and pr_tree == drift_tree:
             return pr, "exact-tree"
-
-        if current_config_fingerprint and pr_tree:
-            if pr_tree not in tree_fingerprint_cache:
-                try:
-                    tree_fingerprint_cache[pr_tree] = _config_fingerprint_from_tree_api(
-                        repo_api=repo_api,
-                        headers=headers,
-                        tree_id=pr_tree,
-                        workload_dir=workload_dir,
-                        backup_folder=backup_folder,
-                        reports_subdir=reports_subdir,
-                    )
-                except Exception:
-                    tree_fingerprint_cache[pr_tree] = ""
-            if tree_fingerprint_cache[pr_tree] and tree_fingerprint_cache[pr_tree] == current_config_fingerprint:
-                return pr, "config-fingerprint"
-
+        if not (current_fingerprint and pr_tree):
+            continue
+        if pr_tree not in fingerprint_by_tree:
+            try:
+                fingerprint_by_tree[pr_tree] = _config_fingerprint_from_tree_api(repo_api, headers, pr_tree, scope)
+            except Exception:
+                fingerprint_by_tree[pr_tree] = ""
+        if fingerprint_by_tree[pr_tree] == current_fingerprint:
+            return pr, "config-fingerprint"
     return None, ""
 
 
@@ -496,11 +454,10 @@ def main() -> int:
     drift_branch = common.normalize_branch(args.drift_branch)
     baseline_branch = common.normalize_branch(args.baseline_branch)
     remediation = _load_remediation(baseline_branch)
-    backup_folder = _env_text("BACKUP_FOLDER", "tenant-state")
-    reports_subdir = _env_text("REPORTS_SUBDIR", "reports")
-    workload_dir = _env_text(
-        "INTUNE_BACKUP_SUBDIR" if args.workload == "intune" else "ENTRA_BACKUP_SUBDIR",
-        args.workload,
+    scope = _WorkloadScope(
+        workload_dir=_env_text("INTUNE_BACKUP_SUBDIR" if args.workload == "intune" else "ENTRA_BACKUP_SUBDIR", args.workload),
+        backup_folder=_env_text("BACKUP_FOLDER", "tenant-state"),
+        reports_subdir=_env_text("REPORTS_SUBDIR", "reports"),
     )
     source_ref = common.ref_from_branch(drift_branch)
     target_ref = common.ref_from_branch(baseline_branch)
@@ -522,14 +479,7 @@ def main() -> int:
         return 0
 
     baseline_commitish, drift_commitish = _resolve_commitishes(args.repo_root, baseline_branch, drift_branch)
-    if not _workload_config_diff_exists(
-        repo_root=args.repo_root,
-        baseline_commitish=baseline_commitish,
-        drift_commitish=drift_commitish,
-        workload_dir=workload_dir,
-        backup_folder=backup_folder,
-        reports_subdir=reports_subdir,
-    ):
+    if not _workload_config_diff_exists(args.repo_root, baseline_commitish, drift_commitish, scope):
         log.info(
             "Suppressed PR recreation: drift branch has no effective workload configuration diff "
             f"against {baseline_branch}."
@@ -545,9 +495,7 @@ def main() -> int:
         abandoned_prs=abandoned_prs,
         drift_tree=drift_tree,
         repo_root=args.repo_root,
-        workload_dir=workload_dir,
-        backup_folder=backup_folder,
-        reports_subdir=reports_subdir,
+        scope=scope,
         drift_commitish=drift_commitish,
     )
     if matching_abandoned:

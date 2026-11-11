@@ -41,33 +41,52 @@ class EnsureRollingPrTests(unittest.TestCase):
     def setUpClass(cls) -> None:
         cls.module = load_module()
 
-    def test_is_workload_config_path_filters_docs_and_reports(self) -> None:
-        is_path = self.module._is_workload_config_path
+    def test_workload_scope_contains_only_workload_configuration_files(self) -> None:
+        scope = self.module._WorkloadScope("entra", "tenant-state", "reports")
+        self.assertTrue(scope.contains("tenant-state/entra/Conditional Access/policy.json"))
+        self.assertFalse(scope.contains("tenant-state/entra/Conditional Access/policy.md"))
+        self.assertFalse(scope.contains("tenant-state/reports/entra/assignment_report.md"))
+        self.assertFalse(scope.contains("tenant-state/intune/Scripts/a.json"))  # other workload
+        self.assertEqual(scope.prefix, "tenant-state/entra")
+        self.assertEqual(self.module._WorkloadScope("", "tenant-state", "reports").prefix, "")
+        self.assertFalse(self.module._WorkloadScope("entra", "", "reports").contains("entra/a.json"))
 
-        self.assertTrue(
-            is_path(
-                "tenant-state/entra/Conditional Access/policy.json",
-                workload_dir="entra",
-                backup_folder="tenant-state",
-                reports_subdir="reports",
-            )
-        )
-        self.assertFalse(
-            is_path(
-                "tenant-state/entra/Conditional Access/policy.md",
-                workload_dir="entra",
-                backup_folder="tenant-state",
-                reports_subdir="reports",
-            )
-        )
-        self.assertFalse(
-            is_path(
-                "tenant-state/reports/entra/assignment_report.md",
-                workload_dir="entra",
-                backup_folder="tenant-state",
-                reports_subdir="reports",
-            )
-        )
+    def test_tree_api_fingerprint_matches_local_fingerprint_rules(self) -> None:
+        scope = self.module._WorkloadScope("entra", "tenant-state", "reports")
+        entries = [
+            {"gitObjectType": "blob", "relativePath": "tenant-state/entra/CA/p.json", "objectId": "b1"},
+            {"gitObjectType": "blob", "relativePath": "tenant-state/entra/README.md", "objectId": "b2"},  # doc
+            {"gitObjectType": "tree", "relativePath": "tenant-state/entra/CA", "objectId": "t1"},
+            {"gitObjectType": "blob", "relativePath": "tenant-state/entra/CA/q.json", "objectId": ""},  # no blob id
+        ]
+        with patch.object(self.module, "_request_json", return_value={"treeEntries": entries}):
+            with_docs = self.module._config_fingerprint_from_tree_api("https://r", {}, "tree1", scope)
+        with patch.object(self.module, "_request_json", return_value={"treeEntries": entries[:1]}):
+            only_config = self.module._config_fingerprint_from_tree_api("https://r", {}, "tree1", scope)
+        self.assertTrue(with_docs)
+        self.assertEqual(with_docs, only_config)
+        self.assertEqual(self.module._config_fingerprint_from_tree_api("https://r", {}, "", scope), "")
+
+    def test_find_matching_abandoned_pr_by_tree_then_by_config_fingerprint(self) -> None:
+        scope = self.module._WorkloadScope("entra", "tenant-state", "reports")
+        newest = {"pullRequestId": 3, "creationDate": "2026-03", "lastMergeSourceCommit": {"commitId": "c3"}}
+        older = {"pullRequestId": 2, "creationDate": "2026-02", "lastMergeSourceCommit": {"commitId": "c2"}}
+        no_commit = {"pullRequestId": 1, "creationDate": "2026-01"}
+        trees = {"c3": "treeX", "c2": "treeY"}
+
+        with patch.object(self.module, "_config_fingerprint_from_local_tree", return_value="fp"), \
+                patch.object(self.module, "_commit_tree_id", side_effect=lambda api, h, c: trees[c]):
+            # exact tree match wins and prefers the most recently created PR
+            pr, reason = self.module._find_matching_abandoned_pr("r", {}, [older, newest, no_commit], "treeY", "/repo", scope, "HEAD")
+            self.assertEqual((pr["pullRequestId"], reason), (2, "exact-tree"))
+
+            with patch.object(self.module, "_config_fingerprint_from_tree_api", side_effect=lambda *a: "fp" if a[2] == "treeY" else "other") as api:
+                pr, reason = self.module._find_matching_abandoned_pr("r", {}, [older, newest], "no-match", "/repo", scope, "HEAD")
+                self.assertEqual((pr["pullRequestId"], reason), (2, "config-fingerprint"))
+                self.assertEqual(api.call_count, 2)  # newest checked first, then the older match
+
+            with patch.object(self.module, "_config_fingerprint_from_tree_api", side_effect=RuntimeError("api down")):
+                self.assertEqual(self.module._find_matching_abandoned_pr("r", {}, [newest], "no-match", "/repo", scope, "HEAD"), (None, ""))
 
     def test_config_fingerprint_ignores_docs_and_reports(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -92,9 +111,7 @@ class EnsureRollingPrTests(unittest.TestCase):
             fp1 = self.module._config_fingerprint_from_local_tree(
                 repo_root=str(repo),
                 commitish="HEAD",
-                workload_dir="entra",
-                backup_folder="tenant-state",
-                reports_subdir="reports",
+                scope=self.module._WorkloadScope("entra", "tenant-state", "reports"),
             )
 
             report_file.write_text("report v2\n", encoding="utf-8")
@@ -104,9 +121,7 @@ class EnsureRollingPrTests(unittest.TestCase):
             fp2 = self.module._config_fingerprint_from_local_tree(
                 repo_root=str(repo),
                 commitish="HEAD",
-                workload_dir="entra",
-                backup_folder="tenant-state",
-                reports_subdir="reports",
+                scope=self.module._WorkloadScope("entra", "tenant-state", "reports"),
             )
 
             config_file.write_text('{"state":"disabled"}\n', encoding="utf-8")
@@ -115,9 +130,7 @@ class EnsureRollingPrTests(unittest.TestCase):
             fp3 = self.module._config_fingerprint_from_local_tree(
                 repo_root=str(repo),
                 commitish="HEAD",
-                workload_dir="entra",
-                backup_folder="tenant-state",
-                reports_subdir="reports",
+                scope=self.module._WorkloadScope("entra", "tenant-state", "reports"),
             )
 
             self.assertTrue(fp1)
@@ -191,9 +204,7 @@ class EnsureRollingPrTests(unittest.TestCase):
                     repo_root=str(repo),
                     baseline_commitish=baseline_commit,
                     drift_commitish=doc_only_commit,
-                    workload_dir="intune",
-                    backup_folder="tenant-state",
-                    reports_subdir="reports",
+                    scope=self.module._WorkloadScope("intune", "tenant-state", "reports"),
                 )
             )
             self.assertTrue(
@@ -201,9 +212,7 @@ class EnsureRollingPrTests(unittest.TestCase):
                     repo_root=str(repo),
                     baseline_commitish=baseline_commit,
                     drift_commitish=config_change_commit,
-                    workload_dir="intune",
-                    backup_folder="tenant-state",
-                    reports_subdir="reports",
+                    scope=self.module._WorkloadScope("intune", "tenant-state", "reports"),
                 )
             )
 
