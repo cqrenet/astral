@@ -290,6 +290,42 @@ def _commit_group(
     common.git_proc(repo_root, ["commit", "-m", commit_name])
 
 
+def _report_outcome(changed: bool, sync_required: bool) -> None:
+    _set_output_var("CHANGE_DETECTED", "1" if changed else "0")
+    _set_output_var("ROLLING_PR_SYNC_REQUIRED", "1" if sync_required else "0")
+
+
+def _audits_or_empty(token: str, since: dt.datetime | None, until: dt.datetime) -> list[dict]:
+    """Directory audit events in the window; empty (with a warning) when they cannot be read."""
+    try:
+        log.info("Getting Entra directory audit logs")
+        log.info(f"\t- from: '{since}' (UTC) to: '{until}' (UTC)")
+        return _fetch_directory_audits(token, since, until)
+    except urllib.error.HTTPError as exc:
+        if exc.code not in (401, 403):
+            raise
+        _warning("Graph token cannot read Entra directory audit logs. Falling back to pipeline identity for unresolved Entra changes.")
+    except Exception as exc:  # pragma: no cover - defensive path for pipeline runtime issues
+        _warning(f"Unable to query Entra directory audit logs ({exc}). Falling back to pipeline identity for unresolved Entra changes.")
+    return []
+
+
+def _commit_groups(
+    repo_root: pathlib.Path,
+    groups: dict[str, dict[str, list[str] | list[Identity]]],
+    backup_start: dt.datetime,
+    baseline_branch: str,
+) -> bool:
+    """One commit per author group; False when a commit left nothing unpushed (should not happen)."""
+    for group in groups.values():
+        files, identities = group["files"], group["identities"]
+        assert isinstance(files, list) and isinstance(identities, list)
+        _commit_group(repo_root, files, identities, backup_start)  # type: ignore[arg-type]
+        if not common.git_proc(repo_root, ["cherry", "-v", f"origin/{baseline_branch}"]).stdout.strip():
+            return False
+    return True
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--repo-root", required=True)
@@ -323,33 +359,18 @@ def main() -> int:
     changed_files = _changed_files(repo_root, workload_root)
     if not changed_files:
         log.info("No Entra change detected")
-        _set_output_var("CHANGE_DETECTED", "0")
-        _set_output_var("ROLLING_PR_SYNC_REQUIRED", "0")
+        _report_outcome(changed=False, sync_required=False)
         return 0
-
     if _remote_diff_is_empty(repo_root, args.drift_branch, workload_root):
         log.info("No Entra change detected (snapshot identical to existing drift branch)")
-        _set_output_var("CHANGE_DETECTED", "0")
-        _set_output_var("ROLLING_PR_SYNC_REQUIRED", "1")
+        _report_outcome(changed=False, sync_required=True)
         return 0
 
     backup_start = _parse_backup_start(args.backup_start)
     last_commit_date = _last_entra_commit_date(repo_root)
     if last_commit_date is None:
         _warning("Unable to obtain date of the last Entra backup config commit. All Entra audit events in the current query window will be considered.")
-
-    audits: list[dict] = []
-    try:
-        log.info("Getting Entra directory audit logs")
-        log.info(f"\t- from: '{last_commit_date}' (UTC) to: '{backup_start}' (UTC)")
-        audits = _fetch_directory_audits(args.access_token, last_commit_date, backup_start)
-    except urllib.error.HTTPError as exc:
-        if exc.code in (401, 403):
-            _warning("Graph token cannot read Entra directory audit logs. Falling back to pipeline identity for unresolved Entra changes.")
-        else:
-            raise
-    except Exception as exc:  # pragma: no cover - defensive path for pipeline runtime issues
-        _warning(f"Unable to query Entra directory audit logs ({exc}). Falling back to pipeline identity for unresolved Entra changes.")
+    audits = _audits_or_empty(args.access_token, last_commit_date, backup_start)
 
     groups, unresolved_count = _build_author_groups(changed_files, audits, fallback)
     if unresolved_count > 0:
@@ -359,27 +380,18 @@ def main() -> int:
 
     common.git_proc(repo_root, ["reset", "--quiet", "--", workload_root])
     log.info("\nCommit changes")
-    for group in groups.values():
-        files = group["files"]
-        identities = group["identities"]
-        assert isinstance(files, list)
-        assert isinstance(identities, list)
-        _commit_group(repo_root, files, identities, backup_start)
-        unpushed = common.git_proc(repo_root, ["cherry", "-v", f"origin/{args.baseline_branch}"]).stdout.strip()
-        if not unpushed:
-            _warning("Nothing to commit?! This shouldn't happen.")
-            _set_output_var("CHANGE_DETECTED", "0")
-            _set_output_var("ROLLING_PR_SYNC_REQUIRED", "0")
-            return 0
+    if not _commit_groups(repo_root, groups, backup_start, args.baseline_branch):
+        _warning("Nothing to commit?! This shouldn't happen.")
+        _report_outcome(changed=False, sync_required=False)
+        return 0
 
     common.git_proc(repo_root, ["push", "--force-with-lease", "origin", f"HEAD:{args.drift_branch}"])
     commit_sha = common.git_proc(repo_root, ["rev-parse", "HEAD"]).stdout.strip()
-    modification_authors = sorted({identity.value for group in groups.values() for identity in group["identities"]})  # type: ignore[index]
-    _set_output_var("CHANGE_DETECTED", "1")
-    _set_output_var("ROLLING_PR_SYNC_REQUIRED", "1")
+    authors = sorted({identity.value for group in groups.values() for identity in group["identities"]})  # type: ignore[union-attr]
+    _report_outcome(changed=True, sync_required=True)
     _set_output_var("COMMIT_SHA", commit_sha)
     _set_output_var("COMMIT_DATE", backup_start.strftime("%Y.%m.%d_%H.%M"))
-    _set_output_var("MODIFICATION_AUTHOR", ", ".join(modification_authors))
+    _set_output_var("MODIFICATION_AUTHOR", ", ".join(authors))
     return 0
 
 
@@ -387,5 +399,5 @@ if __name__ == "__main__":
     try:
         raise SystemExit(main())
     except Exception as exc:
-        log.info(str(exc))
+        log.error(str(exc))
         raise
