@@ -8,7 +8,7 @@ version = "0.0.0"
 description = "Git-based snapshots of Microsoft Intune and Entra ID configuration"
 requires-python = ">=3.11"
 dependencies = [
-    "IntuneCD==2.5.0",
+    "IntuneCD==2.6.0",
 ]
 
 [tool.ruff]

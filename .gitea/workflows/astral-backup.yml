@@ -20,7 +20,7 @@ concurrency:
 
 env:
   ASTRAL_SCM: gitea
-  INTUNECD_VERSION: "2.5.0"
+  INTUNECD_VERSION: "2.6.0"
   FORCE_FULL_RUN: ${{ github.event.inputs.forceFullRun }}
   # Empty values fall back to the defaults in the scripts.
   BASELINE_BRANCH: ${{ vars.BASELINE_BRANCH }}

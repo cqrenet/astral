@@ -30,7 +30,7 @@ variables:
   - name: ENTRA_BACKUP_SUBDIR
     value: entra
   - name: INTUNECD_VERSION
-    value: 2.5.0
+    value: 2.6.0
   - name: MD_TO_PDF_VERSION
     value: 5.2.5
   - name: EXCLUDE_SCRIPT_BACKUP

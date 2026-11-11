@@ -73,7 +73,7 @@ jobs:
       ASTRAL_SCM: github
       BACKUP_FOLDER: tenant-state
       INTUNE_BACKUP_SUBDIR: intune
-      INTUNECD_VERSION: "2.5.0"
+      INTUNECD_VERSION: "2.6.0"
       GRAPH_AUTH_METHOD: ${{ vars.GRAPH_AUTH_METHOD }}
       AZURE_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
     steps:

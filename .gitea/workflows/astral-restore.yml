@@ -69,7 +69,7 @@ jobs:
       ASTRAL_SCM: gitea
       BACKUP_FOLDER: tenant-state
       INTUNE_BACKUP_SUBDIR: intune
-      INTUNECD_VERSION: "2.5.0"
+      INTUNECD_VERSION: "2.6.0"
       APPROVED_BRANCH: ${{ vars.BASELINE_BRANCH || 'main' }}   # trusted: admin-managed variable
       DRY_RUN: ${{ github.event.inputs.dryRun || 'true' }}
     steps:

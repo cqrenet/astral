@@ -24,7 +24,7 @@ concurrency:
 
 env:
   ASTRAL_SCM: github
-  INTUNECD_VERSION: "2.5.0"
+  INTUNECD_VERSION: "2.6.0"
   FORCE_FULL_RUN: ${{ inputs.forceFullRun || 'false' }}
   # Empty values fall back to the defaults in the backup scripts.
   BASELINE_BRANCH: ${{ vars.BASELINE_BRANCH }}

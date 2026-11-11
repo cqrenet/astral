@@ -107,6 +107,30 @@ class DeployPackageTests(unittest.TestCase):
             with self.subTest(script=rel):
                 self.assertTrue(shipped <= staged, f"{rel} stages {sorted(staged)} but the image needs {sorted(shipped)}")
 
+    def test_intunecd_version_is_the_same_everywhere(self) -> None:
+        # One version must be installed by every pipeline and documented; a partial bump would make the
+        # backup and the restore run different IntuneCD releases.
+        sources = {
+            "requirements.txt": r"IntuneCD==([\w.]+)",
+            "pyproject.toml": r'"IntuneCD==([\w.]+)"',
+            "AGENTS.md": r"pinned to `([\w.]+)` via `INTUNECD_VERSION`",
+            "azure-pipelines.yml": r"name: INTUNECD_VERSION\s+value: ([\w.]+)",
+            "azure-pipelines-restore.yml": r"name: INTUNECD_VERSION\s+value: ([\w.]+)",
+            ".github/workflows/astral-backup.yml": r'INTUNECD_VERSION: "([\w.]+)"',
+            ".github/workflows/astral-restore.yml": r'INTUNECD_VERSION: "([\w.]+)"',
+            ".gitea/workflows/astral-backup.yml": r'INTUNECD_VERSION: "([\w.]+)"',
+            ".gitea/workflows/astral-restore.yml": r'INTUNECD_VERSION: "([\w.]+)"',
+        }
+        found = {}
+        for rel, pattern in sources.items():
+            match = re.search(pattern, (ROOT / rel).read_text(encoding="utf-8"))
+            self.assertIsNotNone(match, f"no IntuneCD version found in {rel}")
+            found[rel] = match.group(1)
+        self.assertEqual(len(set(found.values())), 1, f"IntuneCD versions disagree: {found}")
+        # Nothing may install it from a literal that bypasses the shared variable.
+        for path in ROOT.glob("azure-pipelines*.yml"):
+            self.assertNotRegex(path.read_text(encoding="utf-8"), r"IntuneCD==\d")
+
     def test_requirements_are_bounded(self) -> None:
         for path in sorted((ROOT / "infra").glob("*/requirements.txt")):
             for line in path.read_text(encoding="utf-8").splitlines():
