@@ -126,6 +126,35 @@ class GithubAdoCompatTests(unittest.TestCase):
         # Edited comments never count as reviewer decisions.
         self.assertIsNone(common.latest_thread_decision(review["comments"], {"rev"}))
 
+    def test_threads_follow_both_graphql_cursors(self) -> None:
+        def page(threads, comments, threads_more=False, comments_more=False):
+            return {"data": {"repository": {"pullRequest": {
+                "reviewThreads": {"pageInfo": {"hasNextPage": threads_more, "endCursor": "T" + str(len(threads))}, "nodes": threads},
+                "comments": {"pageInfo": {"hasNextPage": comments_more, "endCursor": "C" + str(len(comments))}, "nodes": comments},
+            }}}}
+
+        def thread(i):
+            return {"id": f"RT_{i}", "isResolved": False, "path": "p", "comments": {"nodes": [
+                {"databaseId": 100 + i, "body": "b", "createdAt": "x", "lastEditedAt": None, "author": {"login": "a"}}]}}
+
+        def comment(i):
+            return {"databaseId": 200 + i, "body": "c", "createdAt": "x", "lastEditedAt": None, "author": {"login": "a"}}
+
+        pages = iter([
+            page([thread(1)], [comment(1)], threads_more=True, comments_more=True),
+            page([thread(2)], [comment(2)], threads_more=True),  # comments finished after page 1
+            page([thread(3)], []),
+        ])
+        seen = []
+
+        def graphql(body):
+            seen.append(body["variables"])
+            return next(pages)
+
+        result, _ = self._run({("POST", "/graphql"): graphql}, f"{REPO_API}/pullrequests/5/threads?api-version=7.1")
+        self.assertEqual([t["id"] for t in result["value"]], [101, 102, 103, 201, 202])
+        self.assertEqual([(v["threads"], v["comments"]) for v in seen], [(None, None), ("T1", "C1"), ("T1", "C1")])
+
     def test_ticket_thread_becomes_file_review_comment(self) -> None:
         path = "tenant-state/intune/Scripts/a.json"
         routes = {

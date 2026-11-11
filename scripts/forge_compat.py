@@ -348,26 +348,28 @@ def _list_threads_gitea(number: int, token: str) -> list[dict[str, Any]]:
     return threads
 
 
-def _list_threads(number: int, token: str) -> list[dict[str, Any]]:
-    if _is_gitea():
-        return _list_threads_gitea(number, token)
+def _fetch_thread_nodes(number: int, token: str) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """All review-thread and issue-comment nodes of a PR via paged GraphQL: (review nodes, issue nodes)."""
     owner, name = _repo().split("/", 1)
-    review_nodes: list[dict[str, Any]] = []
-    issue_nodes: list[dict[str, Any]] = []
+    nodes: dict[str, list[dict[str, Any]]] = {"threads": [], "comments": []}
     cursors: dict[str, str | None] = {"threads": None, "comments": None}
     more = {"threads": True, "comments": True}
-    while more["threads"] or more["comments"]:
+    while any(more.values()):
         data = _graphql(_THREADS_QUERY, {"owner": owner, "name": name, "number": number, **cursors}, token)
         pull = ((data.get("repository") or {}).get("pullRequest")) or {}
-        for key, connection, sink in (
-            ("threads", pull.get("reviewThreads") or {}, review_nodes),
-            ("comments", pull.get("comments") or {}, issue_nodes),
-        ):
+        for key, connection in (("threads", pull.get("reviewThreads") or {}), ("comments", pull.get("comments") or {})):
             if more[key]:
-                sink.extend(connection.get("nodes") or [])
+                nodes[key].extend(connection.get("nodes") or [])
                 page = connection.get("pageInfo") or {}
                 more[key] = bool(page.get("hasNextPage"))
                 cursors[key] = page.get("endCursor")
+    return nodes["threads"], nodes["comments"]
+
+
+def _list_threads(number: int, token: str) -> list[dict[str, Any]]:
+    if _is_gitea():
+        return _list_threads_gitea(number, token)
+    review_nodes, issue_nodes = _fetch_thread_nodes(number, token)
 
     threads: list[dict[str, Any]] = []
     for node in review_nodes:
