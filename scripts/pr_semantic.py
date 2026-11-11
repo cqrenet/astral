@@ -164,6 +164,15 @@ def _assignment_filter_changes(old_map: dict[Any, dict[str, str]], new_map: dict
     return changes
 
 
+# (adding?, only exclusions?) -> scope line; exclusions narrow the scope, include/all targets broaden it
+_SCOPE_WORDING = {
+    (True, True): "assignment scope: likely narrower (more exclusion targets)",
+    (False, True): "assignment scope: likely broader (fewer exclusion targets)",
+    (True, False): "assignment scope: likely broader (more include/all targets)",
+    (False, False): "assignment scope: likely narrower (fewer include/all targets)",
+}
+
+
 def _assignment_scope_summary(
     old_entries: list[dict[str, str]],
     new_entries: list[dict[str, str]],
@@ -175,26 +184,13 @@ def _assignment_scope_summary(
         return "assignment scope: likely unassigned (all assignment targets removed)"
     if not old_entries and new_entries:
         return "assignment scope: newly assigned (targets added)"
-    if bool(added_entries or removed_entries) and not (added_entries and removed_entries):
-        # Only additions or only removals: exclusions narrow scope, includes broaden it (reversed for removals).
-        adding = bool(added_entries)
-        entries = added_entries if adding else removed_entries
-        all_exclusions = all(_is_exclusion_target_type(e.get("target_type", "")) for e in entries)
-        no_exclusions = all(not _is_exclusion_target_type(e.get("target_type", "")) for e in entries)
-        if all_exclusions:
-            return (
-                "assignment scope: likely narrower (more exclusion targets)"
-                if adding
-                else "assignment scope: likely broader (fewer exclusion targets)"
-            )
-        if no_exclusions:
-            return (
-                "assignment scope: likely broader (more include/all targets)"
-                if adding
-                else "assignment scope: likely narrower (fewer include/all targets)"
-            )
+    if bool(added_entries) == bool(removed_entries):
+        return None  # nothing changed, or both directions changed (the caller reports that as a target mix)
+    adding = bool(added_entries)
+    kinds = {_is_exclusion_target_type(e.get("target_type", "")) for e in (added_entries if adding else removed_entries)}
+    if len(kinds) != 1:
         return "assignment scope: ambiguous (mixed target semantics)"
-    return None
+    return _SCOPE_WORDING[(adding, kinds.pop())]
 
 
 def _describe_assignment_changes(old_payload: Any, new_payload: Any) -> list[str]:
