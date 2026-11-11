@@ -1404,5 +1404,100 @@ class RefreshSummaryFlowTests(unittest.TestCase):
         self.assertEqual(self._run(fail_ai=True, require_gate=True)[0], 1)
 
 
+class _FakeUrlResponse:
+    def __init__(self, payload) -> None:
+        self._body = json.dumps(payload).encode("utf-8")
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    def read(self) -> bytes:
+        return self._body
+
+
+class AzureOpenAIRouteTests(unittest.TestCase):
+    """_AzureOpenAIClient._try_route: how each failure maps to retry, next route, or a signal."""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.module = load_module()
+        _bind_pr_modules(cls)
+
+    def _client(self, attempts=3):
+        return self.pr_ai._AzureOpenAIClient("https://x.openai.azure.com", "gpt", "key", "2024", attempts)
+
+    def _http_error(self, code, body=""):
+        import io
+
+        return HTTPError("https://x", code, "reason", {}, io.BytesIO(body.encode()))
+
+    def _try(self, outcomes, *, attempts=3, token_param="max_tokens", temperature=0.2):
+        """Run _try_route with scripted urlopen outcomes; returns (result, number of calls, sleeps)."""
+        calls, sleeps = [], []
+
+        def fake_urlopen(request, timeout):
+            calls.append(request)
+            outcome = outcomes[len(calls) - 1]
+            if isinstance(outcome, BaseException):
+                raise outcome
+            return _FakeUrlResponse(outcome)
+
+        client = self._client(attempts)
+        route = {"name": "deployments", "url": "https://x/y", "body": {}}
+        with patch.object(self.pr_ai, "urlopen", fake_urlopen), patch("time.sleep", sleeps.append):
+            result = client._try_route(route, 10, token_param, temperature)
+        return result, len(calls), sleeps
+
+    def test_success_returns_content(self) -> None:
+        ok = {"choices": [{"finish_reason": "stop", "message": {"content": "hello"}}]}
+        self.assertEqual(self._try([ok])[0], ("hello", "", None))
+
+    def test_response_without_text_is_an_error_not_a_retry(self) -> None:
+        empty = {"choices": [{"finish_reason": "stop", "message": {"content": ""}}]}
+        (content, error, signal), calls, _ = self._try([empty])
+        self.assertEqual((content, signal, calls), ("", None, 1))
+        self.assertTrue(error.startswith("deployments:"))
+
+    def test_unsupported_token_param_and_temperature_are_signalled(self) -> None:
+        err = self._http_error(400, "Unsupported parameter: 'max_tokens' is not supported")
+        self.assertEqual(self._try([err])[0][2], "token_param")
+        err = self._http_error(400, "Unsupported value: 'temperature' does not support 0.2")
+        self.assertEqual(self._try([err])[0][2], "temperature")
+        # No temperature was sent, so a temperature complaint is not a signal.
+        err = self._http_error(400, "Unsupported value: 'temperature' does not support 0.2")
+        self.assertIsNone(self._try([err], temperature=None)[0][2])
+
+    def test_auth_errors_stop_and_404_moves_on(self) -> None:
+        for code in (401, 403):
+            (_, error, signal), calls, _ = self._try([self._http_error(code, "denied")])
+            self.assertEqual((signal, calls), ("stop", 1))
+            self.assertIn("denied", error)
+        (_, _, signal), calls, _ = self._try([self._http_error(404)])
+        self.assertEqual((signal, calls), (None, 1))
+
+    def test_transient_http_errors_retry_with_backoff_then_succeed(self) -> None:
+        ok = {"choices": [{"finish_reason": "stop", "message": {"content": "done"}}]}
+        result, calls, sleeps = self._try([self._http_error(503), self._http_error(429), ok])
+        self.assertEqual((result, calls, sleeps), (("done", "", None), 3, [1, 2]))
+
+    def test_retries_are_bounded(self) -> None:
+        (content, error, signal), calls, sleeps = self._try([self._http_error(503, "busy"), self._http_error(503, "busy")], attempts=2)
+        self.assertEqual((content, signal, calls, len(sleeps)), ("", None, 2, 1))
+        self.assertIn("busy", error)
+
+    def test_timeouts_retry_then_report_attempt_count(self) -> None:
+        (content, error, signal), calls, _ = self._try([TimeoutError("timed out")] * 3, attempts=3)
+        self.assertEqual((content, signal, calls), ("", None, 3))
+        self.assertIn("timed out after 3 attempts", error)
+
+    def test_other_network_errors_are_reported_without_retry(self) -> None:
+        (_, error, signal), calls, _ = self._try([ConnectionError("refused")])
+        self.assertEqual((signal, calls), (None, 1))
+        self.assertIn("refused", error)
+
+
 if __name__ == "__main__":
     unittest.main()

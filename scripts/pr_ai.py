@@ -398,6 +398,28 @@ class _AzureOpenAIClient:
         with urlopen(request, timeout=timeout_seconds) as response:
             return json.loads(response.read().decode("utf-8"))
 
+    def _backoff(self, attempt: int, retry_after: float | None = None) -> None:
+        time.sleep(min(2 ** (attempt - 1), 8) if retry_after is None else retry_after)
+
+    @staticmethod
+    def _read_error_body(exc: HTTPError) -> str:
+        try:
+            return exc.read().decode("utf-8", errors="replace")
+        except Exception:
+            return ""
+
+    @staticmethod
+    def _rejected_parameter(code: int, body: str, token_param: str, temperature: float | None) -> str | None:
+        """'token_param' / 'temperature' when a 400 says the deployment rejects what we sent."""
+        if code != 400:
+            return None
+        lowered = body.lower()
+        if "unsupported parameter" in lowered and f"'{token_param}'" in lowered:
+            return "token_param"
+        if "unsupported value" in lowered and "'temperature'" in lowered and temperature is not None:
+            return "temperature"
+        return None
+
     def _try_route(
         self, route: dict[str, Any], timeout_seconds: int, token_param: str, temperature: float | None
     ) -> tuple[str, str, str | None]:
@@ -409,41 +431,32 @@ class _AzureOpenAIClient:
         name = route["name"]
         error = ""
         for attempt in range(1, self.max_attempts + 1):
+            can_retry = attempt < self.max_attempts
             try:
                 payload = self._post(route, timeout_seconds)
-            except HTTPError as exc:  # pragma: no cover
-                try:
-                    raw_body = exc.read().decode("utf-8", errors="replace")
-                except Exception:
-                    raw_body = ""
-                error = f"{name}: {f'{exc} {raw_body}'.strip()}"
-                raw_lower = raw_body.lower()
-                if exc.code == 400:
-                    if "unsupported parameter" in raw_lower and f"'{token_param}'" in raw_lower:
-                        return "", error, "token_param"
-                    if "unsupported value" in raw_lower and "'temperature'" in raw_lower and temperature is not None:
-                        return "", error, "temperature"
+            except HTTPError as exc:
+                body = self._read_error_body(exc)
+                error = f"{name}: {f'{exc} {body}'.strip()}"
+                signal = self._rejected_parameter(exc.code, body, token_param, temperature)
+                if signal:
+                    return "", error, signal
                 if exc.code in (401, 403):  # invalid credentials fail fast
                     return "", error, "stop"
-                if exc.code == 404:  # endpoint style doesn't match: try the other route
-                    break
-                if exc.code in _AOAI_RETRY_HTTP_CODES and attempt < self.max_attempts:
-                    delay = common.retry_after_seconds(exc)
-                    time.sleep(min(2 ** (attempt - 1), 8) if delay is None else delay)
+                if exc.code in _AOAI_RETRY_HTTP_CODES and can_retry:
+                    self._backoff(attempt, common.retry_after_seconds(exc))
                     continue
-                break
-            except Exception as exc:  # pragma: no cover  (URLError and anything else)
+                break  # includes 404: the endpoint style doesn't match, so the caller tries the other route
+            except Exception as exc:  # URLError, timeouts, anything else
                 timed_out = _is_timeout_like_error(exc)
-                if timed_out and attempt < self.max_attempts:
-                    time.sleep(min(2 ** (attempt - 1), 8))
+                if timed_out and can_retry:
+                    self._backoff(attempt)
                     continue
                 error = (
                     f"{name}: timed out after {self.max_attempts} attempts ({exc})" if timed_out else f"{name}: {exc}"
                 )
                 break
-            else:
-                content, content_error = _extract_ai_text_from_payload(payload)
-                return (content, "", None) if content else ("", f"{name}: {content_error}", None)
+            content, content_error = _extract_ai_text_from_payload(payload)
+            return (content, "", None) if content else ("", f"{name}: {content_error}", None)
         return "", error, None
 
     def complete(self, messages: list[dict[str, str]], token_limit: int, timeout_seconds: int) -> tuple[str, str]:
