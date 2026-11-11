@@ -25,14 +25,30 @@ class _LogFormatter(logging.Formatter):
         return message if record.levelno <= logging.INFO else f"{record.levelname}: {message}"
 
 
+class _CurrentStreamHandler(logging.StreamHandler):
+    """Writes to whatever sys.stdout / sys.stderr is at emit time, so redirection and test capture work."""
+
+    def __init__(self, stream_name: str) -> None:
+        self._stream_name = stream_name
+        super().__init__()
+
+    @property
+    def stream(self):  # type: ignore[override]
+        return getattr(sys, self._stream_name)
+
+    @stream.setter
+    def stream(self, value) -> None:  # StreamHandler.__init__ assigns one; ignored
+        pass
+
+
 def _build_logger() -> logging.Logger:
     logger = logging.getLogger("astral")
     if logger.handlers:
         return logger
     formatter = _LogFormatter()
-    out = logging.StreamHandler(sys.stdout)
+    out = _CurrentStreamHandler("stdout")
     out.addFilter(lambda record: record.levelno < logging.WARNING)
-    err = logging.StreamHandler(sys.stderr)
+    err = _CurrentStreamHandler("stderr")
     err.setLevel(logging.WARNING)
     for handler in (out, err):
         handler.setFormatter(formatter)

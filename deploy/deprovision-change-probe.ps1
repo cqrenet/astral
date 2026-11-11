@@ -94,7 +94,7 @@ if (Test-Path $ConfigPath) {
         $config = Get-Content $ConfigPath -Raw | ConvertFrom-Json
         Write-Host "Loaded deployment config from $ConfigPath" -ForegroundColor Green
     } catch {
-        Write-Warning "Could not parse $ConfigPath: $_"
+        Write-Warning "Could not parse ${ConfigPath}: $_"
     }
 } else {
     Write-Warning "Config file not found at $ConfigPath."

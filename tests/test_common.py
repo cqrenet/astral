@@ -26,17 +26,11 @@ common = load_module()
 class LoggerTests(unittest.TestCase):
     def test_info_is_plain_on_stdout_and_warnings_are_prefixed_on_stderr(self) -> None:
         out, err = io.StringIO(), io.StringIO()
-        # The handlers hold the streams captured at import time, so swap them for this check.
-        stdout_handler = next(h for h in common.log.handlers if h.level == 0)
-        stderr_handler = next(h for h in common.log.handlers if h.level > 0)
-        old = (stdout_handler.stream, stderr_handler.stream)
-        stdout_handler.stream, stderr_handler.stream = out, err
-        try:
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):  # handlers follow the current streams
             common.log.info("hello")
             common.log.warning("careful")
             common.log.error("broken")
-        finally:
-            stdout_handler.stream, stderr_handler.stream = old
+            common.log.debug("hidden at the default level")
         self.assertEqual(out.getvalue(), "hello\n")
         self.assertEqual(err.getvalue(), "WARNING: careful\nERROR: broken\n")
 
