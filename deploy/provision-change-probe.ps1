@@ -32,7 +32,7 @@
     Azure DevOps project name.
 
 .PARAMETER AdoPipelineId
-    Azure DevOps pipeline ID (numeric).
+    Azure DevOps pipeline ID of the main backup pipeline (azure-pipelines.yml), numeric. Find it in the pipeline URL as definitionId=XX.
 
 .PARAMETER AdoToken
     Azure DevOps Personal Access Token with Build (Read & Execute) scope.
@@ -50,7 +50,7 @@
     .\provision-change-probe.ps1
 
 .EXAMPLE
-    .\provision-change-probe.ps1 -AdoOrganization "cqre" -AdoProject "ASTRAL" -AdoPipelineId "42"
+    .\provision-change-probe.ps1 -AdoOrganization "contoso" -AdoProject "ASTRAL" -AdoPipelineId "42"
 #>
 [CmdletBinding()]
 param (
@@ -215,9 +215,9 @@ Import-Module Microsoft.Graph.Applications
 # ---------------------------------------------------------------------------
 
 Write-Host "`n--- Azure DevOps Settings ---" -ForegroundColor Cyan
-$AdoOrganization = Get-OrPrompt -Value $AdoOrganization -Prompt "Azure DevOps Organization (e.g. 'cqre')"
+$AdoOrganization = Get-OrPrompt -Value $AdoOrganization -Prompt "Azure DevOps Organization (e.g. 'contoso')"
 $AdoProject      = Get-OrPrompt -Value $AdoProject      -Prompt "Azure DevOps Project"
-$AdoPipelineId   = Get-OrPrompt -Value $AdoPipelineId   -Prompt "Azure DevOps Pipeline ID (numeric)"
+$AdoPipelineId   = Get-OrPrompt -Value $AdoPipelineId   -Prompt "Azure DevOps Pipeline ID of the main backup pipeline (azure-pipelines.yml) — find it as definitionId=XX in the pipeline URL"
 $AdoToken        = Get-OrPrompt -Value $AdoToken        -Prompt "Azure DevOps PAT (Build Read & Execute)" -Sensitive
 
 # ---------------------------------------------------------------------------
@@ -253,7 +253,10 @@ if ($mcpDeploy) {
 
     if (-not $mcpEnableEntraIdAuth) {
         if (-not $McpApiKey) {
-            $McpApiKey = -join ((48..57) + (65..90) + (97..122) | Get-Random -Count 32 | ForEach-Object { [char]$_ })
+            # CSPRNG (Get-Random is not cryptographically secure)
+            $keyBytes = New-Object byte[] 32
+            [System.Security.Cryptography.RandomNumberGenerator]::Create().GetBytes($keyBytes)
+            $McpApiKey = [System.Convert]::ToBase64String($keyBytes).TrimEnd("=").Replace("+", "-").Replace("/", "_")
         }
     }
 }
@@ -283,6 +286,8 @@ $probeAppSecret = ""
 $tenantId       = ""
 $mcpAuthAppId   = ""
 $mcpAuthSecret  = ""
+$FunctionAppName = ""
+$StorageName     = ""
 
 $needGraph = (-not $DeployMcpOnly) -or ($mcpDeploy -and $mcpEnableEntraIdAuth)
 
@@ -326,6 +331,60 @@ if ($needGraph) {
         $mcpAuthSecretObj = Add-MgApplicationPassword -ApplicationId $mcpAuthApp.Id -BodyParameter $mcpAuthPasswordCred
         $mcpAuthAppId  = $mcpAuthApp.AppId
         $mcpAuthSecret = $mcpAuthSecretObj.SecretText
+
+        # Without assignment required, Entra issues tokens for this API to every tenant user.
+        $mcpAuthSp = Get-MgServicePrincipal -Filter "appId eq '$mcpAuthAppId'" | Select-Object -First 1
+        if (-not $mcpAuthSp) { $mcpAuthSp = New-MgServicePrincipal -AppId $mcpAuthAppId }
+        Update-MgServicePrincipal -ServicePrincipalId $mcpAuthSp.Id -AppRoleAssignmentRequired:$true
+        Write-Host "MCP access restricted: assign users/groups to enterprise app '$mcpAuthAppName'." -ForegroundColor Yellow
+
+        # Set the Application ID URI — required so api://<clientId>/user_impersonation
+        # is discoverable and the issued JWT carries aud = api://<clientId>.
+        $mcpAppIdUri = "api://$($mcpAuthApp.AppId)"
+        Write-Host "Setting Application ID URI to $mcpAppIdUri..." -ForegroundColor Cyan
+        Update-MgApplication -ApplicationId $mcpAuthApp.Id -IdentifierUris @($mcpAppIdUri)
+        Write-Host "Application ID URI set." -ForegroundColor Green
+
+        # Expose a scope so OAuth clients can request user_impersonation.
+        # Re-fetch after the IdentifierUris update to get the current Api definition.
+        $mcpAuthAppFull  = Get-MgApplication -ApplicationId $mcpAuthApp.Id
+        $existingScopes  = $mcpAuthAppFull.Api.Oauth2PermissionScopes
+        $userImpersonationScope = $existingScopes | Where-Object { $_.Value -eq "user_impersonation" } | Select-Object -First 1
+        if (-not $userImpersonationScope) {
+            Write-Host "Adding user_impersonation scope to MCP auth app..." -ForegroundColor Cyan
+            $newScope = @{
+                Id                      = [System.Guid]::NewGuid().ToString()
+                Value                   = "user_impersonation"
+                AdminConsentDisplayName = "Access ASTRAL MCP Server"
+                AdminConsentDescription = "Allows the application to query tenant state and drift history via the ASTRAL MCP Server."
+                UserConsentDisplayName  = "Access ASTRAL MCP Server"
+                UserConsentDescription  = "Allows this app to query your tenant configuration via ASTRAL."
+                IsEnabled               = $true
+                Type                    = "User"
+            }
+            $updatedScopes = @($newScope)
+            if ($existingScopes) { $updatedScopes += $existingScopes }
+            Update-MgApplication -ApplicationId $mcpAuthApp.Id -Api @{ oauth2PermissionScopes = $updatedScopes }
+            Write-Host "Scope added." -ForegroundColor Green
+        } else {
+            Write-Host "user_impersonation scope already exists — skipping." -ForegroundColor Yellow
+        }
+
+        # Redirect URIs — always applied regardless of auth mode:
+        #   http://localhost                         — loopback, covers any port (RFC 8252 §8.3), used by Cursor etc.
+        #   https://claude.ai/api/mcp/auth_callback — Claude Desktop completes its OAuth flow via claude.ai (web URI).
+        Write-Host "Configuring MCP auth app redirect URIs..." -ForegroundColor Cyan
+        $claudeCallback     = "https://claude.ai/api/mcp/auth_callback"
+        $appForRedirects    = Get-MgApplication -ApplicationId $mcpAuthApp.Id
+        $existingPublicUris = $appForRedirects.PublicClient.RedirectUris
+        $existingWebUris    = $appForRedirects.Web.RedirectUris
+        $updatedPublicUris  = @("http://localhost") + ($existingPublicUris | Where-Object { $_ -ne "http://localhost" })
+        $updatedWebUris     = @($claudeCallback)   + ($existingWebUris    | Where-Object { $_ -ne $claudeCallback   })
+        Update-MgApplication -ApplicationId $mcpAuthApp.Id `
+            -IsFallbackPublicClient:$true `
+            -PublicClient @{ redirectUris = $updatedPublicUris } `
+            -Web         @{ redirectUris = $updatedWebUris     }
+        Write-Host "Public client and Claude Desktop redirect URI configured." -ForegroundColor Green
     }
 
     # ---------------------------------------------------------------------------
@@ -567,7 +626,13 @@ try {
 # ---------------------------------------------------------------------------
 
 Write-Host "Ensuring resource group '$ResourceGroup'..." -ForegroundColor Cyan
-Invoke-AzCli -ArgumentList @("group", "create", "--name", $ResourceGroup, "--location", $Location, "--output", "none")
+Invoke-AzCli -ArgumentList @(
+    "group", "create",
+    "--name", $ResourceGroup,
+    "--location", $Location,
+    "--tags", "astral=true", "astral-ado-org=$AdoOrganization", "astral-ado-project=$AdoProject",
+    "--output", "none"
+)
 
 # Quick diagnostic: confirm ARM can read back the RG in this subscription.
 try {
@@ -608,6 +673,7 @@ Invoke-AzCli -ArgumentList @(
     "--location", $Location,
     "--sku", "Standard_LRS",
     "--kind", "StorageV2",
+    "--tags", "astral=true", "astral-ado-org=$AdoOrganization", "astral-ado-project=$AdoProject", "astral-component=change-probe",
     "--output", "none"
 )
 
@@ -651,6 +717,7 @@ Invoke-AzCli -ArgumentList @(
     "--runtime", "python",
     "--runtime-version", "3.11",
     "--functions-version", "4",
+    "--tags", "astral=true", "astral-ado-org=$AdoOrganization", "astral-ado-project=$AdoProject", "astral-component=change-probe",
     "--output", "none"
 )
 
@@ -737,6 +804,7 @@ if ($mcpDeploy) {
             "--location", $McpLocation,
             "--sku", "Basic",
             "--admin-enabled", "true",
+            "--tags", "astral=true", "astral-ado-org=$AdoOrganization", "astral-ado-project=$AdoProject", "astral-component=mcp-server",
             "--output", "none"
         )
     } else {
@@ -793,6 +861,7 @@ if ($mcpDeploy) {
         "--name", $caEnvName,
         "--resource-group", $McpResourceGroup,
         "--location", $McpLocation,
+        "--tags", "astral=true", "astral-ado-org=$AdoOrganization", "astral-ado-project=$AdoProject", "astral-component=mcp-server",
         "--output", "none"
     )
 
@@ -830,6 +899,16 @@ if ($mcpDeploy) {
         "--registry-server", $acrLoginServer,
         "--registry-username", $acrUsername,
         "--registry-password", $acrPassword,
+        "--tags", "astral=true", "astral-ado-org=$AdoOrganization", "astral-ado-project=$AdoProject", "astral-component=mcp-server",
+        "--output", "none"
+    )
+
+    # Secrets go into Container App secrets (not plain env vars readable from the resource template)
+    Invoke-AzCli -ArgumentList @(
+        "containerapp", "secret", "set",
+        "--name", $McpContainerAppName,
+        "--resource-group", $McpResourceGroup,
+        "--secrets", "ado-token=$AdoToken", "mcp-api-key=$McpApiKey",
         "--output", "none"
     )
 
@@ -843,7 +922,10 @@ if ($mcpDeploy) {
         "ADO_ORGANIZATION=$AdoOrganization",
         "ADO_PROJECT=$AdoProject",
         "ADO_BRANCH=$AdoBranch",
-        "ADO_TOKEN=$AdoToken",
+        "ADO_TOKEN=secretref:ado-token",
+        "ENTRA_TENANT_ID=$tenantId",
+        "MCP_CLIENT_ID=$mcpAuthAppId",
+        "MCP_API_KEY=secretref:mcp-api-key",
         "--output", "none"
     )
 
@@ -873,12 +955,17 @@ if ($mcpDeploy) {
             "--output", "none"
         )
 
+        # AllowAnonymous — ASTRAL validates tokens in-process (JWKS-based).
+        # ACA EasyAuth is kept enabled so it injects X-MS-CLIENT-PRINCIPAL headers
+        # for audit purposes, but it does not block unauthenticated requests.
+        # This allows the OAuth discovery endpoint to be reached without a token,
+        # which is required for Claude Desktop's OAuth PKCE flow to work.
         Invoke-AzCli -ArgumentList @(
             "containerapp", "auth", "update",
             "--name", $McpContainerAppName,
             "--resource-group", $McpResourceGroup,
             "--enabled", "true",
-            "--unauthenticated-client-action", "Return401",
+            "--unauthenticated-client-action", "AllowAnonymous",
             "--output", "none"
         )
 
@@ -1053,12 +1140,19 @@ $configToSave = [PSCustomObject]@{
     AdoProject           = $AdoProject
     AdoPipelineId        = $AdoPipelineId
     AdoBranch            = $AdoBranch
+    SubscriptionId       = $SubscriptionId
+    TenantId             = $tenantId
     ResourceGroup        = $ResourceGroup
     Location             = $Location
+    ProbeAppId           = $probeAppId
+    ProbeAppDisplayName  = if (-not $DeployMcpOnly) { $AppDisplayName } else { "" }
+    FunctionAppName      = if (-not $DeployMcpOnly -and $FunctionAppName) { $FunctionAppName } else { "" }
+    StorageName          = if (-not $DeployMcpOnly -and $StorageName) { $StorageName } else { "" }
     McpContainerAppName  = $McpContainerAppName
     McpAcrName           = $McpAcrName
     McpResourceGroup     = $McpResourceGroup
     McpLocation          = $McpLocation
+    McpAuthAppId         = $mcpAuthAppId
     EnableMcpEntraIdAuth = [bool]$mcpEnableEntraIdAuth
 }
 

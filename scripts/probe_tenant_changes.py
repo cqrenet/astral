@@ -99,7 +99,7 @@ def _acquire_graph_token(client_id: str, client_secret: str, tenant_id: str) -> 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--token", default="", help="Microsoft Graph bearer token (direct).")
+    parser.add_argument("--token", default=os.environ.get("GRAPH_TOKEN", ""), help="Microsoft Graph bearer token (default: $GRAPH_TOKEN).")
     parser.add_argument("--client-id", default="", help="Entra app client ID (alternative to --token).")
     parser.add_argument("--client-secret", default="", help="Entra app client secret (alternative to --token).")
     parser.add_argument("--tenant-id", default="", help="Entra tenant ID (alternative to --token).")
@@ -248,6 +248,61 @@ def _get_latest_entra_event(
 # Debouncer
 # ---------------------------------------------------------------------------
 
+def _record(
+    state: str = "idle",
+    first_event_at: str | None = None,
+    trigger_after: str | None = None,
+    cooldown_until: str | None = None,
+) -> dict[str, Any]:
+    """A fresh debouncer record."""
+    return {
+        "state": state,
+        "first_event_at": first_event_at,
+        "trigger_after": trigger_after,
+        "cooldown_until": cooldown_until,
+    }
+
+
+def _on_idle(
+    deb: dict[str, Any], latest: dt.datetime | None, now: dt.datetime, quiet: dt.timedelta, cooldown: dt.timedelta,
+    workloads: list[str],
+) -> tuple[bool, dict[str, Any], str]:
+    if latest is None:
+        return False, deb, "No changes detected."
+    trigger_after = now + quiet
+    reason = (
+        f"Change detected at {_format_iso(latest)}; "
+        f"armed, trigger scheduled for {_format_iso(trigger_after)}."
+    )
+    return False, _record("armed", _format_iso(latest), _format_iso(trigger_after)), reason
+
+
+def _on_armed(
+    deb: dict[str, Any], latest: dt.datetime | None, now: dt.datetime, quiet: dt.timedelta, cooldown: dt.timedelta,
+    workloads: list[str],
+) -> tuple[bool, dict[str, Any], str]:
+    if latest is None:
+        trigger_after = _parse_iso(deb.get("trigger_after"))
+        if trigger_after is not None and now >= trigger_after:
+            return (
+                True,
+                _record("cooldown", cooldown_until=_format_iso(now + cooldown)),
+                "Quiet window satisfied; no new events since last check.",
+            )
+        return False, deb, f"Armed, waiting for quiet window until {_format_iso(trigger_after)}."
+    # Activity is still ongoing: extend the quiet window.
+    trigger_after = now + quiet
+    first_event = deb.get("first_event_at") or _format_iso(latest)
+    reason = (
+        f"Additional change detected at {_format_iso(latest)} "
+        f"({'/'.join(workloads)}); quiet window extended to {_format_iso(trigger_after)}."
+    )
+    return False, _record("armed", first_event, _format_iso(trigger_after)), reason
+
+
+_DEBOUNCER_STATES = {"idle": _on_idle, "armed": _on_armed}
+
+
 def _evaluate_debouncer(
     state: dict[str, Any],
     intune_event: dict[str, Any] | None,
@@ -256,118 +311,39 @@ def _evaluate_debouncer(
     quiet_window: dt.timedelta,
     cooldown: dt.timedelta,
 ) -> tuple[bool, dict[str, Any], str]:
-    """Return (should_trigger, updated_state, human_readable_reason)."""
+    """Return (should_trigger, updated_state, human_readable_reason).
 
+    States: idle -> armed (first change) -> cooldown (quiet window passed, backup fired) -> idle.
+    """
     deb = dict(state.get("debouncer") or {})
     deb_state = str(deb.get("state") or "idle")
+    events = {"intune": intune_event, "entra": entra_event}
+    times = [_parse_iso(e.get("activityDateTime")) for e in events.values() if e]
+    latest = max((t for t in times if t is not None), default=None)
 
-    # Extract event timestamps if present
-    intune_time: dt.datetime | None = None
-    entra_time: dt.datetime | None = None
-    if intune_event:
-        intune_time = _parse_iso(intune_event.get("activityDateTime"))
-    if entra_event:
-        entra_time = _parse_iso(entra_event.get("activityDateTime"))
-
-    latest_event_time = max(
-        (t for t in (intune_time, entra_time) if t is not None), default=None
-    )
-
-    # ------------------------------------------------------------------
-    # Cooldown check
-    # ------------------------------------------------------------------
     if deb_state == "cooldown":
         cooldown_until = _parse_iso(deb.get("cooldown_until"))
         if cooldown_until is not None and now < cooldown_until:
-            reason = (
-                f"In cooldown until {_format_iso(cooldown_until)}; "
-                f"{int(intune_event is not None) + int(entra_event is not None)} event(s) ignored."
-            )
-            return False, state, reason
-        # Cooldown expired → fall through to idle logic
-        deb = {
-            "state": "idle",
-            "first_event_at": None,
-            "trigger_after": None,
-            "cooldown_until": None,
-        }
-        deb_state = "idle"
-
-    # ------------------------------------------------------------------
-    # Idle or armed
-    # ------------------------------------------------------------------
-    if latest_event_time is None:
-        # No changes in this window
-        if deb_state == "armed":
-            trigger_after = _parse_iso(deb.get("trigger_after"))
-            if trigger_after is not None and now >= trigger_after:
-                # Quiet window satisfied — fire
-                deb = {
-                    "state": "cooldown",
-                    "first_event_at": None,
-                    "trigger_after": None,
-                    "cooldown_until": _format_iso(now + cooldown),
-                }
-                reason = "Quiet window satisfied; no new events since last check."
-                state["debouncer"] = deb
-                return True, state, reason
-            # Still waiting
-            reason = f"Armed, waiting for quiet window until {_format_iso(trigger_after)}."
+            # Don't drop changes made during cooldown: remember them so a backup runs
+            # when cooldown ends (otherwise they stay unseen until the daily run).
+            if latest is not None:
+                deb["pending_event_at"] = _format_iso(latest)
             state["debouncer"] = deb
-            return False, state, reason
-        # Idle, no changes
-        reason = "No changes detected."
-        state["debouncer"] = deb
-        return False, state, reason
+            deferred = sum(e is not None for e in events.values())
+            return False, state, f"In cooldown until {_format_iso(cooldown_until)}; {deferred} event(s) deferred."
+        pending = deb.get("pending_event_at")
+        # Cooldown expired: deferred changes are due now, otherwise fall through to idle.
+        deb = _record("armed", pending, _format_iso(now)) if pending else _record()
+        deb_state = deb["state"]
 
-    # There is at least one new event
-    if deb_state == "idle":
-        # First change in a while — arm the debouncer
-        trigger_after = now + quiet_window
-        deb = {
-            "state": "armed",
-            "first_event_at": _format_iso(latest_event_time),
-            "trigger_after": _format_iso(trigger_after),
-            "cooldown_until": None,
-        }
-        reason = (
-            f"Change detected at {_format_iso(latest_event_time)}; "
-            f"armed, trigger scheduled for {_format_iso(trigger_after)}."
-        )
-        state["debouncer"] = deb
-        return False, state, reason
-
-    if deb_state == "armed":
-        # Extend the quiet window because activity is still ongoing
-        trigger_after = now + quiet_window
-        first_event = deb.get("first_event_at") or _format_iso(latest_event_time)
-        deb = {
-            "state": "armed",
-            "first_event_at": first_event,
-            "trigger_after": _format_iso(trigger_after),
-            "cooldown_until": None,
-        }
-        workloads: list[str] = []
-        if intune_event:
-            workloads.append("intune")
-        if entra_event:
-            workloads.append("entra")
-        reason = (
-            f"Additional change detected at {_format_iso(latest_event_time)} "
-            f"({'/'.join(workloads)}); quiet window extended to {_format_iso(trigger_after)}."
-        )
-        state["debouncer"] = deb
-        return False, state, reason
-
-    # Defensive fallback
-    reason = f"Unexpected debouncer state '{deb_state}'; resetting to idle."
-    state["debouncer"] = {
-        "state": "idle",
-        "first_event_at": None,
-        "trigger_after": None,
-        "cooldown_until": None,
-    }
-    return False, state, reason
+    handler = _DEBOUNCER_STATES.get(deb_state)
+    if handler is None:
+        state["debouncer"] = _record()
+        return False, state, f"Unexpected debouncer state '{deb_state}'; resetting to idle."
+    workloads = [name for name, event in events.items() if event]
+    fired, deb, reason = handler(deb, latest, now, quiet_window, cooldown, workloads)
+    state["debouncer"] = deb
+    return fired, state, reason
 
 
 # ---------------------------------------------------------------------------
