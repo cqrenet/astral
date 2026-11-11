@@ -80,11 +80,12 @@ jobs:
           targetType: inline
           script: |
             set -euo pipefail
-            TOKEN="$(GRAPH_TOKEN)"
             URL="https://graph.microsoft.com/v1.0/organization?\$select=id,displayName"
-            RESPONSE=$(curl -sf -H "Authorization: Bearer $TOKEN" "$URL")
+            RESPONSE=$(curl -sf -H "Authorization: Bearer $GRAPH_TOKEN" "$URL")
             echo "Graph read test response: $RESPONSE"
             echo "Graph connectivity confirmed."
+        env:
+          GRAPH_TOKEN: $(GRAPH_TOKEN)
 
       - task: Bash@3
         displayName: Validate PR creation permission
@@ -92,19 +93,34 @@ jobs:
           targetType: inline
           script: |
             set -euo pipefail
-            TOKEN="$(System.AccessToken)"
-            COLLECTION_URI="$(System.CollectionUri)"
-            PROJECT="$(System.TeamProject)"
-            REPO_ID="$(Build.Repository.ID)"
-            BASE_URL="${COLLECTION_URI%/}/${PROJECT}/_apis/git/repositories/${REPO_ID}"
+            TOKEN="$SYSTEM_ACCESSTOKEN"
+            BASE_URL="${SYSTEM_COLLECTIONURI%/}/${SYSTEM_TEAMPROJECT}/_apis/git/repositories/${BUILD_REPOSITORY_ID}"
+            ZERO_SHA="0000000000000000000000000000000000000000"
+
+            # Leave nothing behind, whatever fails: this step exists to find out what the identity may NOT do.
+            TEMP_BRANCH=""; MAIN_SHA=""; PR_ID=""
+            cleanup() {
+              set +e
+              if [ -n "$PR_ID" ]; then
+                curl -s -o /dev/null -u ":$TOKEN" -H "Content-Type: application/json" -X PATCH \
+                  -d '{"status":"abandoned"}' "${BASE_URL}/pullrequests/${PR_ID}?api-version=7.1"
+              fi
+              if [ -n "$TEMP_BRANCH" ] && [ -n "$MAIN_SHA" ]; then
+                curl -s -o /dev/null -u ":$TOKEN" -H "Content-Type: application/json" -X POST \
+                  -d "[{\"name\":\"refs/heads/${TEMP_BRANCH}\",\"oldObjectId\":\"${MAIN_SHA}\",\"newObjectId\":\"${ZERO_SHA}\"}]" \
+                  "${BASE_URL}/refs?api-version=7.1"
+              fi
+            }
+            trap cleanup EXIT
 
             curl_api() {
               local METHOD="$1"; shift
               local URL="$1"; shift
               local RESPONSE HTTP_CODE
               RESPONSE=$(curl -s -w "\n%{http_code}" -u ":$TOKEN" -H "Content-Type: application/json" -X "$METHOD" "$@" "$URL")
-              HTTP_CODE=$(echo "$RESPONSE" | tail -1)
-              BODY=$(echo "$RESPONSE" | head -n -1)
+              # The status code is the last line; split without `head -n -1`, which BSD/macOS agents lack.
+              HTTP_CODE="${RESPONSE##*$'\n'}"
+              BODY="${RESPONSE%$'\n'*}"
               if [ "$HTTP_CODE" -lt 200 ] || [ "$HTTP_CODE" -ge 300 ]; then
                 echo "##[error]API call failed ($METHOD $URL) — HTTP $HTTP_CODE"
                 echo "$BODY"
@@ -123,7 +139,7 @@ jobs:
             TEMP_BRANCH="validation/astral-validate-$(date +%s)"
             echo "Creating temp branch $TEMP_BRANCH..."
             curl_api POST "${BASE_URL}/refs?api-version=7.1" \
-              -d "[{\"name\":\"refs/heads/${TEMP_BRANCH}\",\"oldObjectId\":\"0000000000000000000000000000000000000000\",\"newObjectId\":\"${MAIN_SHA}\"}]" > /dev/null
+              -d "[{\"name\":\"refs/heads/${TEMP_BRANCH}\",\"oldObjectId\":\"${ZERO_SHA}\",\"newObjectId\":\"${MAIN_SHA}\"}]" > /dev/null
 
             # Create draft PR from temp branch to main
             echo "Creating test PR..."
@@ -136,10 +152,17 @@ jobs:
             echo "Abandoning test PR #$PR_ID..."
             curl_api PATCH "${BASE_URL}/pullrequests/${PR_ID}?api-version=7.1" \
               -d '{"status":"abandoned"}' > /dev/null
+            PR_ID=""   # done: the cleanup trap must not repeat it
 
             # Delete the temp branch
             echo "Deleting temp branch..."
             curl_api POST "${BASE_URL}/refs?api-version=7.1" \
-              -d "[{\"name\":\"refs/heads/${TEMP_BRANCH}\",\"oldObjectId\":\"${MAIN_SHA}\",\"newObjectId\":\"0000000000000000000000000000000000000000\"}]" > /dev/null
+              -d "[{\"name\":\"refs/heads/${TEMP_BRANCH}\",\"oldObjectId\":\"${MAIN_SHA}\",\"newObjectId\":\"${ZERO_SHA}\"}]" > /dev/null
+            TEMP_BRANCH=""
 
             echo "PR creation and abandonment successful."
+        env:
+          SYSTEM_ACCESSTOKEN: $(System.AccessToken)
+          SYSTEM_COLLECTIONURI: $(System.CollectionUri)
+          SYSTEM_TEAMPROJECT: $(System.TeamProject)
+          BUILD_REPOSITORY_ID: $(Build.Repository.ID)

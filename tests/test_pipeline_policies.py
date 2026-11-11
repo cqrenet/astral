@@ -195,5 +195,80 @@ class UpdateFromUpstreamTests(unittest.TestCase):
                 self.assertNotIn("variable=FETCH_REF", result.stdout)  # nothing unsafe reaches later steps
 
 
+@unittest.skipUnless(yaml and shutil.which("bash"), "needs PyYAML and bash")
+class ValidateDeploymentTests(unittest.TestCase):
+    """The 'Validate PR creation permission' step against a fake curl that plays the Azure DevOps API."""
+
+    FAKE_CURL = r'''#!/usr/bin/env python3
+import json, os, sys
+args = sys.argv[1:]
+method = args[args.index("-X") + 1] if "-X" in args else "GET"
+url = args[-1]
+body = args[args.index("-d") + 1] if "-d" in args else ""
+with open(os.environ["FAKE_LOG"], "a") as log:
+    log.write(json.dumps({"method": method, "url": url, "body": body}) + "\n")
+fail = os.environ.get("FAKE_FAIL", "")  # e.g. "POST pullrequests?"
+code, payload = 200, {}
+if fail and fail.split()[0] == method and fail.split()[1] in url:
+    code, payload = 403, {"message": "denied"}
+elif method == "GET" and "/refs" in url:
+    payload = {"value": [{"objectId": "abc123"}]}
+elif method == "POST" and "/pullrequests" in url:
+    payload = {"pullRequestId": 7}
+out = json.dumps(payload)
+sys.stdout.write(out + ("\n" + str(code) if "-w" in args else ""))
+sys.exit(0 if code < 400 or "-s" in args else 22)
+'''
+
+    def _script(self) -> str:
+        for step, body in _ado_steps(_load(str(ROOT / "deploy/validate-deployment.yml"))):
+            if step.get("displayName") == "Validate PR creation permission":
+                return body
+        raise AssertionError("step not found")
+
+    def _run(self, fail: str = ""):
+        with tempfile.TemporaryDirectory() as td:
+            curl = Path(td, "curl")
+            curl.write_text(self.FAKE_CURL)
+            curl.chmod(0o755)
+            log = Path(td, "calls.jsonl")
+            env = {**os.environ, "PATH": f"{td}:{os.environ['PATH']}", "FAKE_LOG": str(log), "FAKE_FAIL": fail,
+                   "SYSTEM_ACCESSTOKEN": "tok", "SYSTEM_COLLECTIONURI": "https://dev.azure.com/org/",
+                   "SYSTEM_TEAMPROJECT": "proj", "BUILD_REPOSITORY_ID": "repo"}
+            result = subprocess.run(["bash", "-c", self._script()], capture_output=True, text=True, env=env)
+            import json
+
+            calls = [json.loads(line) for line in log.read_text().splitlines()] if log.exists() else []
+        return result, [(c["method"], c["url"].split("?")[0].rsplit("/", 1)[-1], c["body"]) for c in calls]
+
+    def test_success_path_creates_abandons_and_deletes_exactly_once(self) -> None:
+        result, calls = self._run()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual([(m, what) for m, what, _ in calls], [("GET", "refs"), ("POST", "refs"), ("POST", "pullrequests"), ("PATCH", "7"), ("POST", "refs")])
+        self.assertIn("newObjectId\":\"0000000000000000000000000000000000000000", calls[-1][2])  # the branch is deleted
+        self.assertNotIn("tok", result.stdout)  # the token is never echoed
+
+    def test_failure_after_the_branch_exists_still_deletes_it(self) -> None:
+        # The identity may not be allowed to create PRs: that is exactly what this step detects.
+        result, calls = self._run(fail="POST pullrequests")
+        self.assertEqual(result.returncode, 1)
+        self.assertEqual([(m, what) for m, what, _ in calls][-1], ("POST", "refs"))
+        deletes = [c for c in calls if c[0] == "POST" and c[1] == "refs" and '"newObjectId\":\"0000' in c[2].replace(" ", "")]
+        self.assertEqual(len(deletes), 1, calls)
+        self.assertFalse(any(c[0] == "PATCH" for c in calls))  # no PR was created, so none to abandon
+
+    def test_failure_after_the_pr_exists_abandons_it_and_deletes_the_branch(self) -> None:
+        result, calls = self._run(fail="PATCH 7")
+        self.assertEqual(result.returncode, 1)
+        self.assertGreaterEqual(len([c for c in calls if c[0] == "PATCH"]), 2)  # the failed abandon, then the cleanup attempt
+        self.assertEqual(calls[-1][:2], ("POST", "refs"))
+
+    def test_secrets_reach_the_steps_through_env_not_macros(self) -> None:
+        for step, body in _ado_steps(_load(str(ROOT / "deploy/validate-deployment.yml"))):
+            with self.subTest(step=step.get("displayName")):
+                self.assertNotIn("$(GRAPH_TOKEN)", body)
+                self.assertNotIn("$(System.AccessToken)", body)
+
+
 if __name__ == "__main__":
     unittest.main()
