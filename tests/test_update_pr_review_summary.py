@@ -1334,7 +1334,7 @@ class RefreshSummaryFlowTests(unittest.TestCase):
                 patch.object(m, "_publish_description", rec("description", update)), \
                 patch.object(m, "_sync_summary_threads", rec("threads")), \
                 patch.object(m, "_publish_draft_pr", rec("draft", True)), \
-                patch.object(m, "_run_ticket_gate", rec("gate")):
+                patch.object(m._Run, "run_ticket_gate", rec("gate")):
             code = m.main()
         return code, calls
 
@@ -1353,6 +1353,22 @@ class RefreshSummaryFlowTests(unittest.TestCase):
         self.assertEqual(
             calls, ["find", "fetch", "collect", "get_pr", "current?", "ai", "description", "threads", "draft", "gate"]
         )
+
+    def test_ticket_gate_off_logs_and_does_not_touch_threads(self) -> None:
+        run = self.module._Run("intune", "/r", "https://repo", "tok", 7, "main", "drift/intune", [], "T", False, False)
+        with patch.object(self.module, "_enforce_change_ticket_threads") as enforce:
+            run.run_ticket_gate()
+        enforce.assert_not_called()
+
+    def test_ticket_gate_on_enforces_threads_for_the_changes(self) -> None:
+        change = self.pr_changes.ChangeItem("Modified", "tenant-state/intune/Scripts/a.json", 2, "MEDIUM", "r", "script", "MEDIUM")
+        run = self.module._Run("intune", "/r", "https://repo", "tok", 7, "main", "drift/intune", [change], "T", False, True)
+        with patch.object(self.module, "_build_ticket_change_context", return_value={"p": ("c", "r")}), \
+                patch.object(self.module, "_enforce_change_ticket_threads", return_value=(1, 0)) as enforce:
+            run.run_ticket_gate()
+        kwargs = enforce.call_args.kwargs
+        self.assertEqual((kwargs["pr_id"], kwargs["changes"], kwargs["change_context"]), (7, [change], {"p": ("c", "r")}))
+        self.assertEqual(kwargs["ticket_pattern"], r"[A-Z][A-Z0-9]+-\d+")
 
     def test_failure_is_non_fatal_unless_ticket_gate_is_required(self) -> None:
         self.assertEqual(self._run(fail_ai=True)[0], 0)

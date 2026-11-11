@@ -130,42 +130,6 @@ def _build_ticket_change_context(
     return context
 
 
-def _run_ticket_gate(
-    *,
-    enabled: bool,
-    repo_api: str,
-    pr_id: Any,
-    token: str,
-    repo_root: str,
-    baseline_branch: str,
-    drift_branch: str,
-    changes: list[ChangeItem],
-) -> None:
-    if not enabled:
-        log.info("Change-needed thread sync disabled (set REQUIRE_CHANGE_TICKETS=true).")
-        return
-    ticket_pattern = _env("CHANGE_TICKET_REGEX", required=False, default=r"[A-Z][A-Z0-9]+-\d+")
-    change_context = _build_ticket_change_context(
-        repo_root=repo_root,
-        baseline_branch=baseline_branch,
-        drift_branch=drift_branch,
-        changes=changes,
-    )
-    created_count, closed_count = _enforce_change_ticket_threads(
-        repo_api=repo_api,
-        pr_id=pr_id,
-        token=token,
-        changes=changes,
-        ticket_pattern=ticket_pattern,
-        change_context=change_context,
-    )
-    log.info(
-        "Change-needed thread sync complete: "
-        f"created={created_count}, closed_stale={closed_count}. "
-        "Merge policy should enforce unresolved thread handling."
-    )
-
-
 def _fetch_drift_branch(repo_root: str, baseline_branch: str, drift_branch: str) -> bool:
     """Fetch both branches; False when the drift branch does not exist on origin."""
     _run_git(repo_root, ["fetch", "--quiet", "origin", baseline_branch])
@@ -240,15 +204,27 @@ class _Run:
             log.info(f"Published draft PR #{self.pr_id} {reason}.")
 
     def run_ticket_gate(self) -> None:
-        _run_ticket_gate(
-            enabled=self.require_ticket_gate,
+        """Keep one open review thread per changed policy path (only when REQUIRE_CHANGE_TICKETS is on)."""
+        if not self.require_ticket_gate:
+            log.info("Change-needed thread sync disabled (set REQUIRE_CHANGE_TICKETS=true).")
+            return
+        created, closed = _enforce_change_ticket_threads(
             repo_api=self.repo_api,
             pr_id=self.pr_id,
             token=self.token,
-            repo_root=self.repo_root,
-            baseline_branch=self.baseline_branch,
-            drift_branch=self.drift_branch,
             changes=self.changes,
+            ticket_pattern=_env("CHANGE_TICKET_REGEX", required=False, default=r"[A-Z][A-Z0-9]+-\d+"),
+            change_context=_build_ticket_change_context(
+                repo_root=self.repo_root,
+                baseline_branch=self.baseline_branch,
+                drift_branch=self.drift_branch,
+                changes=self.changes,
+            ),
+        )
+        log.info(
+            "Change-needed thread sync complete: "
+            f"created={created}, closed_stale={closed}. "
+            "Merge policy should enforce unresolved thread handling."
         )
 
 
