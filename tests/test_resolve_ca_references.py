@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import importlib.util
+import sys
 import unittest
 from pathlib import Path
 
 MODULE_PATH = Path(__file__).resolve().parents[1] / "scripts" / "resolve_ca_references.py"
+sys.path.insert(0, str(MODULE_PATH.parent))  # script imports its sibling common.py
 
 
 def load_module():
