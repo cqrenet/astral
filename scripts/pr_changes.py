@@ -126,58 +126,53 @@ def _classify_risk(path: str, operation: str, backup_folder: str, reports_subdir
     return (score, reason)
 
 
-def _parse_changes(diff_output: str, backup_folder: str, reports_subdir: str) -> list[ChangeItem]:
-    op_map = {
-        "A": "Added",
-        "M": "Modified",
-        "D": "Deleted",
-        "R": "Renamed",
-        "C": "Copied",
-        "T": "TypeChanged",
-        "U": "Unmerged",
-        "X": "Unknown",
-        "B": "Broken",
-    }
+_GIT_STATUS_OPERATIONS = {
+    "A": "Added",
+    "M": "Modified",
+    "D": "Deleted",
+    "R": "Renamed",
+    "C": "Copied",
+    "T": "TypeChanged",
+    "U": "Unmerged",
+    "X": "Unknown",
+    "B": "Broken",
+}
 
+
+def _parse_diff_line(line: str) -> tuple[str, str, str | None]:
+    """(operation, path, old path) from one `git diff --name-status` line; old path only for renames."""
+    parts = line.split("\t")
+    operation = _GIT_STATUS_OPERATIONS.get(parts[0][0], "Modified")
+    if operation == "Renamed" and len(parts) >= 3:
+        return operation, parts[2], parts[1]
+    return operation, parts[-1], None
+
+
+def _in_backup_scope(path: str, backup_prefix: str) -> bool:
+    return not backup_prefix or path.replace("\\", "/").lstrip("/").lower().startswith(backup_prefix)
+
+
+def _parse_changes(diff_output: str, backup_folder: str, reports_subdir: str) -> list[ChangeItem]:
+    """Policy changes from `git diff --name-status` output; docs, reports and files outside the backup folder are dropped."""
     backup_root = backup_folder.strip().strip("/").lower()
     backup_prefix = f"{backup_root}/" if backup_root else ""
-
-    def _is_policy_scope_path(path: str) -> bool:
-        normalized = path.replace("\\", "/").lstrip("/").lower()
-        if not backup_prefix:
-            return True
-        return normalized.startswith(backup_prefix)
 
     changes: list[ChangeItem] = []
     for raw_line in diff_output.splitlines():
         line = raw_line.strip()
         if not line:
             continue
-        parts = line.split("\t")
-        if not parts:
-            continue
-        status_token = parts[0]
-        status_code = status_token[0]
-        operation = op_map.get(status_code, "Modified")
-        old_path: str | None = None
-        if operation == "Renamed" and len(parts) >= 3:
-            old_path = parts[1]
-            path = parts[2]
-        else:
-            path = parts[-1]
-        in_scope = _is_policy_scope_path(path) or (old_path is not None and _is_policy_scope_path(old_path))
-        if not in_scope:
+        operation, path, old_path = _parse_diff_line(line)
+        if not (_in_backup_scope(path, backup_prefix) or (old_path and _in_backup_scope(old_path, backup_prefix))):
             continue
         if common.is_doc_like(path) or common.is_report_like(path):
             continue
         risk_score, reason = _classify_risk(path, operation, backup_folder, reports_subdir)
-        if old_path:
-            old_risk_score, old_reason = _classify_risk(old_path, operation, backup_folder, reports_subdir)
-            if old_risk_score > risk_score:
-                risk_score = old_risk_score
-                reason = old_reason
+        if old_path:  # a rename into a safe path must not hide a move out of a sensitive one
+            old_score, old_reason = _classify_risk(old_path, operation, backup_folder, reports_subdir)
+            if old_score > risk_score:
+                risk_score, reason = old_score, old_reason
         policy_type = _classify_policy_type(path)
-        severity = _severity_from_change(operation, risk_score, policy_type)
         changes.append(
             ChangeItem(
                 operation=operation,
@@ -186,7 +181,7 @@ def _parse_changes(diff_output: str, backup_folder: str, reports_subdir: str) ->
                 risk_label=_risk_label(risk_score),
                 reason=reason,
                 policy_type=policy_type,
-                severity=severity,
+                severity=_severity_from_change(operation, risk_score, policy_type),
                 old_path=old_path,
             )
         )
