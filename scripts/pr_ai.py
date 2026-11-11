@@ -186,111 +186,115 @@ def _build_fallback_narrative(
     return "\n".join(lines)
 
 
+_SECTION_HEADINGS = {
+    "plain-language summary": "#### Plain-Language Summary",
+    "plain language summary": "#### Plain-Language Summary",
+    "operational impact": "#### Operational Impact",
+    "risk assessment rationale": "#### Risk Assessment Rationale",
+    "recommended reviewer checks": "#### Recommended Reviewer Checks",
+    "rollback considerations": "#### Rollback Considerations",
+}
+# Longer budgets for the sections reviewers read first.
+_SECTION_WEIGHTS = {
+    "#### Plain-Language Summary": 1.3,
+    "#### Operational Impact": 1.2,
+    "#### Risk Assessment Rationale": 1.2,
+    "#### Recommended Reviewer Checks": 1.0,
+    "#### Rollback Considerations": 0.9,
+}
+_MIN_BODY_CHARS = 24
+
+
 def _format_ai_narrative_markdown(text: str) -> str:
+    """Normalize model output: known section titles become headings, bullets become '- ', blank runs collapse."""
     if not text:
         return ""
 
-    section_map = {
-        "plain-language summary": "#### Plain-Language Summary",
-        "plain language summary": "#### Plain-Language Summary",
-        "operational impact": "#### Operational Impact",
-        "risk assessment rationale": "#### Risk Assessment Rationale",
-        "recommended reviewer checks": "#### Recommended Reviewer Checks",
-        "rollback considerations": "#### Rollback Considerations",
-    }
-
-    normalized_lines: list[str] = []
+    normalized: list[str] = []
     for raw in text.replace("\r\n", "\n").split("\n"):
         line = raw.rstrip()
         stripped = line.strip()
-        lowered = stripped.lower().rstrip(":")
-
-        if lowered in section_map:
-            normalized_lines.append(section_map[lowered])
-            continue
-
-        if stripped.startswith("•"):
-            normalized_lines.append("- " + stripped.lstrip("• ").strip())
-            continue
-
-        normalized_lines.append(line)
+        heading = _SECTION_HEADINGS.get(stripped.lower().rstrip(":"))
+        if heading:
+            normalized.append(heading)
+        elif stripped.startswith("•"):
+            normalized.append("- " + stripped.lstrip("• ").strip())
+        else:
+            normalized.append(line)
 
     compact: list[str] = []
-    blank_count = 0
-    for line in normalized_lines:
-        if not line.strip():
-            blank_count += 1
-            if blank_count > 1:
-                continue
-        else:
-            blank_count = 0
-        compact.append(line)
-
+    previous_blank = False
+    for line in normalized:
+        blank = not line.strip()
+        if not (blank and previous_blank):
+            compact.append(line)
+        previous_blank = blank
     return "\n".join(compact).strip()
 
 
+def _split_sections(formatted: str) -> list[tuple[str, str]]:
+    """(heading, body) for each '#### ' section; text before the first heading is dropped."""
+    sections: list[tuple[str, str]] = []
+    heading = ""
+    lines: list[str] = []
+    for raw in formatted.split("\n"):
+        line = raw.rstrip()
+        if line.startswith("#### "):
+            if heading:
+                sections.append((heading, "\n".join(lines).strip()))
+            heading, lines = line, []
+        else:
+            lines.append(line)
+    if heading:
+        sections.append((heading, "\n".join(lines).strip()))
+    return sections
+
+
+def _initial_budgets(sections: list[tuple[str, str]], max_chars: int) -> list[int]:
+    """Body-length budget per section: the body room split by weight, never below the minimum or above the body."""
+    total_weight = sum(_SECTION_WEIGHTS.get(heading, 1.0) for heading, _ in sections) or 1.0
+    body_room = max(len(sections) * _MIN_BODY_CHARS, max_chars // 2)
+    return [
+        max(
+            _MIN_BODY_CHARS,
+            min(len(body), max(_MIN_BODY_CHARS, int(body_room * (_SECTION_WEIGHTS.get(heading, 1.0) / total_weight)))),
+        )
+        for heading, body in sections
+    ]
+
+
+def _render_sections(sections: list[tuple[str, str]], budgets: list[int]) -> str:
+    parts: list[str] = []
+    for idx, (heading, body) in enumerate(sections):
+        parts.append(heading)
+        if body:
+            parts.append(_ellipsize(body, budgets[idx]))
+        if idx < len(sections) - 1:
+            parts.append("")
+    return "\n".join(parts).strip()
+
+
 def _compact_ai_narrative_markdown(text: str, max_chars: int) -> str:
+    """Shrink the narrative to *max_chars* while keeping every section heading."""
     formatted = _format_ai_narrative_markdown(text)
     if not formatted or max_chars <= 0:
         return ""
     if len(formatted) <= max_chars:
         return formatted
-
-    sections: list[tuple[str, str]] = []
-    current_heading = ""
-    current_lines: list[str] = []
-    for raw in formatted.split("\n"):
-        line = raw.rstrip()
-        if line.startswith("#### "):
-            if current_heading:
-                sections.append((current_heading, "\n".join(current_lines).strip()))
-            current_heading = line
-            current_lines = []
-            continue
-        current_lines.append(line)
-    if current_heading:
-        sections.append((current_heading, "\n".join(current_lines).strip()))
-
+    sections = _split_sections(formatted)
     if not sections:
         return _ellipsize(formatted, max_chars)
 
-    weights = {
-        "#### Plain-Language Summary": 1.3,
-        "#### Operational Impact": 1.2,
-        "#### Risk Assessment Rationale": 1.2,
-        "#### Recommended Reviewer Checks": 1.0,
-        "#### Rollback Considerations": 0.9,
-    }
-    min_body_chars = 24
-    total_weight = sum(weights.get(heading, 1.0) for heading, _ in sections) or 1.0
-    body_room = max(len(sections) * min_body_chars, max_chars // 2)
-    budgets: list[int] = []
-    for heading, body in sections:
-        target = int(body_room * (weights.get(heading, 1.0) / total_weight))
-        budgets.append(max(min_body_chars, min(len(body), max(min_body_chars, target))))
-
-    def _render(current_budgets: list[int]) -> str:
-        parts: list[str] = []
-        for idx, (heading, body) in enumerate(sections):
-            parts.append(heading)
-            if body:
-                parts.append(_ellipsize(body, current_budgets[idx]))
-            if idx < len(sections) - 1:
-                parts.append("")
-        return "\n".join(parts).strip()
-
-    compact = _render(budgets)
+    budgets = _initial_budgets(sections, max_chars)
+    compact = _render_sections(sections, budgets)
     while len(compact) > max_chars:
-        candidates = [idx for idx, budget in enumerate(budgets) if budget > min_body_chars]
-        if not candidates:
+        shrinkable = [idx for idx, budget in enumerate(budgets) if budget > _MIN_BODY_CHARS]
+        if not shrinkable:
             break
-        idx = max(candidates, key=lambda i: budgets[i])
-        budgets[idx] = max(min_body_chars, budgets[idx] - 20)
-        compact = _render(budgets)
-
-    if len(compact) <= max_chars:
-        return compact
-    return _ellipsize(compact, max_chars)
+        idx = max(shrinkable, key=lambda i: budgets[i])  # trim the longest section first
+        budgets[idx] = max(_MIN_BODY_CHARS, budgets[idx] - 20)
+        compact = _render_sections(sections, budgets)
+    return compact if len(compact) <= max_chars else _ellipsize(compact, max_chars)
 
 
 def _is_timeout_like_error(exc: Exception) -> bool:

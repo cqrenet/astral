@@ -241,6 +241,35 @@ class UpdatePrReviewSummaryTests(unittest.TestCase):
         self.assertIn("admin-driven", instruction)
         self.assertIn("mixed/uncertain", instruction)
 
+    def test_format_ai_narrative_normalizes_headings_bullets_and_blank_runs(self) -> None:
+        raw = "Plain language summary:\r\n• first\n\n\n\n  • second  \noperational impact\nkept as is"
+        self.assertEqual(
+            self.pr_ai._format_ai_narrative_markdown(raw),
+            "#### Plain-Language Summary\n- first\n\n- second\n#### Operational Impact\nkept as is",
+        )
+        self.assertEqual(self.pr_ai._format_ai_narrative_markdown(""), "")
+
+    def test_split_sections_and_budgets(self) -> None:
+        formatted = "intro dropped\n#### Operational Impact\nbody a\n#### Rollback Considerations\n"
+        sections = self.pr_ai._split_sections(formatted)
+        self.assertEqual(sections, [("#### Operational Impact", "body a"), ("#### Rollback Considerations", "")])
+        budgets = self.pr_ai._initial_budgets(sections, 100)
+        self.assertEqual(budgets, [24, 24])  # every section keeps at least the 24-character minimum
+        long_sections = [("#### Operational Impact", "x" * 500), ("#### Rollback Considerations", "y" * 500)]
+        big = self.pr_ai._initial_budgets(long_sections, 400)
+        self.assertTrue(all(24 <= b <= 500 for b in big) and big[0] > big[1])  # heavier section gets more room
+        self.assertEqual(self.pr_ai._split_sections("no headings here"), [])
+
+    def test_compact_narrative_never_exceeds_the_limit_and_keeps_headings(self) -> None:
+        text = "\n".join(f"{h}\n" + "x " * 300 for h in ("Plain-language summary", "Operational impact", "Rollback considerations"))
+        for limit in (60, 150, 400):
+            compact = self.pr_ai._compact_ai_narrative_markdown(text, limit)
+            self.assertLessEqual(len(compact), limit)
+        compact = self.pr_ai._compact_ai_narrative_markdown(text, 400)
+        for heading in ("#### Plain-Language Summary", "#### Operational Impact", "#### Rollback Considerations"):
+            self.assertIn(heading, compact)
+        self.assertEqual(self.pr_ai._compact_ai_narrative_markdown(text, 0), "")
+
     def test_compact_ai_narrative_markdown_preserves_all_reviewer_sections(self) -> None:
         text = (
             "Plain-language summary\n"
