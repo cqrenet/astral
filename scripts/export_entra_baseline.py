@@ -336,33 +336,27 @@ def resolve_owners(
     return [_normalize_owner(owner) for owner in owners], error
 
 
+# permission type -> (collection on the resource service principal, its field names for value/name/description)
+_APP_ROLE_FIELDS = ("appRoles", ("value", "displayName", "description"))
+_SCOPE_FIELDS = ("oauth2PermissionScopes", ("value", "adminConsentDisplayName", "adminConsentDescription"))
+
+
 def _find_permission_by_id(
     resource_sp: dict[str, Any],
     permission_id: str,
     permission_type: str,
 ) -> dict[str, str]:
-    result = {
-        "id": permission_id,
-        "type": permission_type,
-        "value": "",
-        "displayName": "",
-        "description": "",
-    }
-    if permission_type.lower() == "role":
-        for role in resource_sp.get("appRoles", []):
-            if str(role.get("id") or "").lower() == permission_id.lower():
-                result["value"] = str(role.get("value") or "")
-                result["displayName"] = str(role.get("displayName") or "")
-                result["description"] = str(role.get("description") or "")
-                return result
-        return result
-
-    for scope in resource_sp.get("oauth2PermissionScopes", []):
-        if str(scope.get("id") or "").lower() == permission_id.lower():
-            result["value"] = str(scope.get("value") or "")
-            result["displayName"] = str(scope.get("adminConsentDisplayName") or "")
-            result["description"] = str(scope.get("adminConsentDescription") or "")
-            return result
+    """Value, display name and description of a permission on a resource (blank when it is not found)."""
+    result = {"id": permission_id, "type": permission_type, "value": "", "displayName": "", "description": ""}
+    collection, (value_key, name_key, description_key) = (
+        _APP_ROLE_FIELDS if permission_type.lower() == "role" else _SCOPE_FIELDS
+    )
+    for entry in resource_sp.get(collection, []):
+        if str(entry.get("id") or "").lower() == permission_id.lower():
+            result["value"] = str(entry.get(value_key) or "")
+            result["displayName"] = str(entry.get(name_key) or "")
+            result["description"] = str(entry.get(description_key) or "")
+            break
     return result
 
 

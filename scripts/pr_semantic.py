@@ -266,31 +266,35 @@ def _is_entra_enrichment_only_json_change(old_excerpt: str, new_excerpt: str) ->
     return old_payload != new_payload
 
 
+# (path into the app payload, label) in the order they are reported
+_APP_SECURITY_PRESENCE_FIELDS = (
+    (("requiredResourceAccess",), "requiredResourceAccess"),
+    (("appRoles",), "appRoles"),
+    (("passwordCredentials",), "passwordCredentials"),
+    (("keyCredentials",), "keyCredentials"),
+    (("web", "redirectUris"), "redirectUris"),
+    (("identifierUris",), "identifierUris"),
+    (("api", "preAuthorizedApplications"), "preAuthorizedApplications"),
+)
+
+
+def _nested_value(payload: dict[str, Any], path: tuple[str, ...]) -> Any:
+    """Value at a key path; a non-dict on the way counts as an empty section."""
+    node: Any = payload
+    for key in path:
+        node = node.get(key, {}) if isinstance(node, dict) else {}
+    return node
+
+
 def _summarize_app_security_fields(excerpt: str) -> str:
     """Summarize security-relevant fields in an App Registration or Enterprise Application."""
-    signals: list[str] = []
     try:
         payload = json.loads(excerpt)
     except Exception:
         return ""
     if not isinstance(payload, dict):
         return ""
-    if payload.get("requiredResourceAccess"):
-        signals.append("requiredResourceAccess present")
-    if payload.get("appRoles"):
-        signals.append("appRoles present")
-    if payload.get("passwordCredentials"):
-        signals.append("passwordCredentials present")
-    if payload.get("keyCredentials"):
-        signals.append("keyCredentials present")
-    web = payload.get("web", {}) if isinstance(payload.get("web"), dict) else {}
-    if web.get("redirectUris"):
-        signals.append("redirectUris present")
-    if payload.get("identifierUris"):
-        signals.append("identifierUris present")
-    api = payload.get("api", {}) if isinstance(payload.get("api"), dict) else {}
-    if api.get("preAuthorizedApplications"):
-        signals.append("preAuthorizedApplications present")
+    signals = [f"{label} present" for path, label in _APP_SECURITY_PRESENCE_FIELDS if _nested_value(payload, path)]
     sign_in_audience = payload.get("signInAudience")
     if sign_in_audience and str(sign_in_audience) != "AzureADMyOrg":
         signals.append(f"signInAudience={sign_in_audience}")
