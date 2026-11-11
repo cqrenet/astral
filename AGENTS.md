@@ -123,6 +123,7 @@ python3 -m unittest discover -s tests -v
 - `test_pipeline_policies.py`: structural rules for the CI definitions (no templated string inputs in scripts, reviewer allowlist mapped, script flags match their argparse, referenced scripts exist) and the upstream-update ref validation. Needs PyYAML (`pip install pyyaml`); skipped without it.
 - `test_ci_sh.py`, `test_restore_checkout_ref.py`, `test_run_intunecd_update.py`, `test_commit_intune_drift_ps1.py`: the shell and PowerShell pipeline scripts (the PowerShell tests skip without `pwsh`).
 - `test_precheck_azure_openai.py`: the Azure OpenAI availability precheck.
+- `test_deploy_packages.py`: the files shipped in the Function App zip and the MCP image are self-contained (import closure, run in isolation), the provisioning scripts stage them, and the deploy PowerShell stays Windows PowerShell 5.1 compatible (BOM, no multi-part `Join-Path`).
 - `test_probe_tenant_changes.py`: the full debouncer state table.
 - `test_change_probe_function.py`: the Function App entry points (Azure SDKs stubbed).
 - `test_astral_mcp_tools.py`, `test_mcp_server.py`: MCP client for local and remote sources; server auth middleware and Entra claim rules.

@@ -1,4 +1,4 @@
-#requires -Version 5.1
+﻿#requires -Version 5.1
 <#
 .SYNOPSIS
     Bootstraps an Azure AD app registration for ASTRAL with required Microsoft Graph permissions.

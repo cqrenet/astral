@@ -1,4 +1,4 @@
-#requires -Version 5.1
+﻿#requires -Version 5.1
 <#
 .SYNOPSIS
     One-stop provisioning script for ASTRAL (change probe + optional MCP server).
@@ -580,15 +580,15 @@ if ($mcpDeploy) {
     $repoRoot  = Split-Path -Parent $PSScriptRoot
     $buildTemp = Join-Path ([System.IO.Path]::GetTempPath()) "astral-mcp-build-$([System.Guid]::NewGuid().ToString('n').Substring(0,8))"
     try {
-        $mcpDir     = Join-Path $buildTemp "infra" "mcp-server"
+        $mcpDir     = [System.IO.Path]::Combine($buildTemp, "infra", "mcp-server")
         $scriptsDir = Join-Path $buildTemp "scripts"
         New-Item -ItemType Directory -Path $mcpDir     -Force | Out-Null
         New-Item -ItemType Directory -Path $scriptsDir -Force | Out-Null
-        Copy-Item (Join-Path $repoRoot "infra" "mcp-server" "Dockerfile")       $mcpDir -Force
-        Copy-Item (Join-Path $repoRoot "infra" "mcp-server" "requirements.txt") $mcpDir -Force
-        Copy-Item (Join-Path $repoRoot "infra" "mcp-server" "mcp_server.py")    $mcpDir -Force
-        Copy-Item (Join-Path $repoRoot "scripts" "common.py")                   $scriptsDir -Force
-        Copy-Item (Join-Path $repoRoot "scripts" "astral_mcp_tools.py")         $scriptsDir -Force
+        Copy-Item ([System.IO.Path]::Combine($repoRoot, "infra", "mcp-server", "Dockerfile"))       $mcpDir -Force
+        Copy-Item ([System.IO.Path]::Combine($repoRoot, "infra", "mcp-server", "requirements.txt")) $mcpDir -Force
+        Copy-Item ([System.IO.Path]::Combine($repoRoot, "infra", "mcp-server", "mcp_server.py"))    $mcpDir -Force
+        Copy-Item ([System.IO.Path]::Combine($repoRoot, "scripts", "common.py"))                   $scriptsDir -Force
+        Copy-Item ([System.IO.Path]::Combine($repoRoot, "scripts", "astral_mcp_tools.py"))         $scriptsDir -Force
         Push-Location $buildTemp
         try {
             & az acr build --registry $McpAcrName --image "$McpImageName`:latest" `
@@ -678,7 +678,7 @@ if ($mcpDeploy) {
 
 if (-not $DeployMcpOnly) {
     $repoRoot  = Split-Path -Parent $PSScriptRoot
-    $probePath = Join-Path $repoRoot "infra" "change-probe"
+    $probePath = [System.IO.Path]::Combine($repoRoot, "infra", "change-probe")
     if (Test-Path $probePath) {
         $ans = Read-Host "`nDeploy function code now? [Y/n]"
         if ($ans -eq "" -or $ans -match "^[Yy]") {
@@ -695,6 +695,13 @@ if (-not $DeployMcpOnly) {
                     $dest = Join-Path $stagePath $item.Name
                     if ($item.PSIsContainer) { Copy-Item $item.FullName $dest -Recurse -Force }
                     else                     { Copy-Item $item.FullName $dest -Force }
+                }
+                # The functions run scripts/probe_tenant_changes.py and scripts/trigger_backup_pipeline.py. That folder is
+                # generated (not part of infra/change-probe), so stage the shared scripts into the package here.
+                $stageScripts = Join-Path $stagePath "scripts"
+                New-Item -ItemType Directory -Path $stageScripts -Force | Out-Null
+                foreach ($scriptName in "common.py", "probe_tenant_changes.py", "trigger_backup_pipeline.py") {
+                    Copy-Item -LiteralPath ([System.IO.Path]::Combine($repoRoot, "scripts", $scriptName)) -Destination $stageScripts -Force
                 }
                 $ls = Join-Path $stagePath "local.settings.json"
                 if (Test-Path $ls) { Remove-Item $ls }
