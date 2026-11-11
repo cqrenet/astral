@@ -10,9 +10,16 @@
 $ErrorActionPreference = 'Stop'          # same as the Azure DevOps PowerShell@2 default
 $PSNativeCommandArgumentPassing = 'Standard'
 
+# Same rule as common.scm_platform() / ci.sh: ASTRAL_SCM overrides detection; Gitea sets GITHUB_ACTIONS too.
+function Test-ActionsRunner {
+  if ($env:ASTRAL_SCM -in @('github', 'gitea')) { return $true }
+  if ($env:ASTRAL_SCM -eq 'ado') { return $false }
+  return $env:GITHUB_ACTIONS -eq 'true'
+}
+
 function Set-CiOutput([string] $Name, [string] $Value) {
   $Value = $Value -replace "[`r`n]", ' '
-  if ($env:GITHUB_ACTIONS -eq 'true' -and $env:GITHUB_OUTPUT) {
+  if ((Test-ActionsRunner) -and $env:GITHUB_OUTPUT) {
     Add-Content -LiteralPath $env:GITHUB_OUTPUT -Value "$Name=$Value"
   } else {
     Write-Host "##vso[task.setVariable variable=$Name]$Value"
@@ -119,15 +126,20 @@ if ($changedFile) {
     $p.StartInfo.FileName = $filePath
     $p.StartInfo.Arguments = $argumentList
     [void]$p.Start()
+    # Drain both pipes while the process runs: waiting for exit first deadlocks once the child
+    # writes more than a pipe buffer holds.
+    $stdoutTask = $p.StandardOutput.ReadToEndAsync()
+    $stderrTask = $p.StandardError.ReadToEndAsync()
     if (!$dontWait) { $p.WaitForExit() }
 
-    $result = $p.StandardOutput.ReadToEnd()
+    $result = $stdoutTask.GetAwaiter().GetResult()
     if ($result) { $result }
 
+    $err = $stderrTask.GetAwaiter().GetResult()
     if ($outputErr2Std) {
-      $p.StandardError.ReadToEnd()
-    } else {
-      if ($err = $p.StandardError.ReadToEnd()) { Write-Error $err }
+      $err
+    } elseif ($err) {
+      Write-Error $err
     }
   }
 
@@ -376,6 +388,7 @@ if ($changedFile) {
   }
 
   "`nCommit changes"
+  $script:nothingToCommit = $false
   $modificationData | Group-Object modificationAuthorKey | % {
     $modificationAuthorValue = @($_.Group | % { $_.modificationAuthorValue } | ? { $_ } | Select-Object -Unique)
     $modificationAuthorName = @($_.Group | % { $_.modificationAuthorName } | ? { $_ } | Select-Object -Unique)
@@ -408,11 +421,14 @@ if ($changedFile) {
       Write-Warning "Nothing to commit?! This shouldn't happen."
       Set-CiOutput "CHANGE_DETECTED" "0"
       Set-CiOutput "ROLLING_PR_SYNC_REQUIRED" "0"
+      $script:nothingToCommit = $true
     } else {
       Set-CiOutput "COMMIT_DATE" "$DATEF"
       Set-CiOutput "MODIFICATION_AUTHOR" "$(($modificationData.modificationAuthorValue | select -Unique | Sort-Object) -join ', ')"
     }
   }
+
+  if ($script:nothingToCommit) { exit 0 }   # the loop cannot leave the script itself; do not push or report a change
 
   "`nPush changes to drift branch"
   git push --force-with-lease origin "HEAD:$($env:DRIFT_BRANCH_INTUNE)"

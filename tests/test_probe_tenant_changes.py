@@ -126,5 +126,38 @@ class DebouncerTransitionTests(unittest.TestCase):
         self.assertIn("bogus", reason)
 
 
+class StdoutContractTests(unittest.TestCase):
+    """run_probe.sh and the Function App parse the probe's stdout as JSON: nothing else may be written there."""
+
+    def _run_cli(self, fake_request: str):
+        import json as _json
+        import subprocess
+
+        code = (
+            "import sys\n"
+            f"sys.path.insert(0, {str(MODULE_PATH.parent)!r})\n"
+            "import probe_tenant_changes as p\n"
+            f"p.request_json = {fake_request}\n"
+            "sys.argv = ['probe', '--token', 't', '--state-json', '{}']\n"
+            "raise SystemExit(p.main())\n"
+        )
+        result = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True)
+        return result, _json
+
+    def test_stdout_is_only_the_json_result(self) -> None:
+        result, _json = self._run_cli("lambda *a, **k: {'value': []}")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        output = _json.loads(result.stdout)  # raises if anything else is on stdout
+        self.assertIn("trigger", output)
+        self.assertIn("new_state", output)
+
+    def test_graph_failures_are_reported_on_stderr_not_stdout(self) -> None:
+        result, _json = self._run_cli("lambda *a, **k: (_ for _ in ()).throw(RuntimeError('graph down'))")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        _json.loads(result.stdout)
+        self.assertIn("graph down", result.stderr)
+        self.assertNotIn("graph down", result.stdout)
+
+
 if __name__ == "__main__":
     unittest.main()
