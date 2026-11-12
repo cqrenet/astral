@@ -1,7 +1,8 @@
 # ASTRAL MCP Server — Azure Container Apps image
 # Build context should be the repository root so we can COPY scripts/
 
-FROM python:3.11-slim
+# Pinned by digest; Dependabot proposes updates. Tag: python:3.11-slim
+FROM python:3.11-slim@sha256:07d4824036af339fa1b6ef769cc99d9c10a141769538b52b3b597c84f7a7b535
 
 WORKDIR /app
 
@@ -10,7 +11,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends git && rm -rf /
 
 # Install dependencies
 COPY infra/mcp-server/requirements.txt ./
-RUN pip install --no-cache-dir -r requirements.txt
+RUN pip install --no-cache-dir --require-hashes -r requirements.txt
 
 # Copy shared scripts and MCP server entry point
 COPY scripts/common.py ./scripts/

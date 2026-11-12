@@ -1,0 +1,7 @@
+# Changes to these paths need review from the maintainers (enable "Require review from Code Owners" on main).
+*                           @avedelphina
+/deploy/                    @avedelphina
+/.github/                   @avedelphina
+/infra/                     @avedelphina
+/scripts/common.py          @avedelphina
+/azure-pipelines*.yml       @avedelphina

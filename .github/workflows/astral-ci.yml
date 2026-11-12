@@ -1,4 +1,4 @@
-# ASTRAL CI: unit tests and lint on every push and pull request to the public template repository.
+# ASTRAL CI: tests, lint, dependency audit and secret scan on the public template repository.
 # Skipped everywhere else (customer copies, GHES) so it never queues on a runner that does not exist.
 name: ASTRAL CI
 
@@ -6,6 +6,8 @@ on:
   push:
     branches: [main]
   pull_request:
+  schedule:
+    - cron: "17 5 * * 1"   # weekly: new advisories against the pinned dependencies
 
 permissions:
   contents: read
@@ -27,7 +29,7 @@ jobs:
       - name: Python environment
         run: |
           python3 -m venv "$RUNNER_TEMP/ci-venv"
-          "$RUNNER_TEMP/ci-venv/bin/pip" install --quiet PyYAML ruff shellcheck-py
+          "$RUNNER_TEMP/ci-venv/bin/pip" install --quiet PyYAML shellcheck-py bandit pip-audit
           echo "$RUNNER_TEMP/ci-venv/bin" >> "$GITHUB_PATH"
 
       - name: Unit tests
@@ -35,3 +37,27 @@ jobs:
 
       - name: Shell scripts
         run: shellcheck -x --severity=warning scripts/*.sh
+
+      - name: Static analysis (high severity)
+        run: bandit -q -r scripts infra deploy -lll
+
+      - name: Dependency audit
+        run: |
+          for lock in infra/mcp-server/requirements.txt infra/change-probe/requirements.txt; do
+            pip-audit -r "$lock" --no-deps --disable-pip
+          done
+
+  secrets:
+    if: github.repository == 'cqrenet/astral' && github.event_name != 'schedule'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262   # v4.4.0
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Scan for committed secrets
+        uses: trufflesecurity/trufflehog@ea68ca03c865c5f324e86e849ced20ed3cf9dbbb   # v3.99.8
+        with:
+          extra_args: --results=verified,unknown

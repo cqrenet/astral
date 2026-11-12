@@ -132,12 +132,25 @@ class DeployPackageTests(unittest.TestCase):
             self.assertNotRegex(path.read_text(encoding="utf-8"), r"IntuneCD==\d")
 
     def test_requirements_are_bounded(self) -> None:
-        for path in sorted((ROOT / "infra").glob("*/requirements.txt")):
+        # requirements.in holds the direct dependencies: pinned or capped at the next major version.
+        for path in sorted((ROOT / "infra").glob("*/requirements.in")):
             for line in path.read_text(encoding="utf-8").splitlines():
                 line = line.strip()
                 if line and not line.startswith("#"):
                     with self.subTest(file=str(path.relative_to(ROOT)), requirement=line):
                         self.assertRegex(line, r"==|<", "pin it or cap its next major version")
+
+    def test_requirements_lock_files_are_hash_pinned(self) -> None:
+        # requirements.txt is the uv-compiled lock: every package pinned with sha256 hashes, so installs are reproducible.
+        for path in sorted((ROOT / "infra").glob("*/requirements.txt")):
+            text = path.read_text(encoding="utf-8")
+            entries = re.findall(r"^([A-Za-z0-9_.\[\]-]+)(==[^\s\\]+)?[^\n]*\\\n((?:\s+--hash=sha256:[0-9a-f]{64}\s*\\?\n?)+)",
+                                 text, flags=re.MULTILINE)
+            packages = [m for m in re.findall(r"^([A-Za-z0-9_.\[\]-]+)==", text, flags=re.MULTILINE)]
+            self.assertTrue(packages, f"{path} has no pinned packages")
+            with self.subTest(file=str(path.relative_to(ROOT))):
+                self.assertEqual(len(packages), len(entries), "every pinned package needs sha256 hashes")
+            self.assertTrue((path.parent / "requirements.in").is_file(), f"{path.parent} lacks requirements.in")
 
     def test_runtime_module_installs_are_version_bounded(self) -> None:
         text = (ROOT / "scripts/commit_intune_drift.ps1").read_text(encoding="utf-8")
