@@ -349,6 +349,82 @@ def _flat_key_changes(old_flat: dict[str, Any], new_flat: dict[str, Any]) -> lis
     return state_changes + value_changes + structure_changes
 
 
+def _summarize_policy_fields(excerpt: str) -> str:
+    """Summarize key operational signals from a newly-added Intune or Entra policy JSON."""
+    signals: list[str] = []
+    try:
+        payload = json.loads(excerpt)
+    except Exception:
+        return ""
+    if not isinstance(payload, dict):
+        return ""
+
+    name = payload.get("name") or payload.get("displayName") or ""
+    if "test" in str(name).lower():
+        signals.append("test policy")
+
+    assignments = payload.get("assignments")
+    if isinstance(assignments, list) and assignments:
+        targets: list[str] = []
+        for a in assignments:
+            if not isinstance(a, dict):
+                continue
+            target = a.get("target", {})
+            if not isinstance(target, dict):
+                continue
+            odata_type = target.get("@odata.type", "")
+            group_name = target.get("groupName", "")
+            if "allLicensedUsersAssignmentTarget" in odata_type:
+                targets.append("all licensed users")
+            elif "allDevicesAssignmentTarget" in odata_type:
+                targets.append("all devices")
+            elif "groupAssignmentTarget" in odata_type:
+                targets.append(f"group {group_name}" if group_name else "group")
+            elif "exclusionGroupAssignmentTarget" in odata_type:
+                targets.append(f"excludes group {group_name}" if group_name else "excludes group")
+            else:
+                short = odata_type.split(".")[-1].replace("AssignmentTarget", "")
+                targets.append(short.lower() or "unknown target")
+        if targets:
+            signals.append(f"assigned to {', '.join(targets)}")
+
+    settings = payload.get("settings")
+    setting_count = payload.get("settingCount")
+    if isinstance(setting_count, int):
+        count = setting_count
+    elif isinstance(settings, list) and settings:
+        count = len(settings)
+    else:
+        count = None
+
+    if count is not None:
+        setting_label = f"{count} setting{'s' if count != 1 else ''}"
+        if isinstance(settings, list) and settings:
+            first = settings[0]
+            if isinstance(first, dict):
+                inst = first.get("settingInstance", {})
+                if isinstance(inst, dict):
+                    def_id = inst.get("settingDefinitionId", "")
+                    if def_id:
+                        short_id = def_id
+                        for prefix in (
+                            "device_vendor_msft_policy_config_",
+                            "user_vendor_msft_policy_config_",
+                            "device_vendor_msft_",
+                            "user_vendor_msft_",
+                        ):
+                            if short_id.startswith(prefix):
+                                short_id = short_id[len(prefix):]
+                                break
+                        else:
+                            if "_" in short_id:
+                                short_id = short_id.split("_")[-1]
+                        setting_label += f" ({short_id})"
+        signals.append(setting_label)
+
+    return "; ".join(signals)
+
+
 def _extract_semantic_change(old_excerpt: str, new_excerpt: str, path: str = "") -> str:
     """
     Derive a semantic description of configuration changes by flattening JSON
@@ -358,8 +434,10 @@ def _extract_semantic_change(old_excerpt: str, new_excerpt: str, path: str = "")
     """
     if not old_excerpt and new_excerpt:
         is_app_path = any(m in path.lower() for m in ("/app registrations/", "/enterprise applications/"))
-        app_signals = _summarize_app_security_fields(new_excerpt) if is_app_path else ""
-        return f"New configuration object added ({app_signals})" if app_signals else "New configuration object added"
+        signals = (_summarize_app_security_fields(new_excerpt) if is_app_path else "") or _summarize_policy_fields(
+            new_excerpt
+        )
+        return f"New configuration object added ({signals})" if signals else "New configuration object added"
     if old_excerpt and not new_excerpt:
         return "Configuration object removed"
 

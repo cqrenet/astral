@@ -63,22 +63,22 @@ The server reads configuration from environment variables:
 
 ## Deployment (Standard)
 
-The MCP server is deployed automatically by the ASTRAL provisioning script. During `deploy/provision-change-probe.ps1`, you are prompted whether to deploy the MCP server to Azure Container Apps.
+The MCP server is deployed automatically by the ASTRAL provisioning script. During `deploy/provision.ps1`, you are prompted whether to deploy the MCP server to Azure Container Apps.
 
 ### Automated deployment via provisioning script
 
 ```powershell
 # Deploy everything including MCP server (interactive prompt)
-.\deploy\provision-change-probe.ps1
+.\deploy\provision.ps1
 
 # Explicitly deploy MCP server (skip interactive prompt)
-.\deploy\provision-change-probe.ps1 -DeployMcpServer
+.\deploy\provision.ps1 -DeployMcpServer
 
 # Skip MCP server deployment entirely
-.\deploy\provision-change-probe.ps1 -SkipMcpServer
+.\deploy\provision.ps1 -SkipMcpServer
 
 # Deploy ONLY the MCP server (change probe already exists)
-.\deploy\provision-change-probe.ps1 -DeployMcpOnly
+.\deploy\provision.ps1 -DeployMcpOnly
 ```
 
 The script provisions:
@@ -261,7 +261,7 @@ python -c "import secrets; print(secrets.token_urlsafe(32))"
 
 **2. Microsoft Entra ID (enterprise / human users)**
 
-The server can publish an OAuth 2.0 discovery document (`/.well-known/oauth-authorization-server`, RFC 8414) so that MCP clients discover the Entra auth endpoints automatically. Set `ENTRA_TENANT_ID` and `MCP_CLIENT_ID` to activate it. The server validates tokens itself (signature, audience, tenant, issuer, and the `user_impersonation` scope), so leave Container Apps built-in authentication off or set to allow anonymous requests; otherwise the discovery endpoint is not reachable.
+The server can publish an OAuth 2.0 discovery document (`/.well-known/oauth-authorization-server`, RFC 8414) so that MCP clients discover the Entra auth endpoints automatically. Set `ENTRA_TENANT_ID` and `MCP_CLIENT_ID` to activate it. Actual token enforcement is handled by Azure Container Apps built-in authentication (`az containerapp auth update ...`).
 
 With discovery active, Claude Desktop initiates the OAuth flow on its own — no `headers` entry needed in the config:
 

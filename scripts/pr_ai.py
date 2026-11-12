@@ -14,19 +14,23 @@ from urllib.request import Request, urlopen
 import common
 from pr_change_source import _format_change_source_label
 from pr_changes import ChangeItem, _change_scope, _ellipsize, _risk_label
+from pr_i18n import _respond_in, _t
 
-def _reviewer_system_prompt() -> str:
-    return (
+def _reviewer_system_prompt(language: str | None = None) -> str:
+    """System prompt; *language* defaults to PR_SUMMARY_LANGUAGE (English adds nothing)."""
+    base = (
         "You analyze configuration drift pull requests for enterprise identity and endpoint "
         "management systems such as Microsoft Intune and Entra ID. Your job is to help "
         "reviewers quickly understand operational impact and security implications of "
         "configuration changes, including whether the evidence suggests platform-managed "
         "infrastructure drift, tenant-admin intent, or a mixed/uncertain source."
     )
+    target = _respond_in(language)
+    return f"{base} Respond in {target}." if target else base
 
 
-def _reviewer_instruction() -> str:
-    return (
+def _reviewer_instruction(language: str | None = None) -> str:
+    base = (
         "Produce a concise PR reviewer summary for configuration changes. "
         "Assume the reviewer may not be a deep technical expert.\n\n"
         "Context signals are provided such as scope, posture change classification, "
@@ -58,10 +62,12 @@ def _reviewer_instruction() -> str:
         "- Only claim policy is unassigned/no devices when assignment targets are removed and none remain.\n"
         "- Keep the summary under 200 words."
     )
+    target = _respond_in(language)
+    return f"{base}\n- Respond entirely in {target}." if target else base
 
 
-def _minimal_reviewer_instruction() -> str:
-    return (
+def _minimal_reviewer_instruction(language: str | None = None) -> str:
+    base = (
         "Write a concise reviewer narrative using only supplied data. "
         "Use sections: Plain-language summary, Operational impact, Risk assessment rationale, "
         "Recommended reviewer checks, Rollback considerations. "
@@ -69,6 +75,8 @@ def _minimal_reviewer_instruction() -> str:
         "primarily admin-driven, or mixed/uncertain based on the evidence. "
         "Keep under 170 words."
     )
+    target = _respond_in(language)
+    return f"{base} Respond entirely in {target}." if target else base
 
 
 def _normalize_aoai_endpoint(endpoint: str) -> str:
@@ -158,27 +166,27 @@ def _build_fallback_narrative(
     sensitivity_text = "security-relevant" if security_sensitive else "configuration-impacting"
 
     lines = [
-        "#### Plain-Language Summary",
+        f"#### {_t('Plain-Language Summary')}",
         (
-            f"{workload.upper()} drift includes {len(changes)} {change_scope.lower()} "
-            f"{sensitivity_text} change(s), with overall risk {highest_risk}. "
+            f"{workload.upper()} drift includes {len(changes)} {_t(change_scope).lower()} "
+            f"{_t(sensitivity_text)} change(s), with overall risk {_t(highest_risk)}. "
             f"Deterministic source assessment: {source_text} ({source_confidence} confidence)."
         ),
         "",
-        "#### Operational Impact",
+        f"#### {_t('Operational Impact')}",
         f"Most affected areas: {areas_text}. Validate expected behavior for impacted policies after merge.",
         "",
-        "#### Risk Assessment Rationale",
+        f"#### {_t('Risk Assessment Rationale')}",
         f"Risk is driven by changed policy areas and operations (especially deletes/renames in security-critical paths).",
         "",
-        "#### Recommended Reviewer Checks",
+        f"#### {_t('Recommended Reviewer Checks')}",
     ]
-    lines.extend(bullet_lines if bullet_lines else ["- Validate changed policy intent against expected baseline behavior."])
+    lines.extend(bullet_lines if bullet_lines else [f"- {_t('Validate changed policy intent against expected baseline behavior.')}"])
     lines.extend(
         [
             "",
-            "#### Rollback Considerations",
-            "If behavior is not expected, revert the drift commit/PR to restore baseline state.",
+            f"#### {_t('Rollback Considerations')}",
+            _t("If behavior is not expected, revert the drift commit/PR to restore baseline state."),
             "",
             f"_AI fallback used: {fallback_reason}_",
         ]

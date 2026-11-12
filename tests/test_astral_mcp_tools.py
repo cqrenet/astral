@@ -122,6 +122,81 @@ class AstralMcpToolsTests(unittest.TestCase):
                 [{"ObjectName": "P1", "ObjectType": "Windows"}],
             )
 
+    def _write(self, root: Path, rel: str, text: str) -> None:
+        path = root / rel
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text, encoding="utf-8")
+
+    def test_object_inventory_without_category_reads_the_combined_report(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            self._write(Path(td), "tenant-state/reports/intune/object-inventory-all.csv", "Name,Type\nA,x\n")
+            rows = self.module.AstralMcpClient(local_root=td).get_object_inventory("intune")
+        self.assertEqual(rows, [{"Name": "A", "Type": "x"}])
+
+    def test_identity_snapshots_are_sorted_and_name_filtered(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            self._write(root, "tenant-state/entra/Groups/b.json", json.dumps({"displayName": "beta", "memberCount": 2}))
+            self._write(root, "tenant-state/entra/Groups/a.json", json.dumps({"displayName": "Alpha"}))
+            self._write(root, "tenant-state/entra/Groups/skip.json", "[1, 2]")
+            self._write(root, "tenant-state/entra/Groups/bad.json", "{not json")
+            self._write(root, "tenant-state/entra/PIM Role Policies/g.json", json.dumps({"roleDisplayName": "Global Administrator"}))
+            self._write(root, "tenant-state/entra/PIM Role Policies/u.json", json.dumps({"roleDisplayName": "User Administrator"}))
+            self._write(root, "tenant-state/entra/Role Assignments/r.json", json.dumps({"displayName": "Helpdesk"}))
+            self._write(root, "tenant-state/entra/Security/Security Defaults.json", json.dumps({"isEnabled": False}))
+            client = self.module.AstralMcpClient(local_root=td)
+            groups = client.get_ca_groups()
+            pim = client.get_pim_policies("global")
+            roles = client.get_privileged_role_assignments()
+            security = client.get_security_settings()
+        self.assertEqual([g["displayName"] for g in groups], ["Alpha", "beta"])
+        self.assertEqual([p["roleDisplayName"] for p in pim], ["Global Administrator"])
+        self.assertEqual([r["displayName"] for r in roles], ["Helpdesk"])
+        self.assertEqual(security, {"securityDefaults": {"isEnabled": False}})
+
+    def test_settings_report_filters_and_setting_lookup_groups_by_policy(self) -> None:
+        csv_text = (
+            "Policy,Setting,Setting ID,Value,Category,OS\n"
+            "Win Baseline,Firewall,fw_id,on,Settings Catalog,Windows\n"
+            "Win Baseline,Edge sign-in,edge_id,off,Settings Catalog,Windows\n"
+            "Mac Baseline,Firewall,fw_id,on,Device Configurations,macOS\n"
+        )
+        with tempfile.TemporaryDirectory() as td:
+            self._write(Path(td), "tenant-state/reports/intune/policy-settings.csv", csv_text)
+            client = self.module.AstralMcpClient(local_root=td)
+            windows = client.get_settings_report(policy="win", os_filter="windows")
+            capped = client.get_settings_report(max_rows=1)
+            found = client.find_policies_for_setting("firewall")
+        self.assertEqual(len(windows), 2)
+        self.assertEqual(len(capped), 1)
+        self.assertEqual([f["Policy"] for f in found], ["Mac Baseline", "Win Baseline"])
+        self.assertEqual(found[0]["Matches"][0]["Category"], "Device Configurations")
+
+    def test_report_definitions_merge_local_over_builtin(self) -> None:
+        try:
+            import yaml  # noqa: F401
+        except ImportError:
+            self.skipTest("PyYAML not installed")
+        builtin = (
+            "reports:\n  - {name: assignments, workloads: [intune], outputs: [policy-assignments.md]}\n"
+            "  - {name: apps, workloads: [entra], outputs: [apps.csv]}\n"
+        )
+        local = "reports:\n  - {name: assignments, workloads: [intune], outputs: [custom.md]}\n"
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            self._write(root, "reports/definitions.yml", builtin)
+            self._write(root, "reports/definitions.local.yml", local)
+            self._write(root, "tenant-state/reports/intune/custom.md", "# custom")
+            client = self.module.AstralMcpClient(local_root=td)
+            intune = client.list_report_definitions("intune")
+            report = client.get_report("intune", "assignments")
+            generated = client.list_generated_reports("intune")
+            missing = client.get_report("intune", "nope")
+        self.assertEqual([(d["name"], d["source"]) for d in intune], [("assignments", "local")])
+        self.assertEqual(report, "# custom")
+        self.assertEqual([g["name"] for g in generated], ["custom.md"])
+        self.assertEqual(missing, "")
+
     def test_remote_recent_commits_sends_from_date(self) -> None:
         source = self.module._AdoSource("org", "proj", "tok", None, "main")
         seen: dict[str, str] = {}

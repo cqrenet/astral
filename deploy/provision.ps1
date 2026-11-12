@@ -46,6 +46,11 @@
     Numeric pipeline ID of azure-pipelines.yml. Find it as definitionId=XX in the
     pipeline URL.
 
+.PARAMETER AdoReviewSyncPipelineId
+    Numeric pipeline ID of azure-pipelines-review-sync.yml. When provided, the
+    pr_comment_webhook Function is configured to trigger review-sync immediately on
+    /accept or /reject PR comments. Leave blank to rely solely on the 20-min schedule.
+
 .PARAMETER AdoToken
     Azure DevOps PAT with Build (Read & Execute) scope.
 
@@ -81,15 +86,17 @@
 #>
 [CmdletBinding()]
 param (
-    [string]$AppDisplayName = "ASTRAL",
+    [string]$AppDisplayName = "ASTRAL - Admin Security: Tenant Review, Automation & Lifecycle",
     [string]$ResourceGroup  = "rg-astral",
     [string]$Location       = "swedencentral",
     [string]$SubscriptionId = "",
-    [string]$AdoOrganization = "",
-    [string]$AdoProject      = "",
-    [string]$AdoPipelineId   = "",
-    [string]$AdoToken        = "",
-    [string]$AdoBranch       = "main",
+    [string]$AdoOrganization         = "",
+    [string]$AdoProject              = "",
+    [string]$AdoPipelineId           = "",
+    [string]$AdoReviewSyncPipelineId = "",
+    [string]$AdoToken                = "",
+    [string]$AdoBranch               = "main",
+    [string]$WebhookSecret           = "",
     [int]$QuietWindowMinutes = 15,
     [int]$CooldownMinutes    = 30,
     [switch]$DeployMcpServer,
@@ -186,7 +193,7 @@ if (Test-Path $configPath) {
 }
 
 if ($savedConfig) {
-    foreach ($key in @('AdoOrganization','AdoProject','AdoPipelineId','AdoBranch',
+    foreach ($key in @('AdoOrganization','AdoProject','AdoPipelineId','AdoReviewSyncPipelineId','AdoBranch',
                        'ResourceGroup','Location','McpContainerAppName','McpAcrName',
                        'McpResourceGroup','McpLocation')) {
         if (-not $PSBoundParameters.ContainsKey($key) -and $savedConfig.$key) {
@@ -215,10 +222,11 @@ Import-Module Microsoft.Graph.Identity.SignIns
 # ---------------------------------------------------------------------------
 
 Write-Host "`n--- Azure DevOps ---" -ForegroundColor Cyan
-$AdoOrganization = Get-OrPrompt $AdoOrganization "Azure DevOps Organization (e.g. 'contoso')"
-$AdoProject      = Get-OrPrompt $AdoProject      "Azure DevOps Project"
-$AdoPipelineId   = Get-OrPrompt $AdoPipelineId   "Pipeline ID of azure-pipelines.yml (definitionId=XX in URL)"
-$AdoToken        = Get-OrPrompt $AdoToken        "Azure DevOps PAT (Build Read & Execute)" -Sensitive
+$AdoOrganization         = Get-OrPrompt $AdoOrganization         "Azure DevOps Organization (e.g. 'contoso')"
+$AdoProject              = Get-OrPrompt $AdoProject              "Azure DevOps Project"
+$AdoPipelineId           = Get-OrPrompt $AdoPipelineId           "Pipeline ID of azure-pipelines.yml (definitionId=XX in URL)"
+$AdoReviewSyncPipelineId = Get-OrPrompt $AdoReviewSyncPipelineId "Pipeline ID of azure-pipelines-review-sync.yml [blank to disable webhook trigger]"
+$AdoToken                = Get-OrPrompt $AdoToken                "Azure DevOps PAT (Build Read & Execute)" -Sensitive
 
 # ---------------------------------------------------------------------------
 # MCP server decision
@@ -306,13 +314,6 @@ if (-not $sp) {
     $sp = New-MgServicePrincipal -AppId $appId
 }
 
-# MCP: tokens for this app are issued to any tenant user unless assignment is required.
-# With this set, only users/groups assigned to the enterprise app can use the MCP server.
-if ($mcpDeploy) {
-    Update-MgServicePrincipal -ServicePrincipalId $sp.Id -AppRoleAssignmentRequired:$true
-    Write-Host "MCP access restricted: assign users/groups to enterprise app '$AppDisplayName'." -ForegroundColor Yellow
-}
-
 # Admin consent for Graph application permissions
 Write-Host "Granting admin consent..." -ForegroundColor Cyan
 foreach ($role in $appRoles) {
@@ -370,20 +371,46 @@ if (-not ($existingScopes | Where-Object { $_.Value -eq "user_impersonation" }))
     Write-Host "Scope added." -ForegroundColor Green
 }
 
+# Self-permission + admin consent for MCP OAuth (same app acts as client and resource)
+$appFull = Get-MgApplication -ApplicationId $appOid
+$scopeId = ($appFull.Api.Oauth2PermissionScopes | Where-Object { $_.Value -eq "user_impersonation" }).Id
+if ($scopeId) {
+    $hasSelf = $appFull.RequiredResourceAccess | Where-Object { $_.ResourceAppId -eq $appId }
+    if (-not $hasSelf) {
+        Write-Host "Adding self API permission for MCP OAuth..." -ForegroundColor Cyan
+        $selfPerm = @{
+            resourceAppId  = $appId
+            resourceAccess = @(@{ id = $scopeId; type = "Scope" })
+        }
+        Update-MgApplication -ApplicationId $appOid -RequiredResourceAccess (
+            @($appFull.RequiredResourceAccess) + @($selfPerm)
+        )
+        Write-Host "Self API permission added." -ForegroundColor Green
+    }
+
+    $existingGrant = Get-MgServicePrincipalOauth2PermissionGrant -ServicePrincipalId $sp.Id |
+        Where-Object { $_.ClientId -eq $sp.Id -and $_.ResourceId -eq $sp.Id }
+    if (-not $existingGrant) {
+        Write-Host "Granting admin consent for MCP OAuth scope..." -ForegroundColor Cyan
+        New-MgOauth2PermissionGrant -ClientId $sp.Id `
+            -ConsentType "AllPrincipals" -ResourceId $sp.Id -Scope "user_impersonation" | Out-Null
+        Write-Host "Admin consent granted for MCP OAuth." -ForegroundColor Green
+    }
+}
+
 # Redirect URIs:
 #   http://localhost                         — loopback, any port (RFC 8252 §8.3) — Cursor, etc.
 #   https://claude.ai/api/mcp/auth_callback — Claude Desktop OAuth callback
 Write-Host "Configuring redirect URIs..." -ForegroundColor Cyan
 $claudeCallback  = "https://claude.ai/api/mcp/auth_callback"
 $appForRedirects = Get-MgApplication -ApplicationId $appOid
-$pubUris = @("http://localhost") + ($appForRedirects.PublicClient.RedirectUris |
-               Where-Object { $_ -ne "http://localhost" })
-$webUris = @($claudeCallback)   + ($appForRedirects.Web.RedirectUris |
-               Where-Object { $_ -ne $claudeCallback })
+$pubUris = @("http://localhost", $claudeCallback) + ($appForRedirects.PublicClient.RedirectUris |
+               Where-Object { $_ -notin @("http://localhost", $claudeCallback) })
+$webUris = $appForRedirects.Web.RedirectUris | Where-Object { $_ -ne $claudeCallback }
 Update-MgApplication -ApplicationId $appOid `
     -IsFallbackPublicClient:$true `
     -PublicClient @{ redirectUris = $pubUris } `
-    -Web          @{ redirectUris = $webUris }
+    -Web          @{ redirectUris = @($webUris) }
 Write-Host "Redirect URIs configured." -ForegroundColor Green
 
 # Generate MCP API key (static bearer token, simpler alternative for service callers)
@@ -399,7 +426,7 @@ Disconnect-MgGraph | Out-Null
 
 Write-Host "`n--- Azure Resources ---" -ForegroundColor Cyan
 
-function Ensure-AzLogin {
+function Confirm-AzLogin {
     param ([string]$TenantId)
     try { $null = Invoke-AzCli @("account", "show", "--output", "none") } catch {
         if ($_ -match "az login") {
@@ -412,7 +439,7 @@ function Ensure-AzLogin {
     }
 }
 
-Ensure-AzLogin -TenantId $tenantId
+Confirm-AzLogin -TenantId $tenantId
 
 function Select-Subscription {
     $lines = & az account list --output json 2>&1 | Where-Object { $_ -is [string] }
@@ -462,9 +489,15 @@ $FunctionAppName = ""
 $StorageName     = ""
 
 if (-not $DeployMcpOnly) {
-    $randomSuffix    = [System.Guid]::NewGuid().ToString("n").Substring(0, 8)
-    $StorageName     = "stastral$randomSuffix"
-    $FunctionAppName = "func-astral-$randomSuffix"
+    if ($savedConfig -and $savedConfig.StorageName -and $savedConfig.FunctionAppName) {
+        $StorageName     = $savedConfig.StorageName
+        $FunctionAppName = $savedConfig.FunctionAppName
+        Write-Host "Reusing saved resources: storage='$StorageName', func='$FunctionAppName'" -ForegroundColor Yellow
+    } else {
+        $randomSuffix    = [System.Guid]::NewGuid().ToString("n").Substring(0, 8)
+        $StorageName     = "stastral$randomSuffix"
+        $FunctionAppName = "func-astral-$randomSuffix"
+    }
 
     # Storage
     $storageProv = Invoke-AzCli @("provider","show","--namespace","Microsoft.Storage","--query","registrationState","--output","tsv")
@@ -472,17 +505,23 @@ if (-not $DeployMcpOnly) {
         Invoke-AzCli @("provider","register","--namespace","Microsoft.Storage")
         Wait-ProviderRegistration "Microsoft.Storage"
     }
-    Write-Host "Creating storage account '$StorageName'..." -ForegroundColor Cyan
-    Invoke-AzCli @(
-        "storage", "account", "create",
-        "--name", $StorageName,
-        "--resource-group", $ResourceGroup,
-        "--location", $Location,
-        "--sku", "Standard_LRS",
-        "--kind", "StorageV2",
-        "--tags", "astral=true", "astral-ado-org=$AdoOrganization", "astral-ado-project=$AdoProject",
-        "--output", "none"
-    )
+    $storageExists = $false
+    try { $null = Invoke-AzCli @("storage","account","show","--name",$StorageName,"--resource-group",$ResourceGroup,"--output","none") -NoRetry; $storageExists = $true } catch {}
+    if (-not $storageExists) {
+        Write-Host "Creating storage account '$StorageName'..." -ForegroundColor Cyan
+        Invoke-AzCli @(
+            "storage", "account", "create",
+            "--name", $StorageName,
+            "--resource-group", $ResourceGroup,
+            "--location", $Location,
+            "--sku", "Standard_LRS",
+            "--kind", "StorageV2",
+            "--tags", "astral=true", "astral-ado-org=$AdoOrganization", "astral-ado-project=$AdoProject",
+            "--output", "none"
+        )
+    } else {
+        Write-Host "Storage account '$StorageName' already exists." -ForegroundColor Yellow
+    }
     $storageConnection = Invoke-AzCli @(
         "storage","account","show-connection-string",
         "--name", $StorageName,
@@ -490,9 +529,11 @@ if (-not $DeployMcpOnly) {
         "--query", "connectionString",
         "--output", "tsv"
     )
-    Write-Host "Creating Table and Queue..." -ForegroundColor Cyan
-    Invoke-AzCli @("storage","table","create","--name","ProbeState","--connection-string",$storageConnection,"--output","none")
-    Invoke-AzCli @("storage","queue","create","--name","backup-trigger-queue","--connection-string",$storageConnection,"--output","none")
+    if (-not $storageExists) {
+        Write-Host "Creating Table and Queue..." -ForegroundColor Cyan
+        Invoke-AzCli @("storage","table","create","--name","ProbeState","--connection-string",$storageConnection,"--output","none")
+        Invoke-AzCli @("storage","queue","create","--name","backup-trigger-queue","--connection-string",$storageConnection,"--output","none")
+    }
 
     # Function App
     $webProv = Invoke-AzCli @("provider","show","--namespace","Microsoft.Web","--query","registrationState","--output","tsv")
@@ -500,20 +541,52 @@ if (-not $DeployMcpOnly) {
         Invoke-AzCli @("provider","register","--namespace","Microsoft.Web")
         Wait-ProviderRegistration "Microsoft.Web"
     }
-    Write-Host "Creating Function App '$FunctionAppName'..." -ForegroundColor Cyan
-    Invoke-AzCli @(
-        "functionapp","create",
-        "--name", $FunctionAppName,
-        "--resource-group", $ResourceGroup,
-        "--storage-account", $StorageName,
-        "--consumption-plan-location", $Location,
-        "--os-type", "Linux",
-        "--runtime", "python",
-        "--runtime-version", "3.11",
-        "--functions-version", "4",
-        "--tags", "astral=true", "astral-ado-org=$AdoOrganization", "astral-ado-project=$AdoProject",
-        "--output", "none"
-    )
+    $funcExists = $false
+    try { $null = Invoke-AzCli @("functionapp","show","--name",$FunctionAppName,"--resource-group",$ResourceGroup,"--output","none") -NoRetry; $funcExists = $true } catch {}
+    if (-not $funcExists) {
+        Write-Host "Creating Function App '$FunctionAppName'..." -ForegroundColor Cyan
+        Invoke-AzCli @(
+            "functionapp","create",
+            "--name", $FunctionAppName,
+            "--resource-group", $ResourceGroup,
+            "--storage-account", $StorageName,
+            "--consumption-plan-location", $Location,
+            "--os-type", "Linux",
+            "--runtime", "python",
+            "--runtime-version", "3.11",
+            "--functions-version", "4",
+            "--tags", "astral=true", "astral-ado-org=$AdoOrganization", "astral-ado-project=$AdoProject",
+            "--output", "none"
+        )
+    } else {
+        Write-Host "Function App '$FunctionAppName' already exists." -ForegroundColor Yellow
+    }
+    # Preserve the webhook secret across re-deployments.
+    # On first deploy the Function App has no WEBHOOK_SECRET yet, so we generate one.
+    # On subsequent deploys we read the existing value and reuse it so the ADO service
+    # hook config does not need to be updated after every provisioning run.
+    if ($AdoReviewSyncPipelineId -and -not $WebhookSecret) {
+        $existingSecret = ""
+        try {
+            $existingSecret = (Invoke-AzCli @(
+                "functionapp","config","appsettings","list",
+                "--name", $FunctionAppName,
+                "--resource-group", $ResourceGroup,
+                "--query", "[?name=='WEBHOOK_SECRET'].value | [0]",
+                "--output", "tsv"
+            ) -NoRetry).Trim()
+        } catch {}
+        if ($existingSecret) {
+            $WebhookSecret = $existingSecret
+            Write-Host "Reusing existing webhook secret." -ForegroundColor Green
+        } else {
+            $WebhookSecret = [System.Convert]::ToBase64String(
+                [System.Security.Cryptography.RandomNumberGenerator]::GetBytes(24)
+            ).TrimEnd("=").Replace("+", "-").Replace("/", "_")
+            Write-Host "Generated webhook secret (shown in summary)." -ForegroundColor Cyan
+        }
+    }
+
     Write-Host "Configuring Function App settings..." -ForegroundColor Cyan
     Invoke-AzCli @(
         "functionapp","config","appsettings","set",
@@ -536,6 +609,8 @@ if (-not $DeployMcpOnly) {
         "ADO_BRANCH=$AdoBranch",
         "PROBE_QUIET_WINDOW_MINUTES=$QuietWindowMinutes",
         "PROBE_COOLDOWN_MINUTES=$CooldownMinutes",
+        "ADO_REVIEW_SYNC_PIPELINE_ID=$AdoReviewSyncPipelineId",
+        "WEBHOOK_SECRET=$WebhookSecret",
         "REPO_ROOT=/home/site/wwwroot",
         "--output", "none"
     )
@@ -602,37 +677,56 @@ if ($mcpDeploy) {
 
     # Container Apps Environment
     $caEnvName = "$McpContainerAppName-env"
-    Write-Host "Creating Container Apps Environment '$caEnvName'..." -ForegroundColor Cyan
-    Invoke-AzCli @(
-        "containerapp","env","create",
-        "--name", $caEnvName,
-        "--resource-group", $McpResourceGroup,
-        "--location", $McpLocation,
-        "--output", "none"
-    )
+    $caEnvExists = $false
+    try { $null = Invoke-AzCli @("containerapp","env","show","--name",$caEnvName,"--resource-group",$McpResourceGroup,"--output","none") -NoRetry; $caEnvExists = $true } catch {}
+    if (-not $caEnvExists) {
+        Write-Host "Creating Container Apps Environment '$caEnvName'..." -ForegroundColor Cyan
+        Invoke-AzCli @(
+            "containerapp","env","create",
+            "--name", $caEnvName,
+            "--resource-group", $McpResourceGroup,
+            "--location", $McpLocation,
+            "--output", "none"
+        )
+    } else {
+        Write-Host "Container Apps Environment '$caEnvName' already exists." -ForegroundColor Yellow
+    }
 
     # Container App
     $acrLoginServer = Invoke-AzCli @("acr","show","--name",$McpAcrName,"--query","loginServer","--output","tsv")
     $acrPassword    = Invoke-AzCli @("acr","credential","show","--name",$McpAcrName,"--query","passwords[0].value","--output","tsv")
-    Write-Host "Creating Container App '$McpContainerAppName'..." -ForegroundColor Cyan
-    Invoke-AzCli @(
-        "containerapp","create",
-        "--name", $McpContainerAppName,
-        "--resource-group", $McpResourceGroup,
-        "--environment", $caEnvName,
-        "--image", "$acrLoginServer/$McpImageName`:latest",
-        "--target-port", "8080",
-        "--ingress", "external",
-        "--transport", "auto",
-        "--min-replicas", "1",
-        "--max-replicas", "3",
-        "--cpu", "0.5",
-        "--memory", "1Gi",
-        "--registry-server", $acrLoginServer,
-        "--registry-username", $McpAcrName,
-        "--registry-password", $acrPassword,
-        "--output", "none"
-    )
+    $caExists = $false
+    try { $null = Invoke-AzCli @("containerapp","show","--name",$McpContainerAppName,"--resource-group",$McpResourceGroup,"--output","none") -NoRetry; $caExists = $true } catch {}
+    if (-not $caExists) {
+        Write-Host "Creating Container App '$McpContainerAppName'..." -ForegroundColor Cyan
+        Invoke-AzCli @(
+            "containerapp","create",
+            "--name", $McpContainerAppName,
+            "--resource-group", $McpResourceGroup,
+            "--environment", $caEnvName,
+            "--image", "$acrLoginServer/$McpImageName`:latest",
+            "--target-port", "8080",
+            "--ingress", "external",
+            "--transport", "auto",
+            "--min-replicas", "1",
+            "--max-replicas", "3",
+            "--cpu", "0.5",
+            "--memory", "1Gi",
+            "--registry-server", $acrLoginServer,
+            "--registry-username", $McpAcrName,
+            "--registry-password", $acrPassword,
+            "--output", "none"
+        )
+    } else {
+        Write-Host "Container App '$McpContainerAppName' already exists — updating image..." -ForegroundColor Yellow
+        Invoke-AzCli @(
+            "containerapp","update",
+            "--name", $McpContainerAppName,
+            "--resource-group", $McpResourceGroup,
+            "--image", "$acrLoginServer/$McpImageName`:latest",
+            "--output", "none"
+        )
+    }
 
     # Get FQDN — needed for MCP_ALLOWED_HOSTS
     $mcpFqdn = (Invoke-AzCli @(
@@ -642,15 +736,6 @@ if ($mcpDeploy) {
         "--query", "properties.configuration.ingress.fqdn",
         "--output", "tsv"
     )).Trim()
-
-    # Secrets go into Container App secrets (not plain env vars readable from the resource template)
-    Invoke-AzCli @(
-        "containerapp","secret","set",
-        "--name", $McpContainerAppName,
-        "--resource-group", $McpResourceGroup,
-        "--secrets", "ado-token=$AdoToken", "mcp-api-key=$mcpApiKey",
-        "--output", "none"
-    )
 
     # Configure env vars — including MCP_ALLOWED_HOSTS set to the actual FQDN
     Write-Host "Configuring Container App settings..." -ForegroundColor Cyan
@@ -662,10 +747,10 @@ if ($mcpDeploy) {
         "ADO_ORGANIZATION=$AdoOrganization",
         "ADO_PROJECT=$AdoProject",
         "ADO_BRANCH=$AdoBranch",
-        "ADO_TOKEN=secretref:ado-token",
+        "ADO_TOKEN=$AdoToken",
         "ENTRA_TENANT_ID=$tenantId",
         "MCP_CLIENT_ID=$appId",
-        "MCP_API_KEY=secretref:mcp-api-key",
+        "MCP_API_KEY=$mcpApiKey",
         "MCP_ALLOWED_HOSTS=$mcpFqdn",
         "--output", "none"
     )
@@ -705,6 +790,20 @@ if (-not $DeployMcpOnly) {
                 }
                 $ls = Join-Path $stagePath "local.settings.json"
                 if (Test-Path $ls) { Remove-Item $ls }
+
+                # Install Python dependencies into .python_packages/lib/site-packages
+                # so they are available when the zip is mounted read-only via WEBSITE_RUN_FROM_PACKAGE.
+                $reqFile = Join-Path $stagePath "requirements.txt"
+                if (Test-Path $reqFile) {
+                    Write-Host "Installing Python dependencies into package..." -ForegroundColor Cyan
+                    $pkgDir = [System.IO.Path]::Combine($stagePath, ".python_packages", "lib", "site-packages")
+                    New-Item -ItemType Directory -Path $pkgDir -Force | Out-Null
+                    $pip = if (Test-Command "pip3") { "pip3" } else { "pip" }
+                    & $pip install -r $reqFile --target $pkgDir --quiet --disable-pip-version-check
+                    if ($LASTEXITCODE -ne 0) { throw "pip install failed — check Python/pip is available on this machine." }
+                    Write-Host "Dependencies installed." -ForegroundColor Green
+                }
+
                 if (Test-Command "zip") {
                     Push-Location $stagePath; try { & zip -r $zipPath . | Out-Null } finally { Pop-Location }
                 } else {
@@ -736,10 +835,11 @@ if (-not $DeployMcpOnly) {
 
 try {
     [PSCustomObject]@{
-        AdoOrganization     = $AdoOrganization
-        AdoProject          = $AdoProject
-        AdoPipelineId       = $AdoPipelineId
-        AdoBranch           = $AdoBranch
+        AdoOrganization          = $AdoOrganization
+        AdoProject               = $AdoProject
+        AdoPipelineId            = $AdoPipelineId
+        AdoReviewSyncPipelineId  = $AdoReviewSyncPipelineId
+        AdoBranch                = $AdoBranch
         SubscriptionId      = $SubscriptionId
         TenantId            = $tenantId
         ResourceGroup       = $ResourceGroup
@@ -768,6 +868,7 @@ Write-Host ""
 Write-Host "Subscription:     $SubscriptionId"
 Write-Host "Resource Group:   $ResourceGroup"
 Write-Host "App Registration: $AppDisplayName ($appId)"
+Write-Host "  CLIENT_SECRET:  $clientSecret" -ForegroundColor Yellow
 if (-not $DeployMcpOnly) {
     Write-Host "Function App:     $FunctionAppName"
 }
@@ -782,8 +883,18 @@ if ($mcpDeploy) {
     Write-Host "  Client ID: $appId"
 }
 Write-Host ""
-Write-Host "Client secret stored in Function App settings only (not displayed)." -ForegroundColor Yellow
+Write-Host "IMPORTANT: CLIENT_SECRET shown above only once. Save it now." -ForegroundColor Yellow
 if (-not $DeployMcpOnly) {
+    if ($AdoReviewSyncPipelineId) {
+        Write-Host ""
+        Write-Host "PR Comment Webhook (instant /accept|/reject trigger):" -ForegroundColor Cyan
+        Write-Host "  URL:    https://$FunctionAppName.azurewebsites.net/api/pr_comment_webhook"
+        Write-Host "  Secret: $WebhookSecret" -ForegroundColor Yellow
+        Write-Host "  IMPORTANT: webhook secret shown above only once. Save it now." -ForegroundColor Yellow
+        Write-Host "  Configure in ADO: Project Settings -> Service hooks -> Web Hooks"
+        Write-Host "    Event:    Pull request commented on"
+        Write-Host "    Username: astral  Password: <Secret above>"
+    }
     Write-Host ""
     Write-Host "Next steps:"
     Write-Host "  Verify probe timer:"

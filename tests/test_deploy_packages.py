@@ -93,7 +93,7 @@ class DeployPackageTests(unittest.TestCase):
 
     def test_provisioning_scripts_stage_the_function_scripts(self) -> None:
         # infra/change-probe/scripts/ is generated and gitignored, so a fresh clone has nothing there.
-        for rel in ("deploy/provision.ps1", "deploy/provision-change-probe.ps1"):
+        for rel in ("deploy/provision.ps1",):
             text = (ROOT / rel).read_text(encoding="utf-8-sig")
             with self.subTest(script=rel):
                 for name in FUNCTION_APP_SCRIPTS:
@@ -101,7 +101,7 @@ class DeployPackageTests(unittest.TestCase):
 
     def test_mcp_staging_matches_the_dockerfile(self) -> None:
         shipped = set(_mcp_image_scripts())
-        for rel in ("deploy/provision.ps1", "deploy/provision-change-probe.ps1"):
+        for rel in ("deploy/provision.ps1",):
             text = (ROOT / rel).read_text(encoding="utf-8-sig")
             staged = set(re.findall(r'\$repoRoot, "scripts", "([^"]+\.py)"', text))
             with self.subTest(script=rel):

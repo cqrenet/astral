@@ -1,0 +1,64 @@
+# ASTRAL report and documentation definitions.
+#
+# Dispatched by scripts/run_reports.py during pipeline runs.
+# Add or modify entries here to change what is generated — the pipeline
+# itself does not need to change.
+#
+# Placeholders available in args / paths:
+#   {backup_dir}   — workload backup root (e.g. .../tenant-state/intune)
+#   {reports_dir}  — workload reports output root (e.g. .../tenant-state/reports/intune)
+#   {repo_root}    — repository root directory
+#
+# condition rules:
+#   (absent)         — always run
+#   full_run         — only on full pipeline runs (mode == full)
+#   ENV_VAR_NAME     — run if the named env var is truthy (1/true/yes)
+#   "A or B"         — run if either A or B is truthy
+#   "A and B"        — run if both A and B are truthy
+#   dict with workload keys — per-workload condition (missing key = always run)
+
+version: 1
+
+reports:
+
+  - name: assignment-report
+    description: Policy assignment inventory — Markdown summary and full CSV
+    script: generate_assignment_report.py
+    workloads: [intune, entra]
+    condition:
+      entra: ENTRA_INCLUDE_CONDITIONAL_ACCESS
+    args: [--root, "{backup_dir}", --output-dir, "{reports_dir}"]
+    outputs: [policy-assignments.md, policy-assignments.csv]
+
+  - name: apps-inventory
+    description: Entra app registrations and enterprise applications inventory CSV
+    script: generate_app_inventory_report.py
+    workloads: [entra]
+    condition:
+      entra: "ENTRA_INCLUDE_APP_REGISTRATIONS_EFFECTIVE or ENTRA_INCLUDE_ENTERPRISE_APPS_EFFECTIVE"
+    args: [--root, "{backup_dir}", --output-dir, "{reports_dir}"]
+    outputs: [apps-inventory.csv]
+
+  - name: object-inventory
+    description: Per-type and aggregate object inventory CSVs
+    script: generate_object_inventory_reports.py
+    workloads: [intune, entra]
+    args: [--root, "{backup_dir}", --output-dir, "{reports_dir}"]
+    outputs: [object-inventory-all.csv]
+
+  - name: settings-report
+    description: Per-setting flat CSV — every policy, setting, and value with structured metadata columns
+    script: generate_settings_report.py
+    workloads: [intune]
+    args: [--root, "{backup_dir}", --output-dir, "{reports_dir}"]
+    outputs: [policy-settings.csv]
+
+documentation:
+
+  - name: intune-as-built
+    description: Intune as-built documentation (Markdown; split or single file depending on SPLIT_DOCUMENTATION)
+    workloads: [intune]
+    condition: full_run
+    backup_path: "{backup_dir}"
+    output_path: "{repo_root}/prod-as-built.md"
+    enrich: true

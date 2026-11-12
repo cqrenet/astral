@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from typing import Any
 
 import common
+from pr_i18n import _t
 
 @dataclass
 class ChangeItem:
@@ -234,31 +235,30 @@ def _build_deterministic_summary(
     changes_fingerprint = _changes_fingerprint(changes)
 
     lines: list[str] = []
-    lines.append("### Change Metrics")
-    lines.append(f"- **Scope:** `{drift_branch}` -> `{baseline_branch}`")
-    lines.append(f"- **Changed Files:** **{len(changes)}**")
+    lines.append(f"### {_t('Change Metrics')}")
+    lines.append(f"- **{_t('Scope')}:** `{drift_branch}` -> `{baseline_branch}`")
+    lines.append(f"- **{_t('Changed Files')}:** **{len(changes)}**")
     if ignored_operational_count > 0:
-        lines.append(f"- **Operational-Only Changes Ignored:** **{ignored_operational_count}**")
-    lines.append(f"- **Change Fingerprint:** `{changes_fingerprint}`")
+        lines.append(f"- **{_t('Operational-Only Changes Ignored')}:** **{ignored_operational_count}**")
+    lines.append(f"- **{_t('Change Fingerprint')}:** `{changes_fingerprint}`")
     lines.append("")
-    lines.append("| **Operation** | **Count** |")
+    lines.append(f"| **{_t('Operation')}** | **{_t('Count')}** |")
     lines.append("|---|---:|")
     wrote_operation_row = False
     for op in ("Added", "Modified", "Deleted", "Renamed", "Copied", "TypeChanged"):
         count = op_counter.get(op, 0)
         if count:
-            lines.append(f"| {op} | {count} |")
+            lines.append(f"| {_t(op)} | {count} |")
             wrote_operation_row = True
     if not wrote_operation_row:
-        lines.append("| (none) | 0 |")
+        lines.append(f"| {_t('(none)')} | 0 |")
     lines.append("")
-    lines.append("| **Risk Level** | **Count** |")
+    lines.append(f"| **{_t('Risk Level')}** | **{_t('Count')}** |")
     lines.append("|---|---:|")
-    lines.append(f"| HIGH | {risk_counter.get('HIGH', 0)} |")
-    lines.append(f"| MEDIUM | {risk_counter.get('MEDIUM', 0)} |")
-    lines.append(f"| LOW | {risk_counter.get('LOW', 0)} |")
+    for level in ("HIGH", "MEDIUM", "LOW"):
+        lines.append(f"| {_t(level)} | {risk_counter.get(level, 0)} |")
     lines.append("")
-    lines.append(f"> **Overall Risk:** **{overall_risk}**")
+    lines.append(f"> **{_t('Overall Risk')}:** **{_t(overall_risk)}**")
 
     highlights = sorted(
         [item for item in changes if item.risk_score >= 2 and not common.is_doc_like(item.path)],
@@ -272,15 +272,19 @@ def _build_deterministic_summary(
 
     if highlights:
         lines.append("")
-        lines.append("### Top Risk Items")
-        lines.append("| **Severity** | **Operation** | **Area** | **File** | **Why It Matters** |")
+        lines.append(f"### {_t('Top Risk Items')}")
+        lines.append(
+            f"| **{_t('Severity')}** | **{_t('Operation')}** | **{_t('Area')}** | **{_t('File')}** "
+            f"| **{_t('Why It Matters')}** |"
+        )
         lines.append("|---|---|---|---|---|")
         for item in highlights:
-            severity = _md_cell(f"{item.severity} / {item.risk_label}")
-            operation = _md_cell(item.operation)
+            severity = _md_cell(f"{_t(item.severity)} / {_t(item.risk_label)}")
+            operation = _md_cell(_t(item.operation))
             area = _md_cell(item.policy_type)
             file_path = _md_cell(_ellipsize_path(item.path, 120))
-            reason = _md_cell(_ellipsize(item.reason, 80))
+            translated_reason = "; ".join(_t(part.strip()) for part in item.reason.split(";"))
+            reason = _md_cell(_ellipsize(translated_reason, 80))
             lines.append(
                 f"| {severity} | `{operation}` | `{area}` | `{file_path}` | {reason} |"
             )

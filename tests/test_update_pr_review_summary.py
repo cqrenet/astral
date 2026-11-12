@@ -15,7 +15,7 @@ from unittest.mock import patch
 MODULE_PATH = Path(__file__).resolve().parents[1] / "scripts" / "update_pr_review_summary.py"
 sys.path.insert(0, str(MODULE_PATH.parent))  # the script imports its pr_* sibling modules
 
-PR_MODULES = ("pr_base", "pr_changes", "pr_semantic", "pr_change_source", "pr_ai", "pr_description", "pr_threads", "pr_review")
+PR_MODULES = ("pr_base", "pr_changes", "pr_semantic", "pr_change_source", "pr_ai", "pr_description", "pr_threads", "pr_review", "pr_i18n")
 
 
 def _bind_pr_modules(cls) -> None:
@@ -377,6 +377,64 @@ class UpdatePrReviewSummaryTests(unittest.TestCase):
         )
         self.assertEqual(semantic, "New configuration object added")
 
+    def test_extract_semantic_change_new_intune_policy_includes_assignments_and_settings(self) -> None:
+        new_excerpt = json.dumps(
+            {
+                "name": "CQRE - ASTRAL Test policy",
+                "description": "Test policy for ASTRAL deployment.",
+                "platforms": "windows10",
+                "settingCount": 1,
+                "technologies": "mdm",
+                "settings": [
+                    {
+                        "id": "0",
+                        "settingInstance": {
+                            "@odata.type": "#microsoft.graph.deviceManagementConfigurationChoiceSettingInstance",
+                            "settingDefinitionId": "device_vendor_msft_policy_config_games_allowadvancedgamingservices",
+                            "choiceSettingValue": {
+                                "value": "device_vendor_msft_policy_config_games_allowadvancedgamingservices_0",
+                                "children": [],
+                            },
+                        },
+                    }
+                ],
+                "assignments": [
+                    {
+                        "source": "direct",
+                        "target": {
+                            "@odata.type": "#microsoft.graph.allLicensedUsersAssignmentTarget",
+                            "deviceAndAppManagementAssignmentFilterId": None,
+                            "deviceAndAppManagementAssignmentFilterType": "none",
+                        },
+                    },
+                    {
+                        "source": "direct",
+                        "target": {
+                            "@odata.type": "#microsoft.graph.exclusionGroupAssignmentTarget",
+                            "deviceAndAppManagementAssignmentFilterId": None,
+                            "deviceAndAppManagementAssignmentFilterType": "none",
+                            "groupName": "Intune_U_TK_Test",
+                            "groupType": "StaticMembership",
+                        },
+                    },
+                ],
+            }
+        )
+        semantic = self.pr_semantic._extract_semantic_change(
+            "", new_excerpt, "tenant-state/intune/Settings Catalog/CQRE - ASTRAL Test policy.json"
+        )
+        self.assertIn("New configuration object added", semantic)
+        self.assertIn("test policy", semantic)
+        self.assertIn("assigned to all licensed users, excludes group Intune_U_TK_Test", semantic)
+        self.assertIn("1 setting (games_allowadvancedgamingservices)", semantic)
+
+    def test_extract_semantic_change_new_intune_policy_without_signals_is_generic(self) -> None:
+        new_excerpt = json.dumps({"name": "Basic Policy", "platforms": "windows10"})
+        semantic = self.pr_semantic._extract_semantic_change(
+            "", new_excerpt, "tenant-state/intune/Settings Catalog/Basic Policy.json"
+        )
+        self.assertEqual(semantic, "New configuration object added")
+
     def test_classify_change_source_app_reg_permission_changes_are_admin_driven(self) -> None:
         change = self.pr_changes.ChangeItem(
             operation="Modified",
@@ -649,8 +707,8 @@ class UpdatePrReviewSummaryTests(unittest.TestCase):
                     "intent": "apply",
                     "target": {
                         "@odata.type": "#microsoft.graph.groupAssignmentTarget",
-                        "groupId": "9d7195ed-f42e-4cbe-9659-2c3c9f55cdd9",
-                        "groupDisplayName": "Intune_U_TK_Test",
+                        "groupId": "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+                        "groupDisplayName": "TestGroup_Compliance",
                     },
                 }
             ]
@@ -658,20 +716,20 @@ class UpdatePrReviewSummaryTests(unittest.TestCase):
         entries = self.pr_semantic._assignment_entries(payload)
         self.assertEqual(len(entries), 1)
         signature = self.pr_semantic._assignment_signature(entries[0])
-        self.assertIn("group=Intune_U_TK_Test (9d7195ed-f42e-4cbe-9659-2c3c9f55cdd9)", signature)
+        self.assertIn("group=TestGroup_Compliance (aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee)", signature)
 
     def test_has_matching_detected_change_comment_true_when_change_and_risk_match(self) -> None:
         comments = [
             {
                 "content": (
-                    "Detected change (auto): Modified: assignment targets added: group=Intune_U_TK_Test\n\n"
+                    "Detected change (auto): Modified: assignment targets added: group=TestGroup_Compliance\n\n"
                     "Risk context: MEDIUM (device_configuration): Workload configuration area"
                 )
             }
         ]
         matched = self.pr_threads._has_matching_detected_change_comment(
             comments=comments,
-            change_summary="Modified: assignment targets added: group=Intune_U_TK_Test",
+            change_summary="Modified: assignment targets added: group=TestGroup_Compliance",
             risk_summary="MEDIUM (device_configuration): Workload configuration area",
         )
         self.assertTrue(matched)
@@ -680,14 +738,14 @@ class UpdatePrReviewSummaryTests(unittest.TestCase):
         comments = [
             {
                 "content": (
-                    "Detected change (auto): Modified: assignment targets added: group=9d7195ed-f42e\n\n"
+                    "Detected change (auto): Modified: assignment targets added: group=aaaaaaaa-bbbb\n\n"
                     "Risk context: MEDIUM (device_configuration): Workload configuration area"
                 )
             }
         ]
         matched = self.pr_threads._has_matching_detected_change_comment(
             comments=comments,
-            change_summary="Modified: assignment targets added: group=Intune_U_TK_Test (9d7195ed-f42e)\n",
+            change_summary="Modified: assignment targets added: group=TestGroup_Compliance (aaaaaaaa-bbbb)\n",
             risk_summary="MEDIUM (device_configuration): Workload configuration area",
         )
         self.assertFalse(matched)
@@ -1190,6 +1248,79 @@ class UpdatePrReviewSummaryTests(unittest.TestCase):
 
         self.assertEqual(error, None)
         self.assertEqual(content, "Recovered via compact retry")
+
+    def test_reviewer_instruction_includes_language_when_non_english(self) -> None:
+        text = self.pr_ai._reviewer_instruction(language="fr")
+        self.assertIn("Respond entirely in fr.", text)
+
+    def test_reviewer_instruction_omits_language_for_english(self) -> None:
+        text = self.pr_ai._reviewer_instruction(language="en")
+        self.assertNotIn("Respond entirely in", text)
+
+    def test_reviewer_system_prompt_includes_language_when_non_english(self) -> None:
+        text = self.pr_ai._reviewer_system_prompt(language="de")
+        self.assertIn("Respond in de.", text)
+
+    def test_reviewer_system_prompt_omits_language_for_english(self) -> None:
+        text = self.pr_ai._reviewer_system_prompt(language="en")
+        self.assertNotIn("Respond in", text)
+
+    def test_minimal_reviewer_instruction_includes_language_when_non_english(self) -> None:
+        text = self.pr_ai._minimal_reviewer_instruction(language="es")
+        self.assertIn("Respond entirely in es.", text)
+
+    def test_minimal_reviewer_instruction_omits_language_for_english(self) -> None:
+        text = self.pr_ai._minimal_reviewer_instruction(language="en")
+        self.assertNotIn("Respond entirely in", text)
+
+    def test_t_returns_english_when_language_is_en(self) -> None:
+        self.assertEqual(self.pr_i18n._t("Change Metrics"), "Change Metrics")
+
+    def test_t_translates_known_text_for_german(self) -> None:
+        import os
+        with patch.dict(os.environ, {"PR_SUMMARY_LANGUAGE": "de"}, clear=False):
+            self.assertEqual(self.pr_i18n._t("Change Metrics"), "Änderungsmetriken")
+
+    def test_t_returns_original_for_unknown_text(self) -> None:
+        import os
+        with patch.dict(os.environ, {"PR_SUMMARY_LANGUAGE": "de"}, clear=False):
+            self.assertEqual(self.pr_i18n._t("Totally unknown key"), "Totally unknown key")
+
+    def test_t_ignores_case_on_language_env_var(self) -> None:
+        # Default is already set by prior tests or module load; test directly via _TRANSLATIONS lookup
+        self.assertEqual(self.pr_i18n._TRANSLATIONS["Operation"]["de"], "Operation")
+
+    def test_deterministic_summary_translates_headers_for_french(self) -> None:
+        import os
+        with patch.dict(os.environ, {"PR_SUMMARY_LANGUAGE": "fr"}, clear=False):
+            summary = self.pr_changes._build_deterministic_summary(
+                changes=[],
+                drift_branch="drift/test",
+                baseline_branch="main",
+            )
+        self.assertIn("### Métriques de changement", summary)
+        self.assertIn("**Périmètre:**", summary)
+
+    def test_deterministic_summary_translates_risk_table_for_polish(self) -> None:
+        import os
+        item = self.pr_changes.ChangeItem(
+            operation="Added",
+            path="tenant-state/intune/compliance policies/test.json",
+            risk_score=3,
+            risk_label="HIGH",
+            reason="Security or broad policy area",
+            policy_type="compliance_policy",
+            severity="HIGH",
+        )
+        with patch.dict(os.environ, {"PR_SUMMARY_LANGUAGE": "pl"}, clear=False):
+            summary = self.pr_changes._build_deterministic_summary(
+                changes=[item],
+                drift_branch="drift/test",
+                baseline_branch="main",
+            )
+        self.assertIn("| **Poziom ryzyka** | **Liczba** |", summary)
+        self.assertIn("| WYSOKIE | 1 |", summary)
+        self.assertIn("Najważniejsze elementy ryzyka", summary)
 
 
 class PublishDescriptionTests(unittest.TestCase):

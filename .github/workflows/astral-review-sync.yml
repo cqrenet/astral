@@ -14,7 +14,7 @@ permissions: {}
 
 jobs:
   intune:
-    if: vars.ENABLE_WORKLOAD_INTUNE != 'false'
+    if: github.repository != 'cqrenet/astral' && vars.ENABLE_WORKLOAD_INTUNE != 'false'
     uses: ./.github/workflows/astral-review.yml
     with:
       workload: intune
@@ -25,7 +25,7 @@ jobs:
       actions: write
 
   entra:
-    if: vars.ENABLE_WORKLOAD_ENTRA != 'false'
+    if: github.repository != 'cqrenet/astral' && vars.ENABLE_WORKLOAD_ENTRA != 'false'
     uses: ./.github/workflows/astral-review.yml
     with:
       workload: entra

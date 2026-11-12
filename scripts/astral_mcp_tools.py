@@ -49,6 +49,14 @@ _WORKLOAD_CATEGORIES: dict[str, list[str]] = {
         "Authentication Strengths",
         "App Registrations",
         "Enterprise Applications",
+        # Identity exports (export_entra_identity.py)
+        "Groups",
+        "Role Assignments",
+        "Authentication Methods",
+        "Cross-Tenant Access",
+        "Identity Protection",
+        "PIM Role Policies",
+        "Security",
     ],
 }
 
@@ -97,6 +105,15 @@ class _LocalSource:
     def read_file(self, path: str) -> str:
         with open(self._path(path), encoding="utf-8") as f:
             return f.read()
+
+    def list_dir(self, path: str) -> list[dict[str, Any]]:
+        full = self._path(path)
+        if not os.path.isdir(full):
+            return []
+        return [
+            {"path": f"{path}/{name}", "name": name, "isFolder": os.path.isdir(os.path.join(full, name))}
+            for name in sorted(os.listdir(full))
+        ]
 
     def list_json_recursive(self, path: str) -> list[dict[str, Any]]:
         full = self._path(path)
@@ -176,7 +193,7 @@ class _AdoSource:
         result = self._get(
             "items",
             {
-                "path": path,
+                "scopePath": path,
                 "recursionLevel": recursion,
                 "versionDescriptor.versionType": "Branch",
                 "versionDescriptor.version": self.branch,
@@ -205,6 +222,13 @@ class _AdoSource:
             return base64.b64decode(content).decode("utf-8")
         except Exception:
             return content
+
+    def list_dir(self, path: str) -> list[dict[str, Any]]:
+        return [
+            {"path": item.get("path", ""), "name": os.path.basename(item.get("path", "")), "isFolder": bool(item.get("isFolder"))}
+            for item in self._items(path, "OneLevel")
+            if item.get("path", "").rstrip("/") != path.rstrip("/")
+        ]
 
     def list_json_recursive(self, path: str) -> list[dict[str, Any]]:
         return [
@@ -326,16 +350,149 @@ class AstralMcpClient:
             return ""
 
     def get_object_inventory(self, workload: str = "intune", category: str = "") -> list[dict[str, Any]]:
-        if not category:
-            return []
-        _validate(workload, category)
-        slug = re.sub(r"[^a-z0-9]+", "-", category.lower()).strip("-")  # as generate_object_inventory_reports
+        _validate(workload, category or None)
+        if category:
+            slug = re.sub(r"[^a-z0-9]+", "-", category.lower()).strip("-") or "unknown"  # as the report generator
+            path = f"tenant-state/reports/{workload}/Object Inventory/{slug}-inventory.csv"
+        else:
+            path = f"tenant-state/reports/{workload}/object-inventory-all.csv"
+        return self._read_csv(path)
+
+    def _read_csv(self, path: str) -> list[dict[str, Any]]:
         try:
-            raw = self._source.read_file(f"tenant-state/reports/{workload}/Object Inventory/{slug}-inventory.csv")
+            raw = self._source.read_file(path)
         except Exception:
             return []
         lines = raw.strip().splitlines()
         return list(csv.DictReader(lines)) if lines else []
+
+    # -- report definitions and generated reports -------------------------------------------------
+
+    def list_report_definitions(self, workload: str | None = None) -> list[dict[str, Any]]:
+        """Merged report/documentation definitions (builtin reports/definitions.yml + local overrides)."""
+        try:
+            import yaml  # type: ignore[import-untyped]
+        except ImportError:
+            return []
+
+        def load(path: str) -> dict[str, Any]:
+            try:
+                return yaml.safe_load(self._source.read_file(path)) or {}
+            except Exception:
+                return {}
+
+        base, local = load("reports/definitions.yml"), load("reports/definitions.local.yml")
+        results: list[dict[str, Any]] = []
+        for section, entry_type in (("reports", "report"), ("documentation", "documentation")):
+            combined: dict[str, Any] = {}
+            for origin, doc in (("builtin", base), ("local", local)):
+                for entry in doc.get(section, []):
+                    if "name" in entry:
+                        combined[entry["name"]] = {**entry, "source": origin}
+            for defn in combined.values():
+                if workload and workload not in defn.get("workloads", []):
+                    continue
+                results.append({"type": entry_type, **defn})
+        return results
+
+    def list_generated_reports(self, workload: str) -> list[dict[str, Any]]:
+        """Files present in tenant-state/reports/<workload>/."""
+        _validate(workload)
+        try:
+            entries = self._source.list_dir(f"tenant-state/reports/{workload}")
+        except Exception:
+            return []
+        return [e for e in entries if not e.get("isFolder")]
+
+    def get_report(self, workload: str, name: str) -> str:
+        """A report's primary output file, looked up by its definition name."""
+        _validate(workload)
+        defn = next((d for d in self.list_report_definitions(workload) if d.get("name") == name), None)
+        outputs = defn.get("outputs", []) if defn else []
+        if not outputs:
+            return ""
+        try:
+            return self._source.read_file(f"tenant-state/reports/{workload}/{outputs[0]}")
+        except Exception:
+            return ""
+
+    def get_settings_report(
+        self,
+        workload: str = "intune",
+        policy: str = "",
+        category: str = "",
+        os_filter: str = "",
+        max_rows: int = 500,
+    ) -> list[dict[str, Any]]:
+        """Rows of policy-settings.csv; policy/os_filter are substring filters, category is exact."""
+        _validate(workload)
+        rows: list[dict[str, Any]] = []
+        for row in self._read_csv(f"tenant-state/reports/{workload}/policy-settings.csv"):
+            if policy and policy.lower() not in row.get("Policy", "").lower():
+                continue
+            if category and row.get("Category", "") != category:
+                continue
+            if os_filter and os_filter.lower() not in row.get("OS", "").lower():
+                continue
+            rows.append(dict(row))
+            if len(rows) >= max_rows:
+                break
+        return rows
+
+    def find_policies_for_setting(self, setting: str, workload: str = "intune") -> list[dict[str, Any]]:
+        """Policies containing a setting (substring match on Setting or Setting ID), grouped by policy."""
+        _validate(workload)
+        needle = setting.lower()
+        seen: dict[str, list[dict[str, Any]]] = {}
+        for row in self._read_csv(f"tenant-state/reports/{workload}/policy-settings.csv"):
+            if needle in row.get("Setting", "").lower() or needle in row.get("Setting ID", "").lower():
+                seen.setdefault(row.get("Policy", ""), []).append(
+                    {key: row.get(key, "") for key in ("Setting", "Setting ID", "Value", "Category", "OS")}
+                )
+        return [{"Policy": policy, "Matches": matches} for policy, matches in sorted(seen.items())]
+
+    # -- identity exports (export_entra_identity.py) ----------------------------------------------
+
+    def _identity_objects(self, folder: str, name_key: str, role_name: str = "") -> list[dict[str, Any]]:
+        """JSON objects under tenant-state/entra/<folder>, sorted by name_key, optionally name-filtered."""
+        needle = (role_name or "").lower()
+        objects: list[dict[str, Any]] = []
+        for item in self._source.list_json_recursive(f"tenant-state/entra/{folder}"):
+            try:
+                data = json.loads(self._source.read_file(item["path"]))
+            except Exception:
+                continue
+            if not isinstance(data, dict):
+                continue
+            if needle and needle not in str(data.get(name_key) or "").lower():
+                continue
+            objects.append(data)
+        return sorted(objects, key=lambda o: str(o.get(name_key) or "").casefold())
+
+    def get_ca_groups(self) -> list[dict[str, Any]]:
+        """Groups from the Groups snapshot, with member counts and referencing CA policies."""
+        return self._identity_objects("Groups", "displayName")
+
+    def get_pim_policies(self, role_name: str = "") -> list[dict[str, Any]]:
+        """PIM role governance policies, optionally filtered by role display name."""
+        return self._identity_objects("PIM Role Policies", "roleDisplayName", role_name)
+
+    def get_privileged_role_assignments(self, role_name: str = "") -> list[dict[str, Any]]:
+        """Directory role assignments (permanent and PIM-eligible), optionally filtered by role name."""
+        return self._identity_objects("Role Assignments", "displayName", role_name)
+
+    def get_security_settings(self) -> dict[str, Any]:
+        """Security defaults and authorization policy from tenant-state/entra/Security/."""
+        result: dict[str, Any] = {}
+        for filename, key in (
+            ("Security Defaults.json", "securityDefaults"),
+            ("Authorization Policy.json", "authorizationPolicy"),
+        ):
+            try:
+                result[key] = json.loads(self._source.read_file(f"tenant-state/entra/Security/{filename}"))
+            except Exception:
+                continue
+        return result
 
 
 _clone_lock = threading.Lock()

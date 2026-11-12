@@ -368,7 +368,7 @@ def _lookup_service_principal_by_app_id(client: GraphClient, resource_app_id: st
     literal = urllib.parse.quote(_quote_odata_literal(resource_app_id))
     payload, error = client.get_object(
         "https://graph.microsoft.com/v1.0/servicePrincipals"
-        f"?$top=1&$select={_SP_SELECT}&$filter=appId eq '{literal}'"
+        f"?$top=1&$select={_SP_SELECT}&$filter=appId%20eq%20'{literal}'"
     )
     sp = None
     values = payload.get("value") if isinstance(payload, dict) else None

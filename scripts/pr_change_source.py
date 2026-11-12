@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from pr_changes import ChangeItem
+from pr_i18n import _t
 
 _ADMIN_POLICY_TYPES = {
     "conditional_access",
@@ -243,10 +244,10 @@ def _build_change_source_assessment(compact_changes: list[dict[str, Any]]) -> di
 
 def _format_change_source_label(label: str) -> str:
     mapping = {
-        "likely_admin_driven": "likely admin-driven",
-        "likely_infrastructure_driven": "likely infrastructure/platform-driven",
-        "primarily_admin_driven": "primarily admin-driven",
-        "primarily_infrastructure_driven": "primarily infrastructure/platform-driven",
-        "mixed_or_uncertain": "mixed or uncertain",
+        "likely_admin_driven": _t("likely admin-driven"),
+        "likely_infrastructure_driven": _t("likely infrastructure/platform-driven"),
+        "primarily_admin_driven": _t("primarily admin-driven"),
+        "primarily_infrastructure_driven": _t("primarily infrastructure/platform-driven"),
+        "mixed_or_uncertain": _t("mixed or uncertain"),
     }
     return mapping.get(label, label.replace("_", " ").strip())

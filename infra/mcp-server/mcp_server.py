@@ -25,11 +25,12 @@ from typing import Any
 # ---------------------------------------------------------------------------
 # Resolve script imports (bundled scripts/ directory or repo-root scripts/)
 # ---------------------------------------------------------------------------
-_script_dir = os.path.join(os.path.dirname(__file__), "scripts")
+_here = os.path.dirname(os.path.abspath(__file__))
+_script_dir = os.path.join(_here, "scripts")
 if os.path.isfile(os.path.join(_script_dir, "astral_mcp_tools.py")):
     sys.path.insert(0, _script_dir)
 else:
-    sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", "scripts"))
+    sys.path.insert(0, os.path.join(_here, "..", "..", "scripts"))
 
 try:
     from astral_mcp_tools import AstralMcpClient, client_from_env, refresh_remote_clone
@@ -320,15 +321,195 @@ def get_assignment_report(workload: str = "intune") -> str:
 
 
 @_tool
-def get_object_inventory(workload: str, category: str) -> str:
+def get_object_inventory(workload: str, category: str = "") -> str:
     """Retrieve the latest object inventory CSV for a category as JSON rows.
 
     Args:
         workload: Either "intune" or "entra".
-        category: A category name (e.g. "Compliance Policies").
+        category: A category name (e.g. "Compliance Policies"). Omit for the combined inventory.
     """
     rows = _get_client().get_object_inventory(workload, category)
     return _jsonify(rows) if rows else "No inventory report found."
+
+
+@_tool
+def list_report_definitions(workload: str = "") -> str:
+    """List report and documentation definitions from reports/definitions.yml.
+
+    Args:
+        workload: Filter by workload ("intune" or "entra"). Omit to list all.
+    """
+    result = _get_client().list_report_definitions(workload or None)
+    if not result:
+        return "No report definitions found (reports/definitions.yml may be missing or empty)."
+    return _jsonify(result)
+
+
+@_tool
+def list_generated_reports(workload: str) -> str:
+    """List report files that have been generated for a workload.
+
+    Args:
+        workload: Either "intune" or "entra".
+    """
+    result = _get_client().list_generated_reports(workload)
+    if not result:
+        return f"No generated reports found for workload '{workload}'."
+    return _jsonify(result)
+
+
+@_tool
+def get_report(workload: str, name: str) -> str:
+    """Retrieve a named report by its definition name.
+
+    Use list_report_definitions to discover available report names.
+
+    Args:
+        workload: Either "intune" or "entra".
+        name: Report definition name (e.g. "assignment-report", "object-inventory", "apps-inventory").
+    """
+    result = _get_client().get_report(workload, name)
+    if not result:
+        return f"Report '{name}' not found or not yet generated for workload '{workload}'."
+    return result
+
+
+@_tool
+def get_settings_report(
+    workload: str = "intune",
+    policy: str = "",
+    category: str = "",
+    os_filter: str = "",
+    max_rows: int = 500,
+) -> str:
+    """Retrieve the per-setting policy inventory as JSON rows.
+
+    Returns a flat list of every configured setting across all policies.
+    Use the filter arguments to narrow the results.
+
+    Args:
+        workload:   Either "intune" or "entra" (default "intune").
+        policy:     Case-insensitive substring to filter by policy name.
+        category:   Exact category match: "Settings Catalog", "Device Configurations",
+                    or "Compliance Policies".
+        os_filter:  Case-insensitive substring to filter by OS column (e.g. "Win", "macOS").
+        max_rows:   Maximum rows to return (default 500).
+    """
+    rows = _get_client().get_settings_report(workload, policy, category, os_filter, max_rows)
+    if not rows:
+        return "No settings report found or no rows matched the filters."
+    return _jsonify(rows)
+
+
+@_tool
+def find_policies_for_setting(setting: str, workload: str = "intune") -> str:
+    """Find all policies that configure a given setting.
+
+    Use this to answer questions like "which policies control browser sign-in?" or
+    "which policies set the maximum log file size?".
+
+    Args:
+        setting:  Case-insensitive substring to match against Setting name or Setting ID.
+        workload: Either "intune" or "entra" (default "intune").
+    """
+    results = _get_client().find_policies_for_setting(setting, workload)
+    if not results:
+        return f"No policies found that configure a setting matching '{setting}'."
+    return _jsonify(results)
+
+
+@_tool
+def get_ca_groups() -> str:
+    """List all security groups referenced in Conditional Access policies, with member counts.
+
+    Returns groups from the ASTRAL Groups snapshot (tenant-state/entra/Groups/).
+    Each group shows its displayName, memberCount, and which CA policies reference it
+    as an include or exclude target.
+
+    Use this to answer questions like:
+    - "How many users are excluded from CA policy X?"
+    - "Which CA policies reference large groups (>500 members)?"
+    - "Is any break-glass group used in a CA include condition?"
+    """
+    result = _get_client().get_ca_groups()
+    if not result:
+        return (
+            "No CA-referenced groups found. The Groups snapshot may not have been exported yet "
+            "(requires export_entra_identity.py to have run with --include-groups true)."
+        )
+    return _jsonify(result)
+
+
+@_tool
+def get_privileged_role_assignments(role_name: str = "") -> str:
+    """List directory role assignments (permanent and PIM-eligible), optionally filtered by role name.
+
+    Returns data from the ASTRAL Role Assignments snapshot (tenant-state/entra/Role Assignments/).
+    Each role entry includes its definition, all permanent (direct) assignments, and all
+    PIM-eligible assignments with principal names resolved.
+
+    Args:
+        role_name: Optional case-insensitive substring to filter by role name (e.g. "Global Administrator",
+                   "User Administrator"). Omit to return all roles with at least one assignment.
+
+    Use this to answer questions like:
+    - "Who has permanent Global Administrator access?"
+    - "How many users have PIM-eligible privileged roles?"
+    - "Are there any permanent assignments that should be PIM-only?"
+    """
+    result = _get_client().get_privileged_role_assignments(role_name)
+    if not result:
+        msg = "No role assignments found"
+        if role_name:
+            msg += f" matching '{role_name}'"
+        return (
+            msg + ". The Role Assignments snapshot may not have been exported yet "
+            "(requires export_entra_identity.py to have run with --include-role-assignments true)."
+        )
+    return _jsonify(result)
+
+
+@_tool
+def get_pim_policies(role_name: str = "") -> str:
+    """Retrieve PIM role governance policies: activation duration, approval, MFA requirements.
+
+    Returns data from tenant-state/entra/PIM Role Policies/ (populated by export_entra_identity.py).
+    Each entry includes the role display name and a rules dict keyed by rule type.
+
+    Args:
+        role_name: Optional case-insensitive substring to filter by role name (e.g. "Global Administrator").
+                   Omit to return all roles with a PIM governance policy.
+
+    Use this to answer questions like:
+    - "Does Global Administrator require approval to activate?"
+    - "Which roles allow activation longer than 8 hours?"
+    - "Which roles don't require MFA for activation?"
+    """
+    result = _get_client().get_pim_policies(role_name)
+    if not result:
+        msg = "No PIM policies found"
+        if role_name:
+            msg += f" matching '{role_name}'"
+        return msg + ". Requires RoleManagementPolicy.Read.Directory permission and export_entra_identity.py --include-pim-policies true."
+    return _jsonify(result)
+
+
+@_tool
+def get_security_settings() -> str:
+    """Retrieve tenant security defaults and authorization policy.
+
+    Returns data from tenant-state/entra/Security/ (populated by export_entra_identity.py).
+    Covers: identitySecurityDefaultsEnforcementPolicy and authorizationPolicy.
+
+    Use this to answer questions like:
+    - "Are security defaults enabled?"
+    - "Can guests invite other guests?"
+    - "Is self-service password reset enabled for all users?"
+    """
+    result = _get_client().get_security_settings()
+    if not result:
+        return "No security settings found. Requires export_entra_identity.py --include-security-settings true."
+    return _jsonify(result)
 
 
 @mcp.prompt()
@@ -341,6 +522,32 @@ def audit_briefing(workload: str = "intune") -> str:
         f"then summarize what changed, who changed it, and highlight any risky or "
         f"unusual modifications (e.g., Conditional Access rule relaxations, new app "
         f"registrations with broad permissions, compliance policy downgrades)."
+    )
+
+
+@mcp.prompt()
+def security_posture_briefing() -> str:
+    """Generate a security posture briefing covering identity, access, and policy controls."""
+    return (
+        "You are an ASTRAL tenant security analyst. Generate a security posture briefing covering:\n\n"
+        "1. PRIVILEGED ACCESS: Call get_privileged_role_assignments() to list all role assignments. "
+        "Flag any permanent Global Administrator or Exchange Administrator assignments, roles with >3 "
+        "permanent members, and any AU-scoped assignments (check directoryScopeDisplayName != '/').\n\n"
+        "2. PIM GOVERNANCE: Call get_pim_policies('Global Administrator') and spot-check other "
+        "sensitive roles. Flag roles where approval is not required, activation duration >8 hours, "
+        "or MFA is not enforced on activation.\n\n"
+        "3. CONDITIONAL ACCESS GROUPS: Call get_ca_groups() to review CA-referenced groups. "
+        "Flag exclusion groups with >50 members, groups marked privileged=true in exclusion position, "
+        "and any groups with a previousDisplayName (recently renamed).\n\n"
+        "4. AUTHENTICATION METHODS: Call get_policy('entra', 'Authentication Methods', "
+        "'Authentication Methods Policy') and check method states. "
+        "Flag if SMS or voice call are enabled (lower assurance) or FIDO2 is disabled.\n\n"
+        "5. SECURITY SETTINGS: Call get_security_settings(). Flag if security defaults are disabled "
+        "(expected when CA policies are in use; verify CA coverage compensates), and review "
+        "authorizationPolicy for overly permissive guest invite settings.\n\n"
+        "6. RECENT DRIFT: Call get_recent_drift(workload='entra', hours=168) for the last 7 days. "
+        "Highlight CA policy changes, role assignment changes, and auth method changes.\n\n"
+        "Summarize findings with a risk rating (Low/Medium/High) per section and recommended actions."
     )
 
 

@@ -1,11 +1,10 @@
 # ---------------------------------------------------------------------------
 # Merge strategy overrides for ASTRAL deployments
 #
-# deploy/update-from-upstream.yml is the pipeline that pulls upstream changes
-# into this repo.  It must never be overwritten by upstream — marking it as
-# merge=ours ensures git always keeps the local version when conflicts occur.
+# Files marked merge=ours are customer-owned and must never be overwritten
+# by upstream ASTRAL updates.
 #
-# All other files are intentionally left as auto-merge so upstream improvements
-# flow through cleanly.
+# All other files use auto-merge so upstream improvements flow through cleanly.
 # ---------------------------------------------------------------------------
 deploy/update-from-upstream.yml merge=ours
+reports/definitions.local.yml   merge=ours

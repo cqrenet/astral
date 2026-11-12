@@ -12,6 +12,8 @@
     "ADO_PIPELINE_ID": "",
     "ADO_TOKEN": "",
     "ADO_BRANCH": "main",
+    "ADO_REVIEW_SYNC_PIPELINE_ID": "",
+    "WEBHOOK_SECRET": "",
     "PROBE_QUIET_WINDOW_MINUTES": "15",
     "PROBE_COOLDOWN_MINUTES": "30",
     "REPO_ROOT": "../../"

@@ -18,6 +18,7 @@ concurrency:
 
 jobs:
   probe:
+    if: github.repository != 'cqrenet/astral'
     runs-on: ${{ fromJSON(vars.ASTRAL_RUNS_ON || '["self-hosted","astral"]') }}
     environment: astral-backup
     permissions:

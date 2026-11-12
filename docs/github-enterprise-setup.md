@@ -127,6 +127,8 @@ Only repository admins can change these. Change them as carefully as code.
 | `PROBE_QUIET_WINDOW_MINUTES` / `PROBE_COOLDOWN_MINUTES` | `15` / `30` | |
 | `ENTRA_INCLUDE_NAMED_LOCATIONS` / `ENTRA_INCLUDE_AUTHENTICATION_STRENGTHS` / `ENTRA_INCLUDE_CONDITIONAL_ACCESS` | `true` | Entra categories to export |
 | `ENTRA_INCLUDE_ENTERPRISE_APPS` / `ENTRA_INCLUDE_APP_REGISTRATIONS` | `true` | Exported in full runs only |
+| `ENTRA_INCLUDE_GROUPS` / `ENTRA_INCLUDE_ROLE_ASSIGNMENTS` / `ENTRA_INCLUDE_AUTH_METHODS_POLICY` / `ENTRA_INCLUDE_CROSS_TENANT_ACCESS` / `ENTRA_INCLUDE_IDENTITY_PROTECTION` / `ENTRA_INCLUDE_PRIVILEGED_GROUPS` / `ENTRA_INCLUDE_PIM_POLICIES` / `ENTRA_INCLUDE_SECURITY_SETTINGS` | `true` | Entra identity exports (`export_entra_identity.py`) |
+| `ENTRA_WATCH_GROUPS_CSV` | empty | Group IDs whose full member list is tracked in Git; other groups get counts only |
 | `ENTRA_ENTERPRISE_APP_WORKERS` | `8` | Parallel Graph lookups for Enterprise Applications (1-32) |
 | `ENABLE_ENTRA_CONDITIONAL_ACCESS` | `true` | `true` means the Entra workload owns Conditional Access and the Intune export skips it |
 | `EXCLUDE_SCRIPT_BACKUP` | `false` | Skip Intune script categories (also relaxes the script permission check) |

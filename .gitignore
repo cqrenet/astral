@@ -1,7 +1,7 @@
 .DS_Store
 docs/share/
-docs/security-review-package.pdf
-docs/security-review-questionnaire.pdf
+# Commercial and security-review material kept locally, never published
+local-only/
 node_modules/
 __pycache__/
 *.py[cod]
@@ -17,3 +17,6 @@ infra/change-probe/scripts/
 
 # Saved deployment defaults (local user preferences)
 .astral-deploy.json
+
+# Local agent scratch notes (pentest briefings, findings, workflow)
+panes/

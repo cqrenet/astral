@@ -4,11 +4,12 @@ This repository tracks Git-based snapshots of Microsoft Intune and Entra ID conf
 
 ## Project Overview
 
-The implementation is centered on three Azure DevOps pipelines and an optional MCP server:
+The implementation is centered on four Azure DevOps pipelines and an optional MCP server:
 
 - `azure-pipelines.yml`: daily full backup/export pipeline with rolling PR management (previously hourly; now driven primarily by event-driven change probe).
 - `azure-pipelines-review-sync.yml`: 20-minute reviewer-decision sync and post-merge remediation queue.
 - `azure-pipelines-restore.yml`: manual or auto-queued restore pipeline for approved baseline rollback.
+- `azure-pipelines-reports.yml`: report and documentation generation pipeline. Runs nightly at 04:00 and triggers automatically when `tenant-state/intune/**` or `tenant-state/entra/**` changes. Commits generated reports directly to `main`.
 
 Workflow at a high level:
 1. Export Intune and Entra configuration into `tenant-state/`.
@@ -40,6 +41,8 @@ Workflow at a high level:
 ├── azure-pipelines-restore.yml      # Baseline restore pipeline
 ├── .github/workflows/               # GitHub Actions equivalents (backup, review, review-sync, restore, probe)
 ├── .gitea/workflows/                # Gitea Actions equivalents (no `uses:` steps; plain-git checkout)
+├── azure-pipelines-reports.yml      # Report and documentation generation (scheduled + data-driven)
+├── reports/                         # Report definitions (`definitions.yml` builtin, `definitions.local.yml` customer-owned)
 ├── scripts/                         # Python automation helpers
 ├── tests/                           # unittest coverage for scripts
 ├── tenant-state/                    # Committed JSON exports and reports
@@ -50,27 +53,32 @@ Workflow at a high level:
 │   ├── change-probe/                # Event-driven backup trigger (Function App)
 │   └── mcp-server/                  # Model Context Protocol server (Container Apps)
 ├── deploy/                          # Infrastructure provisioning scripts
-├── docs/                            # Security review docs and roadmap
+├── docs/                            # Setup guides (GitHub, Gitea) and roadmap
 ├── md2pdf/                          # HTML/PDF styling and configs
 ├── prod-as-built.md                 # Generated as-built source
-└── README.md                        # Operational overview for humans
+├── README.md                        # Operational overview for humans
+├── local-only/                      # Pricing, support and security-review material (gitignored; never commit)
+└── panes/                           # Local agent scratch notes (gitignored; never commit)
 ```
 
 ### Key Scripts
 
 - `export_entra_baseline.py`: Graph API export for Entra objects (Named Locations, Authentication Strengths, Conditional Access, App Registrations, Enterprise Applications).
+- `export_entra_identity.py`: Phase 1 and v2 identity export — security groups (with CA references, member counts, and rename detection), directory role assignments (permanent + PIM-eligible), PIM role governance policies, authentication methods policy, cross-tenant access settings, Identity Protection risk policies, security defaults, and authorization policy. Supports `--reports-only` mode for the standalone reports pipeline.
 - `commit_entra_drift.py`: commits Entra drift with author attribution from audit logs.
-- `resolve_ca_references.py`: resolves Conditional Access GUID references to human-readable names.
+- `resolve_ca_references.py`: resolves Conditional Access GUID references to human-readable names. When the Groups snapshot is available (written by `export_entra_identity.py`), group names are resolved from disk instead of via Graph API.
 - `filter_entra_enrichment_noise.py`: reverts JSON churn caused by best-effort Graph enrichment (owners, app roles).
 - `filter_intune_partial_settings_noise.py`: reverts partial Settings Catalog exports.
+- `run_reports.py`: dispatches report and documentation generation by reading `reports/definitions.yml`; called by the pipeline instead of invoking individual report scripts directly. Add new report types to the definitions file, not to the pipeline YAML.
+- `generate_settings_report.py`: produces `policy-settings.csv` — every configured setting across Settings Catalog, Device Configurations, and Compliance Policies, with structured metadata columns (OS, Source, Type, Category, Scoping, Area, Version) parsed from the policy filename convention.
 - `generate_assignment_report.py`: produces Markdown and CSV assignment inventories.
 - `generate_app_inventory_report.py`: produces Entra apps inventory CSV.
 - `generate_object_inventory_reports.py`: produces per-category object inventory CSVs.
-- `validate_backup_outputs.py`: asserts required files exist after export.
+- `validate_backup_outputs.py`: asserts required files exist after export. No longer validates reports (reports are generated and committed by the standalone reports pipeline).
 - `ensure_rolling_pr.py`: creates or updates one rolling drift PR per workload.
 - `report_utils.py`: helpers shared by the report generators.
 - `update_pr_review_summary.py`: refreshes PR descriptions with change counts, risk assessment, and optional AI narrative.
-  Split into the entry script (orchestration) and sibling modules: `pr_base` (env/HTTP), `pr_changes` (change model, risk, deterministic summary), `pr_semantic` (policy JSON diff), `pr_change_source` (admin vs platform drift), `pr_ai` (Azure OpenAI client, narratives), `pr_description` (description blocks and size fallback), `pr_threads` (review threads), `pr_review` (builds the AI request and walks the full/compact/minimal retry ladder).
+  Split into the entry script (orchestration) and sibling modules: `pr_base` (env/HTTP), `pr_i18n` (summary translations, `PR_SUMMARY_LANGUAGE`), `pr_changes` (change model, risk, deterministic summary), `pr_semantic` (policy JSON diff), `pr_change_source` (admin vs platform drift), `pr_ai` (Azure OpenAI client, narratives), `pr_description` (description blocks and size fallback), `pr_threads` (review threads), `pr_review` (builds the AI request and walks the full/compact/minimal retry ladder).
 - `apply_reviewer_rejections.py`: processes `/reject` and `/accept` reviewer thread commands.
 - `queue_post_merge_restore.py`: queues restore pipeline after merged PRs that contained `/reject` decisions.
 - `probe_tenant_changes.py`: polls Intune/Entra audit logs via Graph, implements debouncer (idle → armed → cooldown), and decides whether to trigger a backup.
@@ -78,6 +86,37 @@ Workflow at a high level:
 - `astral_mcp_tools.py`: core query layer for the MCP server; reads tenant state from Azure DevOps Git or a local clone.
 - `forge_compat.py`: on GitHub or Gitea Actions (`common.scm_platform()`: `GITEA_ACTIONS` is checked before `GITHUB_ACTIONS`; `ASTRAL_SCM` overrides), `common.request_json` routes Azure DevOps REST calls (`*/_apis/*`) here and gets Azure DevOps-shaped JSON back, so the PR scripts run unchanged on all platforms. New ADO endpoints must be mapped there.
 - Shared CI steps (all platforms): `run_intune_backup.sh`, `resolve_assignment_group_names.py`, `commit_intune_drift.ps1`, `reset_entra_export.sh`, `restore_checkout_ref.sh`, `restore_prepare_scope.py`, `restore_normalize_payload.py`, `run_intunecd_update.sh`. GitHub/Gitea only: `backup_intune.sh`, `backup_entra.sh`, `run_review.sh`, `run_probe.sh`, `get_graph_token.py`; keep workflows thin and put logic in these scripts. Workflows must never put `${{ }}` expressions inside `run:` scripts (pass via `env:`). Use `common.ci_set_output/ci_set_env/ci_log` (Python) or `scripts/ci.sh` (bash) instead of printing `##vso[...]` directly.
+
+## Report and Documentation Template System
+
+Report and documentation definitions live in `reports/definitions.yml`. The pipeline calls `scripts/run_reports.py` once per workload instead of individual hardcoded tasks.
+
+**Ownership split:**
+- `reports/definitions.yml` — upstream-owned (builtin reports). Never edit directly; it will be overwritten on update.
+- `reports/definitions.local.yml` — customer-owned (`merge=ours` in `.gitattributes`). Add custom reports here; use the same `name` as a builtin entry to override it.
+
+The dispatcher merges both files at runtime: local entries win on name collision and carry `source: "local"`; unmatched builtin entries carry `source: "builtin"`.
+
+**To add a custom report:** append an entry to `reports/definitions.local.yml`. Required fields: `name`, `script`, `workloads`, `args`. No pipeline YAML changes needed.
+
+**Condition expressions** (evaluated against env vars at pipeline runtime):
+- absent — always run
+- `full_run` — only on full pipeline runs
+- `ENV_VAR_NAME` — run if the env var is truthy (`1`/`true`/`yes`)
+- `"A or B"` / `"A and B"` — boolean combinators
+- dict keyed by workload — per-workload condition; missing key means always run
+
+**Dispatcher CLI:**
+```bash
+python3 scripts/run_reports.py --workload intune \
+  --backup-dir ./tenant-state/intune \
+  --reports-dir ./tenant-state/reports/intune \
+  --repo-root . \
+  --mode full \
+  --type reports   # all | reports | documentation
+```
+
+**MCP access:** `list_report_definitions(workload?)` returns the merged definitions with a `source` field (`builtin` or `local`); `list_generated_reports(workload)` shows what files have been generated; `get_report(workload, name)` retrieves the primary output of a named report; `get_settings_report(workload, policy?, category?, os_filter?, max_rows?)` returns filtered rows from `policy-settings.csv`; `find_policies_for_setting(setting, workload?)` answers "which policies configure this setting?" across all policy types.
 
 ## Code Style and Conventions
 
@@ -126,6 +165,8 @@ python3 -m unittest discover -s tests -v
 - `test_deploy_packages.py`: the files shipped in the Function App zip and the MCP image are self-contained (import closure, run in isolation), the provisioning scripts stage them, and the deploy PowerShell stays Windows PowerShell 5.1 compatible (BOM, no multi-part `Join-Path`).
 - `test_probe_tenant_changes.py`: the full debouncer state table.
 - `test_change_probe_function.py`: the Function App entry points (Azure SDKs stubbed).
+- `test_export_entra_identity.py`, `test_run_reports.py`: the identity export (groups, role assignments, PIM, security settings) and the report dispatcher driven by `reports/definitions.yml`.
+- `test_restore_prepare_scope.py`: selective-restore path normalization and traversal guard.
 - `test_astral_mcp_tools.py`, `test_mcp_server.py`: MCP client for local and remote sources; server auth middleware and Entra claim rules.
 
 ## Build and Runtime Architecture
@@ -145,8 +186,8 @@ An Azure Container Apps-hosted MCP server exposes ASTRAL tenant state to AI assi
 - **Location**: `infra/mcp-server/`
 - **Runtime**: Python FastMCP with stdio or SSE transport.
 - **Data source**: Azure DevOps REST API (reads `tenant-state/` from Git) or local filesystem clone.
-- **Tools**: policy lookup, search, drift history, assignment reports, object inventory.
-- **Prompts**: audit briefing and policy deep-dive templates.
+- **Tools**: policy lookup, search, drift history, assignment reports, object inventory, report dispatcher (`list_report_definitions` / `list_generated_reports` / `get_report`), per-setting inventory (`get_settings_report` / `find_policies_for_setting`), CA group analysis (`get_ca_groups`), and privileged role assignment review (`get_privileged_role_assignments`).
+- **Prompts**: audit briefing, security posture briefing, and policy deep-dive templates.
 - **Auth**: Microsoft Entra ID via Container Apps built-in authentication (recommended for production).
 - **Deployment**: Integrated into `deploy/provision.ps1` (optional, prompted interactively or controlled via `-DeployMcpServer` / `-SkipMcpServer` / `-DeployMcpOnly` flags). Container image built from `infra/mcp-server/Dockerfile` via Azure Container Registry Tasks.
 
@@ -176,10 +217,17 @@ Because Microsoft Graph change notifications and delta queries do not support In
 - **Entra backup job** (`backup_entra`):
   1. Prepare `drift/entra` branch from `main`.
   2. Export selected categories with `export_entra_baseline.py`.
-  3. Resolve Conditional Access references.
-  4. Generate reports.
+  3. Export Phase 1 and v2 identity objects with `export_entra_identity.py`.
+  4. Resolve Conditional Access references (using the Groups snapshot when available).
   5. Validate outputs.
   6. Filter enrichment noise and commit drift.
+
+- **Reports job** (`generate_reports` in `azure-pipelines-reports.yml`):
+  1. Triggered by nightly schedule (04:00) or by changes to `tenant-state/intune/**` or `tenant-state/entra/**`.
+  2. Checkout latest `main`.
+  3. Generate Intune reports and documentation.
+  4. Generate Entra reports and identity reports (using `--reports-only` where applicable).
+  5. Commit results to `main` with `[skip ci]`.
 
 - **Review sync jobs** (`sync_intune_review_decisions`, `sync_entra_review_decisions`):
   1. Apply `/reject` decisions.
@@ -222,6 +270,31 @@ python3 ./scripts/resolve_ca_references.py \
   --token "$GRAPH_TOKEN"
 ```
 
+### Export Entra identity objects locally
+
+```bash
+python3 ./scripts/export_entra_identity.py \
+  --root ./tenant-state/entra \
+  --token "$GRAPH_TOKEN" \
+  --include-groups true \
+  --include-role-assignments true \
+  --include-auth-methods-policy true \
+  --include-cross-tenant-access true \
+  --include-identity-protection true \
+  --include-privileged-groups true \
+  --include-pim-policies true \
+  --include-security-settings true \
+  --watch-groups-csv ""
+```
+
+### Generate per-setting policy inventory locally
+
+```bash
+python3 ./scripts/generate_settings_report.py \
+  --root ./tenant-state/intune \
+  --output-dir ./tenant-state/reports/intune
+```
+
 ### Generate assignment report locally
 
 ```bash
@@ -245,8 +318,7 @@ For production deployment, use the integrated provisioning script (`deploy/provi
 python3 ./scripts/validate_backup_outputs.py \
   --workload intune \
   --mode light \
-  --root ./tenant-state/intune \
-  --reports-root ./tenant-state/reports/intune
+  --root ./tenant-state/intune
 ```
 
 ## Key Environment / Pipeline Variables
@@ -260,6 +332,10 @@ python3 ./scripts/validate_backup_outputs.py \
 - `AUTO_REMEDIATE_AFTER_MERGE` / `AUTO_REMEDIATE_DRY_RUN`
 - `ENABLE_PR_AI_SUMMARY` + `AZURE_OPENAI_ENDPOINT`, `AZURE_OPENAI_DEPLOYMENT`, `AZURE_OPENAI_API_KEY`
 - `ROLLING_PR_DELAY_REVIEWER_NOTIFICATIONS` / `ROLLING_PR_MERGE_STRATEGY`
+- `PR_SUMMARY_LANGUAGE` (default: `en`) — controls the language of both the AI-generated PR narrative and the deterministic summary tables. Supported out of the box: `en`, `cz`, `sk`, `de`, `fr`, `it`, `es`, `pl`, `nl`, `pt`. Additional languages can be added by extending the `_TRANSLATIONS` dictionary in `scripts/update_pr_review_summary.py`.
+- Phase 1 identity export toggles (all default `true`): `ENTRA_INCLUDE_GROUPS`, `ENTRA_INCLUDE_ROLE_ASSIGNMENTS`, `ENTRA_INCLUDE_AUTH_METHODS_POLICY`, `ENTRA_INCLUDE_CROSS_TENANT_ACCESS`, `ENTRA_INCLUDE_IDENTITY_PROTECTION`
+- v2 identity export toggles (all default `true`): `ENTRA_INCLUDE_PRIVILEGED_GROUPS`, `ENTRA_INCLUDE_PIM_POLICIES`, `ENTRA_INCLUDE_SECURITY_SETTINGS`
+- `ENTRA_WATCH_GROUPS_CSV` — comma-separated group GUIDs for full member-list export (all other groups receive count-only tracking)
 
 ### MCP Server Environment Variables
 

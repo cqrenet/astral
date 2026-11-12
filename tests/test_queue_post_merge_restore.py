@@ -137,6 +137,36 @@ class QueuePostMergeRestoreTests(unittest.TestCase):
             {"Authorization": "Bearer tok", "Content-Type": "application/json", "Accept": "application/json"},
         )
 
+    def test_query_completed_prs_includes_abandoned(self) -> None:
+        """_query_completed_prs must return abandoned PRs (ADO status != 'completed')."""
+        prs = [
+            {"pullRequestId": 1, "status": "completed", "closedDate": "2026-06-08T10:00:00Z"},
+            {"pullRequestId": 2, "status": "abandoned", "closedDate": "2026-06-08T09:00:00Z"},
+            {"pullRequestId": 3, "status": "active", "closedDate": None},
+        ]
+
+        with patch.object(self.module, "_request_json", return_value={"value": prs}):
+            result = self.module._query_completed_prs("https://api", {}, "refs/heads/drift", "refs/heads/main")
+
+        ids = [pr["pullRequestId"] for pr in result]
+        self.assertIn(1, ids, "completed (merged) PR must be included")
+        self.assertIn(2, ids, "abandoned PR must be included")
+        self.assertNotIn(3, ids, "active PR must be excluded")
+
+    def test_query_completed_prs_uses_all_status(self) -> None:
+        """Query must use status=all so ADO returns both merged and abandoned PRs."""
+        captured_url: list[str] = []
+
+        def _fake_request(url, **kwargs):
+            captured_url.append(url)
+            return {"value": []}
+
+        with patch.object(self.module, "_request_json", side_effect=_fake_request):
+            self.module._query_completed_prs("https://api", {}, "refs/heads/drift", "refs/heads/main")
+
+        self.assertTrue(captured_url, "request_json must have been called")
+        self.assertIn("status=all", captured_url[0])
+
     def test_queue_restore_pipeline_includes_selective_params(self) -> None:
         captured: dict[str, object] = {}
 

@@ -14,6 +14,15 @@ export ENTRA_INCLUDE_AUTHENTICATION_STRENGTHS="${ENTRA_INCLUDE_AUTHENTICATION_ST
 export ENTRA_INCLUDE_CONDITIONAL_ACCESS="${ENTRA_INCLUDE_CONDITIONAL_ACCESS:-true}"
 export ENTRA_INCLUDE_ENTERPRISE_APPS="${ENTRA_INCLUDE_ENTERPRISE_APPS:-true}"
 export ENTRA_INCLUDE_APP_REGISTRATIONS="${ENTRA_INCLUDE_APP_REGISTRATIONS:-true}"
+export ENTRA_INCLUDE_GROUPS="${ENTRA_INCLUDE_GROUPS:-true}"
+export ENTRA_INCLUDE_ROLE_ASSIGNMENTS="${ENTRA_INCLUDE_ROLE_ASSIGNMENTS:-true}"
+export ENTRA_INCLUDE_AUTH_METHODS_POLICY="${ENTRA_INCLUDE_AUTH_METHODS_POLICY:-true}"
+export ENTRA_INCLUDE_CROSS_TENANT_ACCESS="${ENTRA_INCLUDE_CROSS_TENANT_ACCESS:-true}"
+export ENTRA_INCLUDE_IDENTITY_PROTECTION="${ENTRA_INCLUDE_IDENTITY_PROTECTION:-true}"
+export ENTRA_INCLUDE_PRIVILEGED_GROUPS="${ENTRA_INCLUDE_PRIVILEGED_GROUPS:-true}"
+export ENTRA_INCLUDE_PIM_POLICIES="${ENTRA_INCLUDE_PIM_POLICIES:-true}"
+export ENTRA_INCLUDE_SECURITY_SETTINGS="${ENTRA_INCLUDE_SECURITY_SETTINGS:-true}"
+export ENTRA_WATCH_GROUPS_CSV="${ENTRA_WATCH_GROUPS_CSV:-}"
 root="$BACKUP_FOLDER/$ENTRA_BACKUP_SUBDIR"
 reports="$BACKUP_FOLDER/$REPORTS_SUBDIR/entra"
 
@@ -43,14 +52,28 @@ timeout 45m python3 -u scripts/export_entra_baseline.py \
   --include-app-registrations "$ENTRA_INCLUDE_APP_REGISTRATIONS_EFFECTIVE" \
   --fail-on-export-error true
 
+# Identity objects (groups, role assignments, PIM, ...) also write their own Markdown reports.
+timeout 20m python3 -u scripts/export_entra_identity.py \
+  --root "$root" \
+  --include-groups "$ENTRA_INCLUDE_GROUPS" \
+  --include-role-assignments "$ENTRA_INCLUDE_ROLE_ASSIGNMENTS" \
+  --include-auth-methods-policy "$ENTRA_INCLUDE_AUTH_METHODS_POLICY" \
+  --include-cross-tenant-access "$ENTRA_INCLUDE_CROSS_TENANT_ACCESS" \
+  --include-identity-protection "$ENTRA_INCLUDE_IDENTITY_PROTECTION" \
+  --include-privileged-groups "$ENTRA_INCLUDE_PRIVILEGED_GROUPS" \
+  --include-pim-policies "$ENTRA_INCLUDE_PIM_POLICIES" \
+  --include-security-settings "$ENTRA_INCLUDE_SECURITY_SETTINGS" \
+  --watch-groups-csv "$ENTRA_WATCH_GROUPS_CSV" \
+  --previous-snapshot-ref "origin/$DRIFT_BRANCH_ENTRA" \
+  --reports-root "$reports" \
+  --fail-on-export-error true
+
 if [ "$ENTRA_INCLUDE_CONDITIONAL_ACCESS" = "true" ]; then
-  python3 scripts/resolve_ca_references.py --root "$root"
-  python3 scripts/generate_assignment_report.py --root "$root" --output-dir "$reports"
+  python3 scripts/resolve_ca_references.py --root "$root" --groups-root "$root/Groups"
 fi
-if [ "$ENTRA_INCLUDE_APP_REGISTRATIONS_EFFECTIVE" = "true" ] || [ "$ENTRA_INCLUDE_ENTERPRISE_APPS_EFFECTIVE" = "true" ]; then
-  python3 scripts/generate_app_inventory_report.py --root "$root" --output-dir "$reports"
-fi
-python3 scripts/generate_object_inventory_reports.py --root "$root" --output-dir "$reports"
+# Report definitions live in reports/definitions.yml (+ definitions.local.yml); conditions read the env above.
+python3 scripts/run_reports.py --workload entra --backup-dir "$root" --reports-dir "$reports" \
+  --repo-root "$PWD" --mode "$RUN_MODE" --type reports
 
 python3 scripts/validate_backup_outputs.py --workload entra --mode "$RUN_MODE" --root "$root" --reports-root "$reports" \
   --include-named-locations "$ENTRA_INCLUDE_NAMED_LOCATIONS" \

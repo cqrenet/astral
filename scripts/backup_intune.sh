@@ -36,8 +36,9 @@ python3 scripts/filter_intune_omission_noise.py --repo-root "$PWD" --backup-root
 
 BUILD_SOURCESDIRECTORY="$PWD" BACKUP_FOLDER="$root" ACCESS_TOKEN="$GRAPH_TOKEN" python3 scripts/resolve_assignment_group_names.py
 
-python3 scripts/generate_assignment_report.py --root "$root" --output-dir "$reports"
-python3 scripts/generate_object_inventory_reports.py --root "$root" --output-dir "$reports"
+# Report definitions live in reports/definitions.yml (+ definitions.local.yml).
+python3 scripts/run_reports.py --workload intune --backup-dir "$root" --reports-dir "$reports" \
+  --repo-root "$PWD" --mode "$RUN_MODE" --type reports
 if [ "${ENABLE_WORKLOAD_ENTRA:-true}" = "false" ] && { [ "${ENTRA_INCLUDE_APP_REGISTRATIONS:-true}" = "true" ] || [ "${ENTRA_INCLUDE_ENTERPRISE_APPS:-true}" = "true" ]; }; then
   python3 scripts/generate_app_inventory_report.py --root "$BACKUP_FOLDER/$ENTRA_BACKUP_SUBDIR" --output-dir "$BACKUP_FOLDER/$REPORTS_SUBDIR/entra"
 fi

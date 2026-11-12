@@ -91,6 +91,8 @@ if ($changedFile) {
   git show-ref --verify --quiet "refs/remotes/origin/$($env:DRIFT_BRANCH_INTUNE)"
   $hasRemoteDrift = $LASTEXITCODE -eq 0
   if ($hasRemoteDrift) {
+    # Stage new files as intent-to-add so git diff can see untracked additions (e.g. a brand-new policy).
+    git add --intent-to-add "$($env:BACKUP_FOLDER)/$($env:INTUNE_BACKUP_SUBDIR)" 2>$null
     git diff --quiet "origin/$($env:DRIFT_BRANCH_INTUNE)" -- "$($env:BACKUP_FOLDER)/$($env:INTUNE_BACKUP_SUBDIR)"
     if ($LASTEXITCODE -eq 0) {
       "No Intune change detected (snapshot identical to existing drift branch)"

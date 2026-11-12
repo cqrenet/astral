@@ -43,7 +43,7 @@ def _query_completed_prs(
 ) -> list[dict[str, Any]]:
     query = urllib.parse.urlencode(
         {
-            "searchCriteria.status": "completed",
+            "searchCriteria.status": "all",
             "searchCriteria.sourceRefName": source_ref,
             "searchCriteria.targetRefName": target_ref,
             "api-version": "7.1",
@@ -53,7 +53,9 @@ def _query_completed_prs(
     )
     payload = _request_json(f"{repo_api}/pullrequests?{query}", headers=headers)
     items = payload.get("value", []) if isinstance(payload, dict) else []
-    return sorted(items, key=lambda x: x.get("closedDate", ""), reverse=True)
+    # Include completed (merged) and abandoned PRs; skip active/notSet ones.
+    closed = [pr for pr in items if pr.get("status") in ("completed", "abandoned")]
+    return sorted(closed, key=lambda x: x.get("closedDate", ""), reverse=True)
 
 
 def _threads(repo_api: str, headers: dict[str, str], pr_id: int) -> list[dict[str, Any]]:

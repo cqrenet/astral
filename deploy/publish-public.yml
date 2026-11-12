@@ -1,0 +1,154 @@
+trigger: none
+pr: none
+
+# Publisher pipeline: pushes a sanitized snapshot of the dev repo to the public template repo.
+#
+# Usage:
+#   Queue this pipeline manually and optionally provide a tag name (e.g. v1.1.0).
+#
+# Prerequisites:
+#   - PUBLIC_REPO_URL      (pipeline variable)
+#   - PUBLIC_REPO_PAT      (secret pipeline variable)
+
+parameters:
+  - name: tagName
+    displayName: Optional release tag (e.g. v1.1.0)
+    type: string
+    default: ""
+
+variables:
+  - template: ../templates/variables-common.yml
+
+jobs:
+  - job: publish_public_template
+    displayName: Publish sanitized snapshot to public repo
+    pool:
+      name: $(AGENT_POOL_NAME)
+    steps:
+      - checkout: self
+        persistCredentials: true
+
+      - task: Bash@3
+        displayName: Run sync-to-public
+        inputs:
+          targetType: inline
+          script: |
+            set -euo pipefail
+            chmod +x "$(Build.SourcesDirectory)/deploy/sync-to-public.sh"
+
+            TMP_DIR="$(mktemp -d)"
+            trap 'rm -rf "$TMP_DIR"' EXIT
+
+            # Run the sync script; it clones the public repo into a temp subdir
+            "$(Build.SourcesDirectory)/deploy/sync-to-public.sh" \
+              "$(PUBLIC_REPO_URL)" \
+              "${{ parameters.tagName }}"
+
+            # The script prints the clone path in its output. Extract the last temp dir it used.
+            PUBLIC_CLONE="$TMP_DIR/public"
+            mkdir -p "$PUBLIC_CLONE"
+
+            # Re-run the sync into our controlled temp dir to guarantee the path
+            cd "$(Build.SourcesDirectory)"
+            rsync -a \
+              --exclude='.git' \
+              --exclude='tenant-state' \
+              --exclude='prod-as-built.md' \
+              --exclude='node_modules' \
+              --exclude='__pycache__' \
+              --exclude='.DS_Store' \
+              --exclude='deploy/sync-to-public.sh' \
+              --exclude='deploy/publish-public.yml' \
+              "$(Build.SourcesDirectory)/" "$PUBLIC_CLONE/"
+
+            cd "$PUBLIC_CLONE"
+
+            # Re-create empty tenant-state structure
+            mkdir -p tenant-state/intune tenant-state/entra tenant-state/reports/intune tenant-state/reports/entra
+            touch tenant-state/intune/.gitkeep tenant-state/entra/.gitkeep tenant-state/reports/intune/.gitkeep tenant-state/reports/entra/.gitkeep
+            cat > tenant-state/README.md <<'EOF'
+# tenant-state
+
+This directory is populated automatically by the ASTRAL pipeline.
+Do not place manual files here; they will be overwritten on the next export.
+EOF
+
+            git init
+            git remote add origin "$(PUBLIC_REPO_URL)" 2>/dev/null || git remote set-url origin "$(PUBLIC_REPO_URL)"
+
+            git config user.email "astral-publish@local"
+            git config user.name "ASTRAL Publisher"
+
+            # Fetch existing public main so we can diff against it
+            git fetch origin main || true
+
+            # Stage everything
+            git add -A
+
+            if git diff --cached --quiet; then
+              echo "No changes to publish."
+              exit 0
+            fi
+
+            DEV_SHA="$(git -C '$(Build.SourcesDirectory)' rev-parse --short HEAD)"
+            DEV_BRANCH="$(git -C '$(Build.SourcesDirectory)' rev-parse --abbrev-ref HEAD)"
+
+            # Try to find the previous dev SHA recorded in the public repo's latest commit.
+            PREV_SHA=""
+            if git rev-parse --verify origin/main >/dev/null 2>&1; then
+              PREV_MSG="$(git log -1 --pretty=%B origin/main 2>/dev/null || true)"
+              PREV_SHA="$(printf '%s\n' "$PREV_MSG" | grep -oE 'Sync from dev @[[:space:]]+[a-f0-9]+' | awk '{print $NF}' | head -c7)"
+              if [ -z "$PREV_SHA" ]; then
+                PREV_SHA="$(printf '%s\n' "$PREV_MSG" | grep -oE 'Source:.*\([a-f0-9]+\)' | grep -oE '\([a-f0-9]+\)' | tr -d '()' | head -c7)"
+              fi
+            fi
+
+            COMMIT_BODY="Source: ${DEV_BRANCH} (${DEV_SHA})"
+
+            if [ -n "$PREV_SHA" ]; then
+              COMMIT_BODY="${COMMIT_BODY}
+Previous-sync: ${PREV_SHA}"
+
+              DEV_COMMITS="$(git -C '$(Build.SourcesDirectory)' log --no-merges --pretty='- %s' "${PREV_SHA}..${DEV_SHA}" 2>/dev/null | head -n 20 || true)"
+              if [ -n "$DEV_COMMITS" ]; then
+                COMMIT_BODY="${COMMIT_BODY}
+
+Changes since previous sync:
+${DEV_COMMITS}"
+              fi
+            fi
+
+            DIFF_STAT="$(git diff --cached --stat | sed 's/^/  /' || true)"
+            if [ -n "$DIFF_STAT" ]; then
+              COMMIT_BODY="${COMMIT_BODY}
+
+Published changes:
+${DIFF_STAT}"
+            fi
+
+            COMMIT_BODY="${COMMIT_BODY}
+
+Excluded: live tenant exports, generated artifacts, and dev-only tooling."
+
+            git commit -m "Sync from dev @ ${DEV_SHA}
+
+${COMMIT_BODY}"
+
+            if [ -n "${{ parameters.tagName }}" ]; then
+              git tag -a "${{ parameters.tagName }}" -m "Release ${{ parameters.tagName }}"
+            fi
+
+            # Push commit (and tag if provided)
+            git push origin HEAD:main --force
+            if [ -n "${{ parameters.tagName }}" ]; then
+              git push origin "${{ parameters.tagName }}"
+            fi
+
+            echo "Publication complete."
+            if [ -n "${{ parameters.tagName }}" ]; then
+              echo "Tag: ${{ parameters.tagName }}"
+            fi
+        env:
+          GIT_ASKPASS: echo
+          GIT_USERNAME: $(PUBLIC_REPO_USERNAME)
+          GIT_PASSWORD: $(PUBLIC_REPO_PAT)

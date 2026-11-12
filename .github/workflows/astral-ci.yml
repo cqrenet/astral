@@ -1,0 +1,37 @@
+# ASTRAL CI: unit tests and lint on every push and pull request to the public template repository.
+# Skipped everywhere else (customer copies, GHES) so it never queues on a runner that does not exist.
+name: ASTRAL CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: astral-ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    if: github.repository == 'cqrenet/astral'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262   # v4.4.0
+        with:
+          persist-credentials: false
+
+      - name: Python environment
+        run: |
+          python3 -m venv "$RUNNER_TEMP/ci-venv"
+          "$RUNNER_TEMP/ci-venv/bin/pip" install --quiet PyYAML ruff shellcheck-py
+          echo "$RUNNER_TEMP/ci-venv/bin" >> "$GITHUB_PATH"
+
+      - name: Unit tests
+        run: python3 -m unittest discover -s tests -v
+
+      - name: Shell scripts
+        run: shellcheck -x --severity=warning scripts/*.sh
