@@ -512,23 +512,30 @@ def sync_remote_clone(force: bool = False) -> str | None:
         return None
     if not url.startswith("https://") and not url.startswith("file://"):
         raise RuntimeError("ASTRAL_REPO_URL must be an https:// URL.")
-    dest = os.environ.get("ASTRAL_REPO_CLONE_DIR", "/tmp/astral-repo")
+    # Container scratch dir: the image runs as an unprivileged user that can only write to /tmp.
+    dest = os.environ.get("ASTRAL_REPO_CLONE_DIR", "/tmp/astral-repo")  # nosec B108
     branch = os.environ.get("ASTRAL_REPO_BRANCH", "main").strip() or "main"
     interval = int(os.environ.get("ASTRAL_REPO_REFRESH_SECONDS", "300"))
     token = os.environ.get("ASTRAL_REPO_TOKEN", "").strip()
-    auth: list[str] = []
+    # The token goes to git through the child environment, not argv, so it is not visible in the process list.
+    git_env = os.environ.copy()
     if token:
         basic = base64.b64encode(f"x-access-token:{token}".encode()).decode()
-        auth = ["-c", f"http.extraheader=AUTHORIZATION: basic {basic}"]
+        git_env.update({
+            "GIT_CONFIG_COUNT": "1",
+            "GIT_CONFIG_KEY_0": "http.extraheader",
+            "GIT_CONFIG_VALUE_0": f"AUTHORIZATION: basic {basic}",
+        })
     with _clone_lock:
         have_clone = os.path.isdir(os.path.join(dest, ".git"))
         if have_clone and not force and time.monotonic() - _clone_synced_at < interval:
             return dest
         if not have_clone:
-            subprocess.run(["git", *auth, "clone", "--quiet", "--single-branch", "--branch", branch, "--", url, dest],
-                           check=True, capture_output=True)
+            subprocess.run(["git", "clone", "--quiet", "--single-branch", "--branch", branch, "--", url, dest],
+                           check=True, capture_output=True, env=git_env)
         else:
-            subprocess.run(["git", *auth, "-C", dest, "fetch", "--quiet", "origin", branch], check=True, capture_output=True)
+            subprocess.run(["git", "-C", dest, "fetch", "--quiet", "origin", branch],
+                           check=True, capture_output=True, env=git_env)
             subprocess.run(["git", "-C", dest, "reset", "--quiet", "--hard", "FETCH_HEAD"], check=True, capture_output=True)
         _clone_synced_at = time.monotonic()
     return dest

@@ -73,7 +73,7 @@ def _client_credentials(tenant_id: str, client_id: str, authority: str, credenti
 def certificate_assertion(pem_path: str, client_id: str, token_url: str, now: int | None = None) -> str:
     """RS256 client assertion (x5t + x5t#S256 thumbprints), signed with the openssl CLI."""
     der = subprocess.run(["openssl", "x509", "-in", pem_path, "-outform", "DER"], capture_output=True, check=True).stdout
-    header = {"alg": "RS256", "typ": "JWT", "x5t": _b64url(hashlib.sha1(der).digest()),
+    header = {"alg": "RS256", "typ": "JWT", "x5t": _b64url(hashlib.sha1(der, usedforsecurity=False).digest()),
               "x5t#S256": _b64url(hashlib.sha256(der).digest())}
     now = int(time.time()) if now is None else now
     claims = {"aud": token_url, "iss": client_id, "sub": client_id, "jti": str(uuid.uuid4()),

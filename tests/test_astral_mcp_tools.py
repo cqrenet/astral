@@ -267,3 +267,21 @@ class RemoteCloneTests(unittest.TestCase):
         with unittest.mock.patch.dict(os.environ, {"ASTRAL_REPO_URL": "ssh://host/repo.git"}):
             with self.assertRaises(RuntimeError):
                 module.sync_remote_clone(force=True)
+
+    def test_clone_token_is_passed_by_environment_not_argv(self) -> None:
+        module = load_module()
+        calls = []
+
+        def fake_run(cmd, **kwargs):
+            calls.append((cmd, kwargs.get("env") or {}))
+            return subprocess.CompletedProcess(cmd, 0)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            env = {"ASTRAL_REPO_URL": "https://git.example/repo.git", "ASTRAL_REPO_CLONE_DIR": os.path.join(tmp, "c"),
+                   "ASTRAL_REPO_TOKEN": "s3cret-token"}
+            with unittest.mock.patch.dict(os.environ, env), unittest.mock.patch.object(module.subprocess, "run", fake_run):
+                module.sync_remote_clone(force=True)
+        self.assertTrue(calls)
+        for cmd, child_env in calls:
+            self.assertFalse(any("s3cret" in part or "extraheader" in part for part in cmd), cmd)
+            self.assertIn("GIT_CONFIG_VALUE_0", child_env)
