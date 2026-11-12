@@ -2,7 +2,7 @@
 # Create a GitHub release from an existing Git tag using the gh CLI.
 #
 # Usage:
-#   ./deploy/create-github-release.sh <tag-name>
+#   ./deploy/create-github-release.sh <tag-name> [previous-tag]
 #
 # Example:
 #   ./deploy/create-github-release.sh v1.2.0
@@ -36,7 +36,7 @@ DEV_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 TAG_MESSAGE="$(git -C "$DEV_ROOT" tag -n10 "$TAG_NAME" 2>/dev/null | tail -n +2 | sed 's/^    //' || true)"
 
 # Get commits since the previous tag
-PREV_TAG="$(git -C "$DEV_ROOT" tag --sort=-version:refname | grep -v "^${TAG_NAME}$" | head -1 || true)"
+PREV_TAG="${2:-$(git -C "$DEV_ROOT" tag --sort=-version:refname | grep -v "^${TAG_NAME}$" | head -1 || true)}"
 if [ -n "$PREV_TAG" ]; then
   COMMIT_RANGE="${PREV_TAG}..${TAG_NAME}"
 else
