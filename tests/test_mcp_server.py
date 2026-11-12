@@ -125,15 +125,15 @@ class EntraTokenTests(unittest.TestCase):
             return m._validate_entra_token("token"), jwt.decode
 
     def test_valid_delegated_token_is_accepted_with_both_audience_forms(self) -> None:
-        ok, decode = self._validate({"tid": "tenant-1", "iss": "https://sts/tenant-1/v2.0", "scp": "user_impersonation other"})
+        ok, decode = self._validate({"tid": "tenant-1", "iss": "https://login.microsoftonline.com/tenant-1/v2.0", "scp": "user_impersonation other"})
         self.assertTrue(ok)
         self.assertEqual(decode.call_args.kwargs["audience"], ["client-1", "api://client-1"])
         self.assertEqual(decode.call_args.kwargs["algorithms"], ["RS256"])
 
     def test_wrong_tenant_issuer_or_missing_scope_is_rejected(self) -> None:
-        good = {"tid": "tenant-1", "iss": "https://sts/tenant-1/v2.0", "scp": "user_impersonation"}
+        good = {"tid": "tenant-1", "iss": "https://login.microsoftonline.com/tenant-1/v2.0", "scp": "user_impersonation"}
         self.assertFalse(self._validate({**good, "tid": "other"})[0])
-        self.assertFalse(self._validate({**good, "iss": "https://sts/other/v2.0"})[0])
+        self.assertFalse(self._validate({**good, "iss": "https://login.microsoftonline.com/tenant-1.attacker.example/v2.0"})[0])
         self.assertFalse(self._validate({**good, "scp": "read"})[0])
         self.assertFalse(self._validate({k: v for k, v in good.items() if k != "scp"})[0])  # app-only token, no scp
         self.assertFalse(self._validate({**good, "scp": "user_impersonation_extra"})[0])  # exact scope match only
@@ -186,9 +186,10 @@ class MainTests(unittest.TestCase):
 
     def test_claims_authorized_is_a_pure_rule_check(self) -> None:
         with patch.multiple(m, _entra_tenant_id="t"):
-            self.assertTrue(m._claims_authorized({"tid": "t", "iss": "https://x/t/v2.0", "scp": "user_impersonation"}))
-            self.assertFalse(m._claims_authorized({"tid": "t", "iss": "https://x/t/v2.0", "scp": ""}))
-            self.assertFalse(m._claims_authorized({"tid": "u", "iss": "https://x/t/v2.0", "scp": "user_impersonation"}))
+            self.assertTrue(m._claims_authorized({"tid": "t", "iss": "https://login.microsoftonline.com/t/v2.0", "scp": "user_impersonation"}))
+            self.assertFalse(m._claims_authorized({"tid": "t", "iss": "https://login.microsoftonline.com/t.attacker.example/v2.0", "scp": "user_impersonation"}))
+            self.assertFalse(m._claims_authorized({"tid": "t", "iss": "https://login.microsoftonline.com/t/v2.0", "scp": ""}))
+            self.assertFalse(m._claims_authorized({"tid": "u", "iss": "https://login.microsoftonline.com/t/v2.0", "scp": "user_impersonation"}))
 
     def test_oauth_metadata_needs_tenant_and_client(self) -> None:
         with patch.object(m, "_entra_tenant_id", ""), patch.object(m, "_mcp_client_id", "c"):

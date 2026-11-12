@@ -114,7 +114,8 @@ def _claims_authorized(claims: dict) -> bool:
     if _entra_tenant_id and tid != _entra_tenant_id:
         logger.warning("Entra JWT: wrong tenant (tid=%s)", tid)
         return False
-    if _entra_tenant_id and _entra_tenant_id not in iss:
+    expected_issuer = f"https://login.microsoftonline.com/{_entra_tenant_id}/v2.0"
+    if _entra_tenant_id and iss != expected_issuer:
         logger.warning("Entra JWT: wrong issuer (iss=%s)", iss)
         return False
     # Audience alone is not authorization: Entra issues tokens for this API to any
