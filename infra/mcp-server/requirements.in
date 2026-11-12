@@ -1,5 +1,5 @@
 # Direct dependencies (ranges). requirements.txt is the hash-locked resolution; regenerate with:
 #   uv pip compile requirements.in -o requirements.txt --python-version 3.11 --generate-hashes --universal
-mcp>=1.27.0,<2.0.0
+mcp>=2.3.0,<3.0.0
 PyJWT[cryptography]>=2.8.0,<3
 PyYAML>=6.0,<7
