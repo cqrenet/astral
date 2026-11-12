@@ -45,7 +45,7 @@ configuration are listed in [audit-preparation.md](./audit-preparation.md), not 
 | Upstream update refs are validated and never executed | `deploy/update-from-upstream.yml` | `test_pipeline_policies.py`: `test_malicious_refs_are_rejected_and_never_executed` |
 | MCP requires authentication before serving | `infra/mcp-server/mcp_server.py` | `tests/test_mcp_server.py`: `test_sse_refuses_to_start_without_any_auth`, `test_wrong_missing_or_unconfigured_credentials_get_401` |
 | MCP accepts only the exact Entra issuer, audience and scope | `infra/mcp-server/mcp_server.py` | `test_wrong_tenant_issuer_or_missing_scope_is_rejected`, `test_valid_delegated_token_is_accepted_with_both_audience_forms`, `test_unknown_signing_key_is_rejected`, `test_any_library_error_fails_closed` |
-| MCP queries are read-only and path-safe | `scripts/astral_mcp_tools.py` | `tests/test_astral_mcp_tools.py` |
+| MCP tool inputs are validated; the server only reads files and the repository | `scripts/astral_mcp_tools.py` | `tests/test_astral_mcp_tools.py`: `test_rejects_traversal_and_unknown_inputs` (the server has no write tools; verify by reviewing the tool list in `infra/mcp-server/mcp_server.py`) |
 | Repository tokens never appear on a command line | change probe, trigger script, MCP clone, provisioning | `tests/test_change_probe_function.py` (probe and queue consumer), `tests/test_astral_mcp_tools.py`: `test_clone_token_is_passed_by_environment_not_argv` |
 | Deployable dependencies are hash-locked | `infra/*/requirements.txt` | `tests/test_deploy_packages.py`: `test_requirements_lock_files_are_hash_pinned`; CI runs `pip-audit` on the locks |
 | Function package is self-contained | `deploy/provision.ps1` staging | `tests/test_deploy_packages.py` |
