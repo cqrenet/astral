@@ -263,6 +263,11 @@ If you run the script without `-DeployMcpServer` or `-SkipMcpServer` it will pro
 - **Where secrets live:** the Function App settings are written through a private temporary file, not the `az`
   command line. The MCP token and API key are Container App secrets, referenced by the app as `secretref:`.
   Nothing is printed except the values the script shows once at the end.
+- **Who can use MCP:** the script sets *Assignment required* on the enterprise application. Assign the users or
+  groups that may query tenant state (Entra ID > Enterprise applications > the app > Users and groups). The API key
+  works without assignment; remove it from the Container App if every client uses Entra sign-in.
+- **Webhook:** the PR comment webhook rejects all requests unless `WEBHOOK_SECRET` is set; the script sets it when
+  you give a review-sync pipeline ID.
 - **Network exposure:** the MCP endpoint is public by default and protected by the API key or Entra token check in
   the application. Pass `-McpIngress internal` to remove the public endpoint when your MCP clients reach the
   Container Apps environment over a private network.

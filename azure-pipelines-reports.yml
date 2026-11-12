@@ -56,7 +56,7 @@ jobs:
           targetType: inline
           script: |
             set -euo pipefail
-            pip3 install "IntuneCD==$(INTUNECD_VERSION)" PyYAML
+            pip3 install "IntuneCD==$(INTUNECD_VERSION)" "PyYAML==6.0.3"
           workingDirectory: "$(Build.SourcesDirectory)"
           failOnStderr: true
 

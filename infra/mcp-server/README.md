@@ -284,7 +284,8 @@ Both modes can be active at the same time — service clients use the key, human
 - Consider placing the MCP server behind **Azure API Management** for rate limiting and additional policy governance.
 - The ADO token only needs **Code (Read)** scope for reading repository contents. Use a dedicated PAT from a low-privilege account; a PAT inherits its owner's permissions.
 - The server **fails closed**: with SSE transport it refuses to start unless `MCP_API_KEY` or `ENTRA_TENANT_ID` + `MCP_CLIENT_ID` is set. Use stdio for unauthenticated local development.
-- Entra tokens must carry the `user_impersonation` scope (app-only tokens are rejected). Provisioning sets **assignment required** on the MCP enterprise app; assign the users/groups that may use the server.
+- Entra tokens must carry the `user_impersonation` scope (app-only tokens are rejected). Provisioning (since `v1.5.1`) sets **assignment required** on the MCP enterprise app; assign the users/groups that may use the server. On older deployments set it manually: without it every user in the tenant can sign in.
+- `deploy/provision.ps1` always configures an API key (`MCP_API_KEY`). It is a static shared secret without expiry. If all clients use Entra sign-in, remove the `mcp-api-key` secret and the `MCP_API_KEY` variable from the Container App.
 
 ## Data Flow
 

@@ -20,8 +20,8 @@ variables:
     value: true
   - name: ENABLE_PR_REVIEWER_DECISIONS
     value: true
-  - name: ENABLE_PR_AI_SUMMARY
-    value: true
+  # ENABLE_PR_AI_SUMMARY is not set here on purpose: it belongs in the variable group (see variables-tenant.yml).
+  # A value here would override the group, because later variable definitions win in Azure DevOps.
   - name: ROLLING_PR_DELAY_REVIEWER_NOTIFICATIONS
     value: true
   - name: REQUIRE_CHANGE_TICKETS

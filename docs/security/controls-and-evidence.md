@@ -1,8 +1,10 @@
 # ASTRAL security controls and evidence
 
 This page maps each security control to the code that enforces it and the test that proves it. Run the tests with
-`pip install pyyaml && python3 -m unittest discover -s tests -v`. Controls that depend on your platform
-configuration are listed in [audit-preparation.md](./audit-preparation.md), not here.
+`pip install pyyaml && python3 -m unittest discover -s tests -v`. Install `infra/mcp-server/requirements.txt` as well
+to run the MCP smoke test. Controls that depend on your platform configuration are listed in
+[audit-preparation.md](./audit-preparation.md). Architecture, permissions and known limitations are in the
+[security overview](./README.md).
 
 ## Components and identities
 
@@ -45,6 +47,10 @@ configuration are listed in [audit-preparation.md](./audit-preparation.md), not 
 | Upstream update refs are validated and never executed | `deploy/update-from-upstream.yml` | `test_pipeline_policies.py`: `test_malicious_refs_are_rejected_and_never_executed` |
 | MCP requires authentication before serving | `infra/mcp-server/mcp_server.py` | `tests/test_mcp_server.py`: `test_sse_refuses_to_start_without_any_auth`, `test_wrong_missing_or_unconfigured_credentials_get_401` |
 | MCP accepts only the exact Entra issuer, audience and scope | `infra/mcp-server/mcp_server.py` | `test_wrong_tenant_issuer_or_missing_scope_is_rejected`, `test_valid_delegated_token_is_accepted_with_both_audience_forms`, `test_unknown_signing_key_is_rejected`, `test_any_library_error_fails_closed` |
+| MCP sign-in is limited to assigned users and groups | `deploy/provision.ps1` (assignment required on the enterprise application) | Review; no automated test for the PowerShell Graph calls |
+| MCP rejects requests with an unexpected Host header | `infra/mcp-server/mcp_server.py` (transport security) | Done by the `mcp` library; checked manually against `mcp` 2.3.0 (unknown Host returns 421). No automated test |
+| PR comment webhook requires the shared secret and fails closed without one | `infra/change-probe/pr_comment_webhook/__init__.py` | `tests/test_change_probe_function.py`: `WebhookAuthTests` |
+| AI summaries are opt-in | `scripts/pr_review.py`, `templates/variables-common.yml` | `tests/test_update_pr_review_summary.py`: `test_ai_summary_is_opt_in_even_when_azure_openai_is_configured` |
 | MCP tool inputs are validated; the server only reads files and the repository | `scripts/astral_mcp_tools.py` | `tests/test_astral_mcp_tools.py`: `test_rejects_traversal_and_unknown_inputs` (the server has no write tools; verify by reviewing the tool list in `infra/mcp-server/mcp_server.py`) |
 | Repository tokens never appear on a command line | change probe, trigger script, MCP clone, provisioning | `tests/test_change_probe_function.py` (probe and queue consumer), `tests/test_astral_mcp_tools.py`: `test_clone_token_is_passed_by_environment_not_argv` |
 | Deployable dependencies are hash-locked | `infra/*/requirements.txt` | `tests/test_deploy_packages.py`: `test_requirements_lock_files_are_hash_pinned`; CI runs `pip-audit` on the locks |
@@ -54,7 +60,7 @@ configuration are listed in [audit-preparation.md](./audit-preparation.md), not 
 
 ## Static analysis and dependency state
 
-CI runs on every push and weekly: unit tests, `shellcheck`, `bandit` (high severity gate), `pip-audit` on both lock
+CI runs on every push, on pull requests and weekly: unit tests (including the MCP smoke test), `shellcheck`, `bandit` (high severity gate), `pip-audit` on both lock
 files, and a secret scan with TruffleHog. Known and accepted findings:
 
 - Bandit reports **B310** (`urllib` URL open) in the HTTP helpers. All calls use endpoints built from operator

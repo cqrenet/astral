@@ -28,11 +28,16 @@ your repository administration or your runners.
 
 ## Security model
 
+The full security overview, including permissions, network exposure, secrets, known limitations and the controls
+mapped to tests, is in [docs/security/](docs/security/README.md). In short:
+
 - Backups use read-only Graph permissions. Restore is a separate pipeline with write permissions and defaults to
   dry run. Restore refs must be in the approved baseline branch history.
 - Reviewer `/reject` and `/accept` decisions count only from `PR_DECISION_ALLOWED_REVIEWERS`.
 - Tenant exports can contain administrative data and secrets embedded in policies. Treat the repository that
   holds `tenant-state/` as confidential: private repository, restricted collaborators, no public forks.
-- Secrets are passed through the environment or platform secret stores, not command-line arguments.
+- ASTRAL's scripts take secrets from the environment or platform secret stores. IntuneCD is the exception: it
+  accepts the Graph token only as a command-line argument.
+- The optional MCP server and PR comment webhook are the only inbound endpoints. Both require authentication.
 - Dependencies of the deployable components are hash-locked (`infra/*/requirements.txt`) and the MCP image is
   pinned by digest.

@@ -80,7 +80,7 @@ jobs:
       - name: Python environment
         run: |
           python3 -m venv "$RUNNER_TEMP/astral-venv"
-          "$RUNNER_TEMP/astral-venv/bin/pip" install --quiet "IntuneCD==$INTUNECD_VERSION" PyYAML
+          "$RUNNER_TEMP/astral-venv/bin/pip" install --quiet "IntuneCD==$INTUNECD_VERSION" "PyYAML==6.0.3"
           echo "$RUNNER_TEMP/astral-venv/bin" >> "$GITHUB_PATH"
 
       - name: Get Graph token

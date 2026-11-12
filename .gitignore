@@ -1,6 +1,6 @@
 .DS_Store
 docs/share/
-# Commercial and security-review material kept locally, never published
+# Local working files that are not part of the product
 local-only/
 node_modules/
 __pycache__/

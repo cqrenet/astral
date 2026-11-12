@@ -484,6 +484,22 @@ class UpdatePrReviewSummaryTests(unittest.TestCase):
         )
         self.assertEqual(assessment["dominant_source"], "mixed_or_uncertain")
 
+    def test_ai_summary_is_opt_in_even_when_azure_openai_is_configured(self) -> None:
+        # No request may leave the pipeline unless ENABLE_PR_AI_SUMMARY is explicitly "true".
+        env = {"AZURE_OPENAI_ENDPOINT": "https://example.openai.azure.com", "AZURE_OPENAI_DEPLOYMENT": "d",
+               "AZURE_OPENAI_API_KEY": "k"}
+        for flag in (None, "", "false", "$(ENABLE_PR_AI_SUMMARY)"):
+            scoped = dict(env) if flag is None else {**env, "ENABLE_PR_AI_SUMMARY": flag}
+            with patch.dict(os.environ, scoped, clear=False), \
+                    patch.object(self.pr_ai, "urlopen", side_effect=AssertionError("network call")):
+                if flag is None:
+                    os.environ.pop("ENABLE_PR_AI_SUMMARY", None)
+                result = self.pr_review._call_azure_openai(
+                    changes=[], deterministic_summary="d", workload="intune",
+                    repo_root="/tmp/repo", baseline_branch="main", drift_branch="drift/intune",
+                )
+            self.assertEqual(result, (None, None), flag)
+
     def test_call_azure_openai_payload_includes_change_source_assessment(self) -> None:
         class _FakeResponse:
             def __init__(self, payload: dict) -> None:

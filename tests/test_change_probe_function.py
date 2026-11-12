@@ -20,6 +20,8 @@ def _stub_azure() -> None:
     func.TimerRequest = object
     func.QueueMessage = object
     func.Out = {str: object}  # func.Out[str] is evaluated in an annotation
+    func.HttpRequest = object
+    func.HttpResponse = lambda body="", status_code=200, **kwargs: types.SimpleNamespace(body=body, status_code=status_code)
     tables = types.ModuleType("azure.data.tables")
     tables.TableServiceClient = MagicMock()
     for name, module in (
@@ -180,3 +182,43 @@ class QueueConsumerTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class WebhookAuthTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.m = _load("pr_comment_webhook")
+
+    @staticmethod
+    def _req(authorization=None):
+        headers = {} if authorization is None else {"Authorization": authorization}
+        return types.SimpleNamespace(headers=headers)
+
+    @staticmethod
+    def _basic(user: str, password: str) -> str:
+        import base64
+        return "Basic " + base64.b64encode(f"{user}:{password}".encode()).decode()
+
+    def test_any_username_with_the_secret_is_accepted(self) -> None:
+        with patch.dict(os.environ, {"WEBHOOK_SECRET": "s3cret"}):
+            for user in ("", "astral", "anything"):
+                self.assertTrue(self.m._authorized(self._req(self._basic(user, "s3cret"))), user)
+
+    def test_wrong_missing_or_malformed_credentials_are_rejected(self) -> None:
+        with patch.dict(os.environ, {"WEBHOOK_SECRET": "s3cret"}):
+            for header in (None, "", "Bearer s3cret", "Basic", "Basic !!!", self._basic("astral", "wrong"),
+                           "Basic " + "czNjcmV0"):  # base64("s3cret") without a colon
+                self.assertFalse(self.m._authorized(self._req(header)), header)
+
+    def test_missing_secret_fails_closed(self) -> None:
+        with patch.dict(os.environ, {"WEBHOOK_SECRET": ""}):
+            self.assertFalse(self.m._authorized(self._req(self._basic("astral", ""))))
+            self.assertFalse(self.m._authorized(self._req(None)))
+
+    def test_unauthorized_request_gets_401_before_parsing(self) -> None:
+        req = MagicMock()
+        req.headers = {}
+        with patch.dict(os.environ, {"WEBHOOK_SECRET": "s3cret"}):
+            response = self.m.main(req)
+        self.assertEqual(response.status_code, 401)
+        req.get_json.assert_not_called()

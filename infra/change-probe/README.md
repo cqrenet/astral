@@ -64,7 +64,7 @@ ADO PR comment
 ### `pr_comment_webhook` (HTTP Trigger)
 
 - **Trigger**: POST from ADO service hook on "Pull request commented on"
-- **Auth**: `Authorization: Basic :<WEBHOOK_SECRET>` (if `WEBHOOK_SECRET` is set)
+- **Auth**: HTTP Basic, any username, password = `WEBHOOK_SECRET` (constant-time compare). Without `WEBHOOK_SECRET` every request is rejected.
 - **Actions**:
   1. Validate the shared secret (if configured).
   2. Extract `resource.comment.content` from the ADO service hook payload.
@@ -110,7 +110,7 @@ All settings are provided via Function App application settings (environment var
 | `ADO_TOKEN` | Yes | — | Azure DevOps PAT with **Build (read & execute)** |
 | `ADO_BRANCH` | No | `main` | Git ref to queue the pipeline against |
 | `ADO_REVIEW_SYNC_PIPELINE_ID` | No | — | Pipeline definition ID for `azure-pipelines-review-sync.yml`; required for `pr_comment_webhook` |
-| `WEBHOOK_SECRET` | No | — | Shared secret for `pr_comment_webhook`; validated as `Authorization: Basic :<secret>` |
+| `WEBHOOK_SECRET` | For the webhook | — | Shared secret for `pr_comment_webhook` (Basic auth password). If empty, the webhook rejects all requests |
 | `PROBE_QUIET_WINDOW_MINUTES` | No | `15` | Minutes to wait for change burst to settle |
 | `PROBE_COOLDOWN_MINUTES` | No | `30` | Minutes between successive triggers |
 
@@ -190,7 +190,7 @@ After deploying the Function App, configure the service hook in ADO so PR commen
 6. **Basic authentication — Password**: the value you set for `WEBHOOK_SECRET`
 7. Leave **HTTP headers** empty and click **Finish**.
 
-> **Note:** If `WEBHOOK_SECRET` is left empty in the Function App settings, the function skips auth entirely — useful during local testing but not recommended for production.
+> **Note:** If `WEBHOOK_SECRET` is empty, the webhook rejects every request (fail closed). Releases before `v1.5.1` accepted every request in that case and rejected requests that sent a username.
 
 ## Deployment
 

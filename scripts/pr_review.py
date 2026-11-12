@@ -243,7 +243,7 @@ def _call_azure_openai(
     drift_branch: str,
 ) -> tuple[str | None, str | None]:
     """Reviewer narrative via Azure OpenAI -> (text, error); falls back to a deterministic narrative."""
-    if _env("ENABLE_PR_AI_SUMMARY", required=False, default="true").lower() != "true":
+    if _env("ENABLE_PR_AI_SUMMARY", required=False, default="false").lower() != "true":
         return (None, None)
 
     endpoint = _env("AZURE_OPENAI_ENDPOINT", required=False)

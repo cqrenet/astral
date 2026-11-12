@@ -305,7 +305,7 @@ jobs:
             set -euo pipefail
 
             # PyYAML is needed by the YAML syntax check and some test helpers.
-            pip3 install PyYAML --quiet 2>&1 | tail -1
+            pip3 install "PyYAML==6.0.3" --quiet 2>&1 | tail -1
 
             echo "=== Python syntax check ==="
             find scripts -name "*.py" | xargs python3 -m py_compile && echo "All scripts compile OK."

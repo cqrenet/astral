@@ -113,6 +113,8 @@ Current scope behavior:
 - `infra/change-probe/`: Azure Function App for event-driven change detection.
 - `infra/mcp-server/`: MCP server (Azure Container Apps) for AI assistant integration — policy lookup, search, drift history, and assignment reports.
 - `deploy/provision.ps1`: unified provisioning script for the change probe and MCP server infrastructure.
+- `docs/security/`: security overview, controls mapped to tests, and audit preparation guide.
+- `SECURITY.md`: how to report a vulnerability.
 - `docs/m365-baseline-roadmap.md`: expansion roadmap beyond current workload scope.
 - `scripts/`: export, reporting, PR automation, validation, remediation helpers, change probe logic, and MCP query layer.
 - `tests/`: focused unit coverage for the Python helpers.
@@ -342,7 +344,7 @@ Change probe settings:
 
 Azure OpenAI integration:
 
-- `ENABLE_PR_AI_SUMMARY`
+- `ENABLE_PR_AI_SUMMARY` (default `false`; set `true` in the variable group to send change summaries to your Azure OpenAI deployment)
 - `AZURE_OPENAI_ENDPOINT`
 - `AZURE_OPENAI_DEPLOYMENT`
 - `AZURE_OPENAI_API_KEY`
@@ -364,7 +366,7 @@ The pipeline build identity should have repository permissions to:
 
 - contribute
 - create branch
-- force push
+- force push (needed for the drift branches; allow it on `drift/*` only and deny it on `main`)
 - create and update pull requests
 - create tag if tagging is enabled
 
@@ -399,6 +401,7 @@ Additional read permissions used by the current Entra scope:
 - `RoleManagement.Read.Directory` or `Directory.Read.All` for richer name resolution
 - `RoleEligibilitySchedule.Read.Directory` for PIM-eligible role assignment export (optional; export falls back to permanent-only data if missing)
 - `RoleManagementPolicy.Read.Directory` for PIM role governance policy export (optional; that category is skipped if missing)
+- `AdministrativeUnit.Read.All` (or `Directory.Read.All`) to resolve administrative-unit scopes of role assignments (optional)
 - `AuditLog.Read.All` for best-effort Entra drift author attribution
 
 Restore pipeline write permissions:
@@ -526,6 +529,15 @@ python3 ./scripts/trigger_backup_pipeline.py \
   --token "$ADO_TOKEN" \
   --branch refs/heads/main
 ```
+
+## Security
+
+Read [docs/security/](docs/security/README.md) before deploying. It lists what ASTRAL can access, where its secrets
+live, which endpoints it exposes, and its known limitations. Report vulnerabilities as described in
+[SECURITY.md](SECURITY.md).
+
+The repository that holds `tenant-state/` contains tenant configuration, personal data (group members, role
+assignments) and possibly secrets that administrators embedded in scripts. Keep it private.
 
 ## Tests
 

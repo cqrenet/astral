@@ -837,7 +837,6 @@ jobs:
             echo "Starting Entra baseline export (separate workload branch)..."
             timeout 45m python3 -u "$(PIPELINE_SCRIPT_ROOT)/export_entra_baseline.py" \
               --root "$(Build.SourcesDirectory)/$(BACKUP_FOLDER)/$(ENTRA_BACKUP_SUBDIR)" \
-              --token "$(accessToken)" \
               --previous-snapshot-ref "origin/$(DRIFT_BRANCH_ENTRA)" \
               --include-named-locations "$(ENTRA_INCLUDE_NAMED_LOCATIONS)" \
               --include-authentication-strengths "$(ENTRA_INCLUDE_AUTHENTICATION_STRENGTHS)" \
@@ -848,6 +847,8 @@ jobs:
               --fail-on-export-error "true"
           workingDirectory: "$(Build.SourcesDirectory)"
           failOnStderr: false
+        env:
+          GRAPH_TOKEN: $(accessToken)  # read by the script; never on the command line
 
       - task: Bash@3
         displayName: Export Entra identity objects
@@ -858,7 +859,6 @@ jobs:
             echo "Starting Entra identity export..."
             timeout 20m python3 -u "$(PIPELINE_SCRIPT_ROOT)/export_entra_identity.py" \
               --root "$(Build.SourcesDirectory)/$(BACKUP_FOLDER)/$(ENTRA_BACKUP_SUBDIR)" \
-              --token "$(accessToken)" \
               --include-groups "$(ENTRA_INCLUDE_GROUPS)" \
               --include-role-assignments "$(ENTRA_INCLUDE_ROLE_ASSIGNMENTS)" \
               --include-auth-methods-policy "$(ENTRA_INCLUDE_AUTH_METHODS_POLICY)" \
@@ -873,6 +873,8 @@ jobs:
               --fail-on-export-error "true"
           workingDirectory: "$(Build.SourcesDirectory)"
           failOnStderr: false
+        env:
+          GRAPH_TOKEN: $(accessToken)  # read by the script; never on the command line
 
       - task: Bash@3
         displayName: Resolve Conditional Access reference names (Entra)
@@ -883,10 +885,11 @@ jobs:
             set -euo pipefail
             python3 "$(Build.SourcesDirectory)/scripts/resolve_ca_references.py" \
               --root "$(Build.SourcesDirectory)/$(BACKUP_FOLDER)/$(ENTRA_BACKUP_SUBDIR)" \
-              --token "$(accessToken)" \
               --groups-root "$(Build.SourcesDirectory)/$(BACKUP_FOLDER)/$(ENTRA_BACKUP_SUBDIR)/Groups"
           workingDirectory: "$(Build.SourcesDirectory)"
           failOnStderr: false
+        env:
+          GRAPH_TOKEN: $(accessToken)  # read by the script; never on the command line
 
       - task: Bash@3
         displayName: Generate policy assignment report (Entra CA)
@@ -972,7 +975,6 @@ jobs:
               --workload-root "$(BACKUP_FOLDER)/$(ENTRA_BACKUP_SUBDIR)" \
               --baseline-branch "$(BASELINE_BRANCH)" \
               --drift-branch "$(DRIFT_BRANCH_ENTRA)" \
-              --access-token "$(accessToken)" \
               --service-name "$(USER_NAME)" \
               --service-email "$(USER_EMAIL)" \
               --build-reason "$(Build.Reason)" \
@@ -981,6 +983,8 @@ jobs:
               --backup-start "$(BACKUP_START)"
           workingDirectory: "$(Build.SourcesDirectory)"
           failOnStderr: false
+        env:
+          GRAPH_TOKEN: $(accessToken)  # read by the script; never on the command line
 
   - job: create_or_update_entra_pr
     displayName: Create or update rolling Entra drift PR

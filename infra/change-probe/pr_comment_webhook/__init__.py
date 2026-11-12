@@ -16,6 +16,8 @@ The 20-minute schedule in azure-pipelines-review-sync.yml remains as a fallback.
 from __future__ import annotations
 
 import base64
+import binascii
+import hmac
 import json
 import logging
 import os
@@ -60,11 +62,24 @@ def _trigger_pipeline(org: str, project: str, pipeline_id: str, token: str, bran
 
 
 def _authorized(req: func.HttpRequest) -> bool:
+    """Basic auth from the ADO service hook: any username, password must equal WEBHOOK_SECRET.
+
+    Fails closed: without a configured secret every request is rejected.
+    """
     secret = os.environ.get("WEBHOOK_SECRET", "").strip()
     if not secret:
-        return True  # no secret configured — allow all (trust network/firewall)
-    expected = "Basic " + base64.b64encode(f":{secret}".encode()).decode()
-    return req.headers.get("Authorization", "") == expected
+        logging.error("pr_comment_webhook: WEBHOOK_SECRET is not set; rejecting all requests")
+        return False
+    header = req.headers.get("Authorization", "")
+    scheme, _, encoded = header.partition(" ")
+    if scheme.lower() != "basic" or not encoded:
+        return False
+    try:
+        decoded = base64.b64decode(encoded.strip(), validate=True).decode("utf-8")
+    except (binascii.Error, UnicodeDecodeError):
+        return False
+    _, sep, password = decoded.partition(":")
+    return bool(sep) and hmac.compare_digest(password.encode(), secret.encode())
 
 
 def main(req: func.HttpRequest) -> func.HttpResponse:

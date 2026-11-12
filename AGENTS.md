@@ -53,11 +53,11 @@ Workflow at a high level:
 │   ├── change-probe/                # Event-driven backup trigger (Function App)
 │   └── mcp-server/                  # Model Context Protocol server (Container Apps)
 ├── deploy/                          # Infrastructure provisioning scripts
-├── docs/                            # Setup guides (GitHub, Gitea) and roadmap
+├── docs/                            # Setup guides (GitHub, Gitea), security review docs (docs/security/), roadmap
 ├── md2pdf/                          # HTML/PDF styling and configs
 ├── prod-as-built.md                 # Generated as-built source
 ├── README.md                        # Operational overview for humans
-├── local-only/                      # Pricing, support and security-review material (gitignored; never commit)
+├── local-only/                      # Local working files (gitignored; never commit)
 └── panes/                           # Local agent scratch notes (gitignored; never commit)
 ```
 
@@ -250,6 +250,9 @@ Because Microsoft Graph change notifications and delta queries do not support In
 - **Restore ref guard**: restore only accepts refs in the approved `BASELINE_BRANCH` history. Pass runtime parameters to scripts via `env:`, never `${{ parameters.x }}` inside a script body (shell injection).
 - **Reviewer decisions**: `/reject`, `/accept` and Reject votes count only from `PR_DECISION_ALLOWED_REVIEWERS` (shared helpers in `scripts/common.py`).
 - **Access token scope**: `System.AccessToken` is required for PR and thread management via Azure DevOps REST APIs.
+- **Secrets in steps**: pass tokens and keys to scripts through the step's `env:` block, never as `$(secret)` macros or CLI flags inside a script body (`test_secrets_reach_the_steps_through_env_not_macros` enforces it for Azure DevOps). New scripts read tokens from the environment.
+- **Inbound endpoints** (MCP server, PR comment webhook) must fail closed when their credential is not configured.
+- **Security docs**: `docs/security/README.md` is the reviewer-facing overview, including the known-limitations table. When a change adds or removes a permission, secret, endpoint or limitation, update it and `docs/security/controls-and-evidence.md` in the same change.
 
 ## Common Development Tasks
 

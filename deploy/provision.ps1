@@ -350,6 +350,11 @@ if (-not $sp) {
     $sp = New-MgServicePrincipal -AppId $appId
 }
 
+# Only users and groups assigned to the enterprise application may sign in to the MCP server.
+# The scope below is consented for all users, so without this every tenant member could read tenant state.
+# Assign users or groups in Entra ID > Enterprise applications > <app> > Users and groups.
+Update-MgServicePrincipal -ServicePrincipalId $sp.Id -AppRoleAssignmentRequired:$true
+
 # Admin consent for Graph application permissions
 Write-Host "Granting admin consent..." -ForegroundColor Cyan
 foreach ($role in $appRoles) {
@@ -935,6 +940,8 @@ if ($mcpDeploy) {
     Write-Host "MCP Client ID:    $appId   (same app — set as MCP_CLIENT_ID)"
     Write-Host "MCP API Key:      $mcpApiKey"
     Write-Host ""
+    Write-Host "Assign MCP users or groups: Entra ID > Enterprise applications > $AppDisplayName > Users and groups" -ForegroundColor Yellow
+    Write-Host "  (sign-in is limited to assigned principals; the API key works without assignment)"
     Write-Host "Claude Desktop config:" -ForegroundColor Cyan
     Write-Host "  URL:       https://$mcpFqdn/sse"
     Write-Host "  Client ID: $appId"

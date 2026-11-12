@@ -274,10 +274,15 @@ sys.exit(0 if code < 400 or "-s" in args else 22)
         self.assertEqual(calls[-1][:2], ("POST", "refs"))
 
     def test_secrets_reach_the_steps_through_env_not_macros(self) -> None:
-        for step, body in _ado_steps(_load(str(ROOT / "deploy/validate-deployment.yml"))):
-            with self.subTest(step=step.get("displayName")):
-                self.assertNotIn("$(GRAPH_TOKEN)", body)
-                self.assertNotIn("$(System.AccessToken)", body)
+        # A secret macro inside a script body ends up in the script text and on child command lines.
+        # Secrets go through the step's env: block instead.
+        secret_macros = ("$(GRAPH_TOKEN)", "$(accessToken)", "$(System.AccessToken)", "$(AZURE_OPENAI_API_KEY)", "$(ADO_TOKEN)")
+        files = sorted(ROOT.glob("azure-pipelines*.yml")) + [ROOT / "deploy/validate-deployment.yml", ROOT / "deploy/update-from-upstream.yml"]
+        for path in files:
+            for step, body in _ado_steps(_load(str(path))):
+                with self.subTest(file=path.name, step=step.get("displayName")):
+                    for macro in secret_macros:
+                        self.assertNotIn(macro, body)
 
 
 if __name__ == "__main__":
