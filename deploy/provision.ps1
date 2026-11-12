@@ -54,6 +54,15 @@
 .PARAMETER AdoToken
     Azure DevOps PAT with Build (Read & Execute) scope.
 
+.PARAMETER McpAdoToken
+    Azure DevOps PAT for the MCP server. Needs only Code (Read). Keep it separate from
+    -AdoToken (Build Read & Execute) so a leak of one does not give the other's access.
+    If omitted, the MCP server falls back to -AdoToken and a warning is shown.
+
+.PARAMETER McpIngress
+    "external" (default) or "internal". Use "internal" when MCP clients reach the Container
+    Apps environment over a private network; the app then has no public endpoint.
+
 .PARAMETER AdoBranch
     Git branch the pipeline should target. Default: "main".
 
@@ -96,6 +105,9 @@ param (
     [string]$AdoReviewSyncPipelineId = "",
     [string]$AdoToken                = "",
     [string]$AdoBranch               = "main",
+    [string]$McpAdoToken             = "",
+    [ValidateSet("external","internal")]
+    [string]$McpIngress              = "external",
     [string]$WebhookSecret           = "",
     [int]$QuietWindowMinutes = 15,
     [int]$CooldownMinutes    = 30,
@@ -150,6 +162,25 @@ function Wait-ProviderRegistration {
     throw "Timed out waiting for $Namespace provider to register."
 }
 
+function Set-FunctionAppSettings {
+    # Secrets (client secret, ADO token, storage key) must not appear in the az command line, where other local
+    # processes can read them. Pass them in a private temp file ("--settings @file") and delete it afterwards.
+    param ([string]$Name, [string]$Group, [string[]]$Settings)
+    $entries = @()
+    foreach ($setting in $Settings) {
+        $idx = $setting.IndexOf("=")
+        $entries += @{ name = $setting.Substring(0, $idx); value = $setting.Substring($idx + 1); slotSetting = $false }
+    }
+    $file = Join-Path ([System.IO.Path]::GetTempPath()) "astral-settings-$([System.Guid]::NewGuid().ToString('n')).json"
+    try {
+        [System.IO.File]::WriteAllText($file, (ConvertTo-Json -InputObject $entries -Depth 4), (New-Object System.Text.UTF8Encoding($false)))
+        if (Test-Command "chmod") { & chmod 600 $file }
+        $null = Invoke-AzCli @("functionapp","config","appsettings","set","--name",$Name,"--resource-group",$Group,"--settings","@$file","--output","none")
+    } finally {
+        Remove-Item -LiteralPath $file -Force -ErrorAction SilentlyContinue
+    }
+}
+
 function Invoke-AzCli {
     param ([string[]]$ArgumentList, [switch]$NoRetry)
     $argsCopy = @() + $ArgumentList
@@ -170,7 +201,7 @@ function Invoke-AzCli {
             return Invoke-AzCli -ArgumentList $ArgumentList -NoRetry
         }
         $redacted = $argsCopy | ForEach-Object {
-            if ($_ -match '^[A-Za-z][A-Za-z0-9_]*=') { $_ -replace '=.*$', '=***' } else { $_ }
+            if ($_ -match '^[A-Za-z][A-Za-z0-9_-]*=') { $_ -replace '=.*$', '=***' } else { $_ }
         }
         throw "az $($redacted -join ' ') failed:`n$text"
     }
@@ -247,6 +278,11 @@ if ($mcpDeploy) {
     if (-not $McpResourceGroup) { $McpResourceGroup = $ResourceGroup }
     $McpContainerAppName = Get-OrPrompt $McpContainerAppName "MCP Container App name (e.g. 'ca-astral-mcp')"
     $McpAcrName          = Get-OrPrompt $McpAcrName          "Azure Container Registry name (globally unique lowercase, e.g. 'acrastral123')"
+    $McpAdoToken         = Get-OrPrompt $McpAdoToken         "Azure DevOps PAT for MCP (Code: Read only) [blank = reuse the pipeline PAT]" -Sensitive
+    if (-not $McpAdoToken) {
+        Write-Host "WARNING: MCP will reuse the pipeline PAT (Build Read & Execute). Prefer a separate read-only token." -ForegroundColor Yellow
+        $McpAdoToken = $AdoToken
+    }
 }
 
 # Region
@@ -588,11 +624,7 @@ if (-not $DeployMcpOnly) {
     }
 
     Write-Host "Configuring Function App settings..." -ForegroundColor Cyan
-    Invoke-AzCli @(
-        "functionapp","config","appsettings","set",
-        "--name", $FunctionAppName,
-        "--resource-group", $ResourceGroup,
-        "--settings",
+    Set-FunctionAppSettings -Name $FunctionAppName -Group $ResourceGroup -Settings @(
         "AzureWebJobsStorage=$storageConnection",
         "FUNCTIONS_EXTENSION_VERSION=~4",
         "FUNCTIONS_WORKER_RUNTIME=python",
@@ -611,8 +643,7 @@ if (-not $DeployMcpOnly) {
         "PROBE_COOLDOWN_MINUTES=$CooldownMinutes",
         "ADO_REVIEW_SYNC_PIPELINE_ID=$AdoReviewSyncPipelineId",
         "WEBHOOK_SECRET=$WebhookSecret",
-        "REPO_ROOT=/home/site/wwwroot",
-        "--output", "none"
+        "REPO_ROOT=/home/site/wwwroot"
     )
 }
 
@@ -645,9 +676,12 @@ if ($mcpDeploy) {
             "--resource-group", $McpResourceGroup,
             "--location", $McpLocation,
             "--sku", "Basic",
-            "--admin-enabled", "true",
+            "--admin-enabled", "false",
             "--output", "none"
         )
+    } else {
+        # Older deployments enabled the registry admin user; pulls use a managed identity now.
+        $null = Invoke-AzCli @("acr","update","--name",$McpAcrName,"--resource-group",$McpResourceGroup,"--admin-enabled","false","--output","none")
     }
 
     # Build image
@@ -694,11 +728,21 @@ if ($mcpDeploy) {
 
     # Container App
     $acrLoginServer = Invoke-AzCli @("acr","show","--name",$McpAcrName,"--query","loginServer","--output","tsv")
-    $acrPassword    = Invoke-AzCli @("acr","credential","show","--name",$McpAcrName,"--query","passwords[0].value","--output","tsv")
+    $acrId          = Invoke-AzCli @("acr","show","--name",$McpAcrName,"--resource-group",$McpResourceGroup,"--query","id","--output","tsv")
+
+    # Pull the image with a user-assigned managed identity that only holds AcrPull on this registry.
+    $pullIdentityName = "$McpContainerAppName-pull"
+    $null = Invoke-AzCli @("identity","create","--name",$pullIdentityName,"--resource-group",$McpResourceGroup,"--location",$McpLocation,"--output","none")
+    $pullIdentityId        = Invoke-AzCli @("identity","show","--name",$pullIdentityName,"--resource-group",$McpResourceGroup,"--query","id","--output","tsv")
+    $pullIdentityPrincipal = Invoke-AzCli @("identity","show","--name",$pullIdentityName,"--resource-group",$McpResourceGroup,"--query","principalId","--output","tsv")
+    $null = Invoke-AzCli @("role","assignment","create","--assignee-object-id",$pullIdentityPrincipal,"--assignee-principal-type","ServicePrincipal","--role","AcrPull","--scope",$acrId,"--output","none")
     $caExists = $false
     try { $null = Invoke-AzCli @("containerapp","show","--name",$McpContainerAppName,"--resource-group",$McpResourceGroup,"--output","none") -NoRetry; $caExists = $true } catch {}
     if (-not $caExists) {
         Write-Host "Creating Container App '$McpContainerAppName'..." -ForegroundColor Cyan
+        # A new role assignment can take a short while to be honoured by the registry.
+        Write-Host "Waiting for the AcrPull role assignment to propagate..." -ForegroundColor Cyan
+        Start-Sleep -Seconds 30
         Invoke-AzCli @(
             "containerapp","create",
             "--name", $McpContainerAppName,
@@ -706,19 +750,21 @@ if ($mcpDeploy) {
             "--environment", $caEnvName,
             "--image", "$acrLoginServer/$McpImageName`:latest",
             "--target-port", "8080",
-            "--ingress", "external",
+            "--ingress", $McpIngress,
             "--transport", "auto",
             "--min-replicas", "1",
             "--max-replicas", "3",
             "--cpu", "0.5",
             "--memory", "1Gi",
+            "--user-assigned", $pullIdentityId,
             "--registry-server", $acrLoginServer,
-            "--registry-username", $McpAcrName,
-            "--registry-password", $acrPassword,
+            "--registry-identity", $pullIdentityId,
             "--output", "none"
         )
     } else {
         Write-Host "Container App '$McpContainerAppName' already exists — updating image..." -ForegroundColor Yellow
+        $null = Invoke-AzCli @("containerapp","identity","assign","--name",$McpContainerAppName,"--resource-group",$McpResourceGroup,"--user-assigned",$pullIdentityId,"--output","none")
+        $null = Invoke-AzCli @("containerapp","registry","set","--name",$McpContainerAppName,"--resource-group",$McpResourceGroup,"--server",$acrLoginServer,"--identity",$pullIdentityId,"--output","none")
         Invoke-AzCli @(
             "containerapp","update",
             "--name", $McpContainerAppName,
@@ -739,6 +785,14 @@ if ($mcpDeploy) {
 
     # Configure env vars — including MCP_ALLOWED_HOSTS set to the actual FQDN
     Write-Host "Configuring Container App settings..." -ForegroundColor Cyan
+    # Token and API key are stored as Container App secrets and only referenced from the environment.
+    $null = Invoke-AzCli @(
+        "containerapp","secret","set",
+        "--name", $McpContainerAppName,
+        "--resource-group", $McpResourceGroup,
+        "--secrets", "ado-token=$McpAdoToken", "mcp-api-key=$mcpApiKey",
+        "--output", "none"
+    )
     Invoke-AzCli @(
         "containerapp","update",
         "--name", $McpContainerAppName,
@@ -747,10 +801,10 @@ if ($mcpDeploy) {
         "ADO_ORGANIZATION=$AdoOrganization",
         "ADO_PROJECT=$AdoProject",
         "ADO_BRANCH=$AdoBranch",
-        "ADO_TOKEN=$AdoToken",
+        "ADO_TOKEN=secretref:ado-token",
         "ENTRA_TENANT_ID=$tenantId",
         "MCP_CLIENT_ID=$appId",
-        "MCP_API_KEY=$mcpApiKey",
+        "MCP_API_KEY=secretref:mcp-api-key",
         "MCP_ALLOWED_HOSTS=$mcpFqdn",
         "--output", "none"
     )

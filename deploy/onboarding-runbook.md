@@ -252,6 +252,24 @@ Run the unified provisioning script. It provisions the change probe (Azure Funct
 
 If you run the script without `-DeployMcpServer` or `-SkipMcpServer` it will prompt interactively. The script creates an Entra app, grants admin consent, provisions Azure resources, and deploys the selected components.
 
+#### Credentials created by the script
+
+- **Image pull:** the registry admin user is disabled. The Container App pulls with a user-assigned managed identity
+  (`<app>-pull`) that holds only `AcrPull` on the registry. The account running the script needs permission to create
+  role assignments (Owner or User Access Administrator on the registry).
+- **Azure DevOps tokens:** use two PATs. `-AdoToken` (Build: Read & Execute) is for the change probe, which queues the
+  pipeline. `-McpAdoToken` (Code: Read) is for the MCP server, which only reads `tenant-state/`. If you omit
+  `-McpAdoToken` the script reuses the first token and warns.
+- **Where secrets live:** the Function App settings are written through a private temporary file, not the `az`
+  command line. The MCP token and API key are Container App secrets, referenced by the app as `secretref:`.
+  Nothing is printed except the values the script shows once at the end.
+- **Network exposure:** the MCP endpoint is public by default and protected by the API key or Entra token check in
+  the application. Pass `-McpIngress internal` to remove the public endpoint when your MCP clients reach the
+  Container Apps environment over a private network.
+- **Not covered by the script:** the Function App still holds the probe client secret, the ADO token and the storage
+  key as app settings, and the code package is served from a read-only SAS URL. Move them to Key Vault references
+  if your policy requires it, and rotate the PATs and the client secret on a schedule.
+
 ### Option B: Manual provisioning
 
 If you prefer manual setup:
