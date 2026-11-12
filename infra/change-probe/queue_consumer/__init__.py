@@ -47,11 +47,14 @@ def main(msg: func.QueueMessage) -> None:
 
     cmd = [sys.executable, trigger_script]
     for name, value in settings.items():
-        cmd.extend([f"--{name}", value])
+        if name != "token":
+            cmd.extend([f"--{name}", value])
+    child_env = {"PATH": os.environ.get("PATH", "")}
+    child_env["ADO_TOKEN"] = settings["token"]
 
     logging.info(f"Triggering ADO pipeline {settings['pipeline-id']} ...")
     try:
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=60, env=child_env)
     except subprocess.TimeoutExpired:
         logging.error("Trigger script timed out after 60 seconds.")
         raise

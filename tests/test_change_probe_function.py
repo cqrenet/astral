@@ -56,7 +56,7 @@ class ProbeTimerTests(unittest.TestCase):
         timer = types.SimpleNamespace(schedule_status={"Last": "t"})
 
         def fake_run(cmd, **kwargs):
-            commands.append(cmd)
+            commands.append((cmd, kwargs))
             if run_error:
                 raise run_error
             return run_result
@@ -80,8 +80,9 @@ class ProbeTimerTests(unittest.TestCase):
         queued, saved, commands = self._run(run_result=self._probe_output(trigger=True, reason="armed"), state={"d": 1})
         self.assertEqual(saved, [{"s": 1}])
         self.assertEqual(json.loads(queued[0]), {"reason": "armed", "checked_at": "now"})
-        cmd = commands[0]
-        self.assertIn("--token", cmd)
+        cmd, run_kwargs = commands[0]
+        self.assertNotIn("--token", cmd)
+        self.assertEqual(run_kwargs["env"]["GRAPH_TOKEN"], "tok")
         self.assertEqual(cmd[cmd.index("--state-json") + 1], json.dumps({"d": 1}))
         self.assertEqual(cmd[cmd.index("--quiet-window-minutes") + 1], "15")  # defaults
 
@@ -93,8 +94,12 @@ class ProbeTimerTests(unittest.TestCase):
         env = {"GRAPH_TOKEN": "", "PROBE_APP_ID": "id", "PROBE_APP_SECRET": "sec", "TENANT_ID": "ten",
                "PROBE_QUIET_WINDOW_MINUTES": "5", "PROBE_COOLDOWN_MINUTES": "9"}
         _, _, commands = self._run(env=env, run_result=self._probe_output())
-        cmd = commands[0]
-        self.assertEqual(cmd[cmd.index("--client-id") + 1], "id")
+        cmd, run_kwargs = commands[0]
+        self.assertNotIn("--client-id", cmd)
+        self.assertNotIn("--client-secret", cmd)
+        self.assertEqual(run_kwargs["env"]["PROBE_APP_ID"], "id")
+        self.assertEqual(run_kwargs["env"]["PROBE_APP_SECRET"], "sec")
+        self.assertEqual(run_kwargs["env"]["TENANT_ID"], "ten")
         self.assertNotIn("--state-json", cmd)  # no saved state yet
         self.assertEqual((cmd[cmd.index("--quiet-window-minutes") + 1], cmd[cmd.index("--cooldown-minutes") + 1]), ("5", "9"))
 
@@ -133,7 +138,7 @@ class QueueConsumerTests(unittest.TestCase):
         message.get_body.return_value = b'{"reason": "x"}'
 
         def fake_run(cmd, **kwargs):
-            commands.append(cmd)
+            commands.append((cmd, kwargs))
             if run_error:
                 raise run_error
             return run_result
@@ -148,16 +153,18 @@ class QueueConsumerTests(unittest.TestCase):
         return commands
 
     def test_triggers_the_pipeline_with_configured_values(self) -> None:
-        cmd = self._run(env={**self.ENV, "ADO_BRANCH": "release"}, run_result=_completed("queued"))[0]
+        cmd, run_kwargs = self._run(env={**self.ENV, "ADO_BRANCH": "release"}, run_result=_completed("queued"))[0]
         self.assertEqual(cmd[cmd.index("--pipeline-id") + 1], "42")
         self.assertEqual(cmd[cmd.index("--branch") + 1], "release")
+        self.assertEqual(run_kwargs["env"]["ADO_TOKEN"], "tok")
+        self.assertNotIn("--token", cmd)
 
     def test_default_branch_is_main(self) -> None:
-        cmd = self._run(run_result=_completed("queued"))[0]
+        cmd, _ = self._run(run_result=_completed("queued"))[0]
         self.assertEqual(cmd[cmd.index("--branch") + 1], "main")
 
     def test_empty_branch_is_allowed_like_before(self) -> None:
-        cmd = self._run(env={**self.ENV, "ADO_BRANCH": ""}, run_result=_completed("queued"))[0]
+        cmd, _ = self._run(env={**self.ENV, "ADO_BRANCH": ""}, run_result=_completed("queued"))[0]
         self.assertEqual(cmd[cmd.index("--branch") + 1], "")
 
     def test_failures_raise_so_the_runtime_retries_the_message(self) -> None:

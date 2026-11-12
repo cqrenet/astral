@@ -102,9 +102,9 @@ def _acquire_graph_token(client_id: str, client_secret: str, tenant_id: str) -> 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--token", default=os.environ.get("GRAPH_TOKEN", ""), help="Microsoft Graph bearer token (default: $GRAPH_TOKEN).")
-    parser.add_argument("--client-id", default="", help="Entra app client ID (alternative to --token).")
-    parser.add_argument("--client-secret", default="", help="Entra app client secret (alternative to --token).")
-    parser.add_argument("--tenant-id", default="", help="Entra tenant ID (alternative to --token).")
+    parser.add_argument("--client-id", default=os.environ.get("PROBE_APP_ID", ""), help="Entra app client ID (alternative to --token).")
+    parser.add_argument("--client-secret", default=os.environ.get("PROBE_APP_SECRET", ""), help="Entra app client secret (alternative to --token).")
+    parser.add_argument("--tenant-id", default=os.environ.get("TENANT_ID", ""), help="Entra tenant ID (alternative to --token).")
     parser.add_argument(
         "--state-path",
         default="",

@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 from typing import Any
 import common
 
@@ -33,7 +34,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--organization", required=True)
     parser.add_argument("--project", required=True)
     parser.add_argument("--pipeline-id", type=int, required=True)
-    parser.add_argument("--token", required=True, help="Azure DevOps PAT or OAuth token.")
+    parser.add_argument("--token", default=os.environ.get("ADO_TOKEN", ""), help="Azure DevOps PAT or OAuth token (default: $ADO_TOKEN).")
     parser.add_argument("--branch", default="main", help="Git ref to run against.")
     parser.add_argument(
         "--parameters",
