@@ -105,8 +105,7 @@ if [ "$intunecd_rc" -ne 0 ]; then
   echo "Last 120 lines of IntuneCD output:"
   tail -n 120 "$intunecd_log" || true
   if [ "${marker_count:-0}" -eq 0 ]; then
-    ci_log warning "IntuneCD returned non-zero without explicit error markers; treating as successful no-op."
-    intunecd_rc=0
+    ci_log warning "IntuneCD returned non-zero without explicit error markers; preserving the non-zero exit status."
   fi
 else
   echo "Last 60 lines of IntuneCD output:"

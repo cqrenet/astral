@@ -29,12 +29,22 @@ for ref in "$TARGET_REF" "$APPROVED_BRANCH"; do
 done
 
 # Full history is needed for the ancestry check (Azure DevOps checkouts are shallow by default).
-# Fetch failures are tolerated: a stale origin/<approved> only narrows what can be restored.
+# The ancestry check is a security boundary. Never continue with a stale or
+# missing approved-branch ref when refresh failed.
 if [ "$(git rev-parse --is-shallow-repository)" = "true" ]; then
-  git fetch --quiet --unshallow origin || ci_log warning "Unable to unshallow repository."
+  if ! git fetch --quiet --unshallow origin; then
+    ci_log error "Unable to fetch the full repository history; refusing to restore."
+    exit 1
+  fi
 fi
-git fetch --quiet --tags origin || true
-git fetch --quiet origin "$APPROVED_BRANCH" || true
+if ! git fetch --quiet --tags origin; then
+  ci_log error "Unable to refresh repository tags; refusing to restore."
+  exit 1
+fi
+if ! git fetch --quiet origin "$APPROVED_BRANCH"; then
+  ci_log error "Unable to refresh approved branch '$APPROVED_BRANCH'; refusing to restore."
+  exit 1
+fi
 
 RESOLVED_REF=""
 if git rev-parse --verify --quiet "origin/$TARGET_REF^{commit}" >/dev/null; then

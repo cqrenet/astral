@@ -52,9 +52,11 @@ if temp_root.exists():
 temp_root.mkdir(parents=True, exist_ok=True)
 
 def normalize_to_intune_relative(path_text):
-  p = path_text.replace("\\", "/").lstrip("./")
+  p = path_text.replace("\\", "/").strip()
   if p.startswith("/"):
     return None
+  while p.startswith("./"):
+    p = p[2:]
   if p.startswith(backup_prefix):
     p = p[len(backup_prefix):]
   elif p.startswith(f"{intune_subdir}/"):

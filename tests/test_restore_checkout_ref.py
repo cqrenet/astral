@@ -86,6 +86,16 @@ class RestoreCheckoutRefTests(unittest.TestCase):
                     self.assertEqual(result.returncode, 1)
                     self.assertIn("Invalid git ref", result.stdout)
 
+    def test_fetch_failure_is_fail_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            work = self._repos(td)
+            missing_origin = Path(td, "missing-origin.git")
+            self._git(work, "remote", "set-url", "origin", str(missing_origin))
+            result = self._run(work, TARGET_REF_RAW=self.v1)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("Unable to refresh", result.stdout)
+            self.assertEqual(self._git(work, "rev-parse", "HEAD"), self._git(work, "rev-parse", "main"))
+
     def test_unknown_ref_and_missing_configuration_fail(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             work = self._repos(td)

@@ -73,11 +73,10 @@ class RunIntuneCdUpdateTests(unittest.TestCase):
         result, _ = self._run(fake_exit=3, fake_output="[ERROR] Request failed with status 403")
         self.assertEqual(result.returncode, 3)
 
-    def test_failure_without_markers_is_reported_as_a_no_op_success(self) -> None:
-        # Existing behavior, pinned deliberately: see the review notes about write-capable runs.
+    def test_failure_without_markers_preserves_the_failure(self) -> None:
         result, _ = self._run(fake_exit=1, fake_output="nothing to do")
-        self.assertEqual(result.returncode, 0)
-        self.assertIn("treating as successful no-op", result.stdout)
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("preserving the non-zero exit status", result.stdout)
 
     def test_required_inputs(self) -> None:
         for missing in ("RESTORE_SOURCE_PATH", "GRAPH_TOKEN"):

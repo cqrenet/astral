@@ -5,6 +5,7 @@ import importlib.util
 import io
 import json
 import os
+import sys
 import urllib.error
 import unittest
 from pathlib import Path
@@ -16,6 +17,7 @@ MODULE_PATH = Path(__file__).resolve().parents[1] / "scripts" / "common.py"
 def load_module():
     spec = importlib.util.spec_from_file_location("common_under_test", MODULE_PATH)
     module = importlib.util.module_from_spec(spec)
+    sys.modules["common_under_test"] = module
     spec.loader.exec_module(module)
     return module
 

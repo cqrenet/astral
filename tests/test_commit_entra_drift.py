@@ -17,6 +17,7 @@ CA = "tenant-state/entra/Conditional Access"
 def load_module():
     spec = importlib.util.spec_from_file_location("commit_entra_drift", MODULE_PATH)
     module = importlib.util.module_from_spec(spec)
+    sys.modules["commit_entra_drift"] = module
     spec.loader.exec_module(module)
     return module
 
