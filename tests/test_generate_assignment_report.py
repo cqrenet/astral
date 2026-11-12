@@ -14,6 +14,7 @@ sys.path.insert(0, str(MODULE_PATH.parent))  # script imports its sibling report
 def load_module():
     spec = importlib.util.spec_from_file_location("generate_assignment_report", MODULE_PATH)
     module = importlib.util.module_from_spec(spec)
+    sys.modules["generate_assignment_report"] = module
     spec.loader.exec_module(module)
     return module
 
