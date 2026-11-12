@@ -33,7 +33,7 @@ fi
 DEV_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 
 # Get the tag annotation message
-TAG_MESSAGE="$(git -C "$DEV_ROOT" tag -n10 "$TAG_NAME" 2>/dev/null | tail -n +2 | sed 's/^    //' || true)"
+TAG_MESSAGE="$(git -C "$DEV_ROOT" tag -n80 "$TAG_NAME" 2>/dev/null | tail -n +2 | sed 's/^    //' || true)"
 
 # Get commits since the previous tag
 PREV_TAG="${2:-$(git -C "$DEV_ROOT" tag --sort=-version:refname | grep -v "^${TAG_NAME}$" | head -1 || true)}"
