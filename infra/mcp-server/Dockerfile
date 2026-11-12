@@ -1,8 +1,8 @@
 # ASTRAL MCP Server — Azure Container Apps image
 # Build context should be the repository root so we can COPY scripts/
 
-# Pinned by digest; Dependabot proposes updates. Tag: python:3.11-slim
-FROM python:3.11-slim@sha256:07d4824036af339fa1b6ef769cc99d9c10a141769538b52b3b597c84f7a7b535
+# Pinned by digest; Dependabot proposes updates. Tag: python:3.14-slim
+FROM python:3.14-slim@sha256:9aaa474097d094040649f2162a627c0049b408f52138d980916788d80f04802f
 
 WORKDIR /app
 

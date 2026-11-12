@@ -589,13 +589,15 @@ if (-not $DeployMcpOnly) {
             "--consumption-plan-location", $Location,
             "--os-type", "Linux",
             "--runtime", "python",
-            "--runtime-version", "3.11",
+            "--runtime-version", "3.12",
             "--functions-version", "4",
             "--tags", "astral=true", "astral-ado-org=$AdoOrganization", "astral-ado-project=$AdoProject",
             "--output", "none"
         )
     } else {
         Write-Host "Function App '$FunctionAppName' already exists." -ForegroundColor Yellow
+        # Existing apps created with an older release run Python 3.11; the shipped dependencies target 3.12.
+        $null = Invoke-AzCli @("functionapp","config","set","--name",$FunctionAppName,"--resource-group",$ResourceGroup,"--linux-fx-version","Python|3.12","--output","none")
     }
     # Preserve the webhook secret across re-deployments.
     # On first deploy the Function App has no WEBHOOK_SECRET yet, so we generate one.
@@ -853,7 +855,8 @@ if (-not $DeployMcpOnly) {
                     $pkgDir = [System.IO.Path]::Combine($stagePath, ".python_packages", "lib", "site-packages")
                     New-Item -ItemType Directory -Path $pkgDir -Force | Out-Null
                     $pip = if (Test-Command "pip3") { "pip3" } else { "pip" }
-                    & $pip install -r $reqFile --target $pkgDir --quiet --disable-pip-version-check
+                    # The Function App runs Linux with Python 3.12 whatever the operator's OS is, so fetch matching wheels only.
+                    & $pip install -r $reqFile --target $pkgDir --platform manylinux_2_28_x86_64 --platform manylinux_2_17_x86_64 --platform manylinux2014_x86_64 --python-version 3.12 --implementation cp --only-binary=:all: --quiet --disable-pip-version-check
                     if ($LASTEXITCODE -ne 0) { throw "pip install failed — check Python/pip is available on this machine." }
                     Write-Host "Dependencies installed." -ForegroundColor Green
                 }

@@ -39,14 +39,14 @@ except ImportError as exc:  # pragma: no cover
         "Unable to import astral_mcp_tools. Ensure scripts/ directory is on PYTHONPATH."
     ) from exc
 
-from mcp.server.fastmcp import FastMCP
+from mcp.server.mcpserver import MCPServer
 from mcp.server.transport_security import TransportSecuritySettings
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger(__name__)
 
 # DNS rebinding protection — keep enabled but allow the configured public hostname.
-# Without this, FastMCP defaults to loopback-only and rejects requests arriving
+# Without this, the server defaults to loopback-only and rejects requests arriving
 # via a reverse proxy or ACA ingress with the real public hostname in the Host header.
 #
 # MCP_ALLOWED_HOSTS: comma-separated host[:port] values to allow in addition to
@@ -55,13 +55,12 @@ logger = logging.getLogger(__name__)
 _extra_hosts = [h.strip() for h in os.environ.get("MCP_ALLOWED_HOSTS", "").split(",") if h.strip()]
 _allowed_hosts = ["127.0.0.1:*", "localhost:*", "[::1]:*"] + _extra_hosts
 
-mcp = FastMCP(
-    "astral",
-    transport_security=TransportSecuritySettings(
-        enable_dns_rebinding_protection=True,
-        allowed_hosts=_allowed_hosts,
-    ),
+_transport_security = TransportSecuritySettings(
+    enable_dns_rebinding_protection=True,
+    allowed_hosts=_allowed_hosts,
 )
+
+mcp = MCPServer("astral")
 
 # ---------------------------------------------------------------------------
 # Auth configuration
@@ -621,7 +620,7 @@ def _build_sse_app():
     else:
         logger.info("OAuth discovery endpoint disabled — set ENTRA_TENANT_ID and MCP_CLIENT_ID to enable.")
     routes.append(Route("/health", health))
-    routes.append(Mount("/", app=_McpAuthMiddleware(mcp.sse_app())))
+    routes.append(Mount("/", app=_McpAuthMiddleware(mcp.sse_app(transport_security=_transport_security))))
     return Starlette(routes=routes)
 
 

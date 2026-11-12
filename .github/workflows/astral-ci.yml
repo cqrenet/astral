@@ -22,7 +22,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262   # v4.4.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1   # v7.0.1
         with:
           persist-credentials: false
 
@@ -30,6 +30,8 @@ jobs:
         run: |
           python3 -m venv "$RUNNER_TEMP/ci-venv"
           "$RUNNER_TEMP/ci-venv/bin/pip" install --quiet PyYAML shellcheck-py bandit pip-audit
+          # The MCP smoke test starts the real server, so install its direct dependencies too.
+          "$RUNNER_TEMP/ci-venv/bin/pip" install --quiet -r infra/mcp-server/requirements.in
           echo "$RUNNER_TEMP/ci-venv/bin" >> "$GITHUB_PATH"
 
       - name: Unit tests
@@ -52,7 +54,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262   # v4.4.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1   # v7.0.1
         with:
           fetch-depth: 0
           persist-credentials: false

@@ -8,7 +8,7 @@ Azure-hosted Model Context Protocol (MCP) server for ASTRAL. Exposes tenant stat
 ┌─────────────┐      HTTPS/SSE      ┌──────────────────────┐
 │ MCP Client  │ ◄─────────────────► │ Azure Container Apps │
 │ (Claude,    │   JSON-RPC 2.0      │  ASTRAL MCP Server   │
-│  Cursor,    │                     │  (Python / FastMCP)  │
+│  Cursor,    │                     │  (Python / MCP SDK)  │
 │  Copilot)   │                     └──────────┬───────────┘
 └─────────────┘                                │
                                                │ ADO REST API

@@ -284,7 +284,7 @@ If you prefer manual setup:
 4. **Provision Azure resources**:
    - Resource Group
    - Storage Account (Standard LRS)
-   - Function App (Linux Consumption, Python 3.11)
+   - Function App (Linux Consumption, Python 3.12)
 5. **Configure Function App settings**:
    | Setting | Value |
    |---|---|

@@ -12,8 +12,8 @@ from unittest.mock import MagicMock, patch
 MODULE_PATH = Path(__file__).resolve().parents[1] / "infra" / "mcp-server" / "mcp_server.py"
 
 
-class _FastMCP:
-    """Minimal stand-in for mcp.server.fastmcp.FastMCP: records tools and prompts."""
+class _MCPServer:
+    """Minimal stand-in for mcp.server.mcpserver.MCPServer: records tools and prompts."""
 
     def __init__(self, *args, **kwargs) -> None:
         self.tools: dict = {}
@@ -28,7 +28,7 @@ class _FastMCP:
 
     prompt = tool
 
-    def sse_app(self):
+    def sse_app(self, **kwargs):
         async def app(scope, receive, send):
             await send({"type": "http.response.start", "status": 200, "headers": []})
             await send({"type": "http.response.body", "body": b"inner"})
@@ -37,14 +37,14 @@ class _FastMCP:
 
 
 def _load():
-    fastmcp = types.ModuleType("mcp.server.fastmcp")
-    fastmcp.FastMCP = _FastMCP
+    mcpserver = types.ModuleType("mcp.server.mcpserver")
+    mcpserver.MCPServer = _MCPServer
     security = types.ModuleType("mcp.server.transport_security")
     security.TransportSecuritySettings = lambda **kwargs: None
     for name, module in (
         ("mcp", types.ModuleType("mcp")),
         ("mcp.server", types.ModuleType("mcp.server")),
-        ("mcp.server.fastmcp", fastmcp),
+        ("mcp.server.mcpserver", mcpserver),
         ("mcp.server.transport_security", security),
     ):
         sys.modules[name] = module

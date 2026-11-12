@@ -32,6 +32,8 @@ if it names your tenant.
   serves its code from a read-only SAS URL with a long expiry. Key Vault references are the recommended next step.
 - `deploy/provision.ps1` passes the Container App secret values to the Azure CLI once, on the operator's machine.
   Run it from a trusted workstation or Cloud Shell.
+- The change probe runs on the Linux Consumption plan, which Microsoft retires on 30 September 2028 and which
+  supports Python 3.12 at most. Plan a move to the Flex Consumption plan before then.
 - IntuneCD and its transitive dependencies are installed by version, not by hash, in the backup and restore
   pipelines. Use an internal package mirror if your policy requires hashes.
 - The GitHub and Gitea workflows depend on the runner environment. Their isolation is a deployment property.

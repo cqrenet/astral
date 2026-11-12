@@ -120,7 +120,7 @@ All settings are provided via Function App application settings (environment var
 
 ### Prerequisites
 
-- Python 3.11+
+- Python 3.12+
 - [Azure Functions Core Tools](https://learn.microsoft.com/en-us/azure/azure-functions/functions-run-local)
 - An Azure Storage account (or Azurite for local emulation)
 
@@ -209,7 +209,7 @@ The script will:
 1. Register an Entra app (or reuse an existing one).
 2. Grant admin consent for Graph permissions.
 3. Create a client secret.
-4. Provision Resource Group, Storage Account, and Function App (Linux Consumption, Python 3.11).
+4. Provision Resource Group, Storage Account, and Function App (Linux Consumption, Python 3.12).
 5. Configure application settings.
 6. Build and deploy the function package.
 
@@ -228,7 +228,7 @@ cp ../../scripts/trigger_backup_pipeline.py scripts/
 # Install production dependencies into the package
 pip install -r requirements.txt --target .python_packages/lib/site-packages
 
-# Build the zip (Linux Consumption requires .python_packages/lib/site-packages, NOT python3.11/)
+# Build the zip (Linux Consumption requires .python_packages/lib/site-packages, NOT python3.12/)
 zip -r function-package.zip \
   probe_timer/ queue_consumer/ scripts/ .python_packages/ \
   host.json requirements.txt \
