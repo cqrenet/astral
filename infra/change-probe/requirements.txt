@@ -10,9 +10,9 @@ azure-data-tables==12.7.0 \
     --hash=sha256:24ed9b5690aa46c213182e32bb1b39a68dd9f526d84f447c287e3a401b437c10 \
     --hash=sha256:b14fc94a3223a2835ff5688e17d8e107b27c7cd7c4114138f2ac81373723705d
     # via -r requirements.in
-azure-functions==1.26.0 \
-    --hash=sha256:4d97c30716a14db3b584dfe0dd72df5ea38adb922ad5ca046e4b0af0a309ddcb \
-    --hash=sha256:f4aad4a401bdc7833cce4c17352ce410fc4e419dcc6ece5f02247fdee3fbb838
+azure-functions==2.4.0 \
+    --hash=sha256:4b764002c787b860dbee0c8ec02f795bdd2ca0384f8b3860da8369403ee19b01 \
+    --hash=sha256:c1f69edce150af18bcbf4cd6eab224506335a7bfd225a5269a54df27c115aa12
     # via -r requirements.in
 azure-storage-queue==12.18.1 \
     --hash=sha256:791ed52e2aae4b136ded3e530414fda2fdaf4ab356891b017cf77b337609a2a4 \
