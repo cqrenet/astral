@@ -12,7 +12,17 @@ updates:
     directory: /infra/change-probe
     schedule:
       interval: weekly
+    ignore:
+      # azure-functions 2.x needs Python 3.13+. The Function runs on 3.12, the newest version the Linux
+      # Consumption plan supports. Remove this rule when the change probe moves to Flex Consumption.
+      - dependency-name: azure-functions
+        update-types: ["version-update:semver-major"]
   - package-ecosystem: docker
     directory: /infra/mcp-server
     schedule:
       interval: weekly
+    ignore:
+      # Patch and digest updates still arrive. Move the Python minor version deliberately: build and run
+      # the image first (the CI does not build it), and check the Azure Functions Python support table.
+      - dependency-name: python
+        update-types: ["version-update:semver-minor", "version-update:semver-major"]
