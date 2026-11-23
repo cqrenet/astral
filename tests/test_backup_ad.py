@@ -354,10 +354,9 @@ class ReviewIsBackupOnlyTests(unittest.TestCase):
 class ExporterScriptTests(unittest.TestCase):
     def test_scripts_parse_and_are_ascii(self) -> None:
         cmd = "$e=$null;[void][System.Management.Automation.Language.Parser]::ParseFile($env:AD_SCRIPT,[ref]$null,[ref]$e);$e|ForEach-Object{$_.Message};exit [int]($e.Count -gt 0)"
-        for name in ("export_ad_baseline.ps1", "export_ad_changes.ps1"):
-            with self.subTest(script=name):
-                path = SCRIPTS / name
-                self.assertTrue(path.read_bytes().isascii(), "Windows PowerShell 5.1 misreads non-ASCII in a BOM-less file")
+        for path in (SCRIPTS / "export_ad_baseline.ps1", SCRIPTS / "export_ad_changes.ps1", SCRIPTS.parent / "deploy" / "bootstrap-ad.ps1"):
+            with self.subTest(script=path.name):
+                self.assertTrue(path.read_bytes().removeprefix(b"\xef\xbb\xbf").isascii(), "Windows PowerShell 5.1 misreads non-ASCII in a BOM-less file")
                 result = subprocess.run(["pwsh", "-NoProfile", "-Command", cmd], capture_output=True, text=True, env={**os.environ, "AD_SCRIPT": str(path)})
                 self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 

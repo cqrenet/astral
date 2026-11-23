@@ -315,6 +315,17 @@ If you prefer manual setup:
 
 > **Note:** The probe uses the same Entra app as the main backup pipeline. You can reuse the app registration created by `bootstrap-tenant.ps1` if you add the `AuditLog.Read.All` permission and create a client secret for it.
 
+## Optional: on-premises Active Directory
+
+ASTRAL can also back up on-premises Active Directory (GPOs, OUs, privileged groups, password policies, trusts, sites) and name the administrator behind each change. It is backup only and off by default. It needs a domain-joined self-hosted Windows runner, because on-premises AD cannot be read through Microsoft Graph.
+
+1. Run `deploy/bootstrap-ad.ps1 -Step DomainSetup -RunnerComputer <runner>` as a domain admin. It creates the group managed service account.
+2. Create the Windows runner VM, join it to the domain, and run `-Step RunnerSetup -Platform ado` on it.
+3. Create an agent pool named like `AD_AGENT_POOL_NAME` (default `astral-ad`), register the agent with the printed command, and run `-Step Verify -RepoPath <clone>`.
+4. In the variable group set `ENABLE_WORKLOAD_AD=true`, import `azure-pipelines-ad.yml` as a pipeline, and run it once. Merge the first rolling PR to make it the baseline.
+
+The full guide, including GitHub and Gitea and the audit settings for author attribution, is in [`docs/active-directory-setup.md`](../docs/active-directory-setup.md).
+
 ## Optional: progressive feature rollout
 
 | Phase | What to enable |

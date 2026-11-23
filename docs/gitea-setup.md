@@ -12,6 +12,7 @@ Target: Gitea 1.24 or later with Actions enabled.
 | --- | --- | --- | --- |
 | `astral-backup.yml` | daily 02:00 UTC, manual, change probe | Export Intune and Entra, commit drift to `drift/intune` / `drift/entra`, create/refresh one rolling PR per workload | Read (backup identity) |
 | `astral-review-sync.yml` | every 20 minutes, manual | Reviewer `/reject` decisions, PR summary, post-merge remediation dispatch | None |
+| `astral-ad-backup.yml` | daily 02:30 UTC, manual | **Optional.** Export on-premises Active Directory on a domain-joined Windows runner (label `ad`), commit drift to `drift/ad`, create/refresh the rolling PR on the `astral` runner. Backup only. See section 8. | Read AD (gMSA) |
 | `astral-probe.yml` | every 5 minutes, manual | Polls audit logs; dispatches a backup when changes settle (15 min quiet, 30 min cooldown) | Read audit logs (backup identity) |
 | `astral-restore.yml` | manual or auto-remediation dispatch | Restores an approved baseline to the tenant (dry run by default) | **Write** (restore identity) |
 
@@ -95,7 +96,8 @@ Repository **variables**:
 | `RESTORE_APPROVERS` | — | Gitea usernames allowed to run a non-dry-run restore. Empty = only dry runs. |
 | `PR_DECISION_ALLOWED_REVIEWERS` | — | Gitea usernames whose `/reject`, `/accept` and *Request changes* reviews count. Empty = decisions ignored. Edited comments never count. |
 | `BASELINE_BRANCH` | `main` | Also the only branch that restore accepts history from |
-| `ENABLE_WORKLOAD_INTUNE` / `ENABLE_WORKLOAD_ENTRA` | `true` | |
+| `ENABLE_WORKLOAD_INTUNE` / `ENABLE_WORKLOAD_ENTRA` | `true` | Set both to `false` for an Active Directory-only deployment |
+| `ENABLE_WORKLOAD_AD` | off | Set `true` for the on-premises Active Directory workload (section 8) |
 | `BACKUP_TIMEZONE` / `FULL_RUN_HOUR` | `UTC` / `02` | The scheduled 02:00 UTC run is the full run |
 | `AUTO_REMEDIATE_ON_PR_REJECTION` / `AUTO_REMEDIATE_AFTER_MERGE` | `false` | |
 | `AUTO_REMEDIATE_DRY_RUN` | `true` | |
@@ -142,7 +144,19 @@ Repository **secrets**:
 5. Run `astral-backup.yml` manually with `forceFullRun`, then `astral-restore.yml` with the default dry run.
 6. MCP server: point it at Gitea with `ASTRAL_REPO_URL=https://<gitea>/<owner>/astral.git` and `ASTRAL_REPO_TOKEN=<read-only token>` (see `infra/mcp-server/README.md`).
 
-## 8. Not yet available on Gitea
+## 8. Active Directory (optional)
+
+The workload `ad` backs up on-premises Active Directory. It is backup only. Full guide: [active-directory-setup.md](./active-directory-setup.md).
+
+1. **Runner.** Create a Windows Server VM, join it to the domain (not a DC), and run `deploy/bootstrap-ad.ps1` on it: `-Step DomainSetup` (domain admin), `-Step RunnerSetup -Platform gitea`, then `-Step GiteaRunner -GiteaUrl https://<gitea>` with a registration token from the repository (*Settings > Actions > Runners*). The last step registers `act_runner` with the label `ad:host` and starts it at boot as the gMSA. Install Git for Windows (the workflow uses its `bash`) and Python.
+2. **Linux runner.** The pull-request jobs of the AD workflow run on the normal `astral` runner (section 2), so you need that runner too.
+3. **Variable.** `ENABLE_WORKLOAD_AD=true`. Run `astral-ad-backup.yml` by hand once. Merge the first PR to set the baseline.
+
+Gitea ignores `environment` (section 1), so anyone with write access can run a workflow on the AD runner. The gMSA can only read AD, but it can read all of it. Keep write access to operators, register the runner at repository level, and do not share it.
+
+For an Active Directory-only deployment, set `ENABLE_WORKLOAD_INTUNE=false` and `ENABLE_WORKLOAD_ENTRA=false`, and disable `astral-probe.yml` and `astral-restore.yml` in the Actions page. They have nothing to do without a tenant identity, and the probe runs every five minutes.
+
+## 9. Not yet available on Gitea
 
 - HTML/PDF as-built documentation artifacts and snapshot tagging.
 - Platform-enforced restore approval (see section 1).

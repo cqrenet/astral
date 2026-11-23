@@ -69,15 +69,23 @@ Not exported: user and computer objects, password hashes, DNS zones, AD CS templ
 
 Use a group managed service account (gMSA). It needs no group membership: read access to AD and GPOs is part of the default `Authenticated Users` permissions.
 
-```powershell
-# On a machine with the ActiveDirectory module, as a domain admin (needs a KDS root key):
-.\deploy\setup-ad-runner.ps1 -Step CreateAccount -RunnerComputer RUNNER01
+`deploy/bootstrap-ad.ps1` does this in three steps, like `bootstrap-tenant.ps1` does for Entra. Every step can be run again.
 
-# On the runner VM, as local administrator:
-.\deploy\setup-ad-runner.ps1 -Step PrepareRunner
+```powershell
+# 1. On a machine with the ActiveDirectory module, as a domain admin (needs a KDS root key).
+#    -GrantEventLogAccess is only for author attribution (step 4).
+.\deploy\bootstrap-ad.ps1 -Step DomainSetup -RunnerComputer RUNNER01 -GrantEventLogAccess
+
+# 2. On the runner VM, as local administrator. Prints the registration commands for your platform.
+.\deploy\bootstrap-ad.ps1 -Step RunnerSetup -Platform github     # or ado, gitea
+
+# 3. On the runner VM, with a clone of this repository: runs the export as the gMSA and shows the result.
+.\deploy\bootstrap-ad.ps1 -Step Verify -RepoPath C:\astral -CheckEvents
 ```
 
-`PrepareRunner` installs `RSAT-AD-PowerShell` and `GPMC`, installs the gMSA and checks Git and Python. If it warns that the `GroupPolicy` module is missing, GPMC does not work on that installation. Use Server with Desktop Experience.
+`RunnerSetup` installs `RSAT-AD-PowerShell` and `GPMC`, installs the gMSA, and checks Git, Python and the connection to a domain controller. If it warns that the `GroupPolicy` module is missing, GPMC does not work on that installation. Use Server with Desktop Experience.
+
+`Verify` needs the right *Log on as a batch job* for the gMSA, because it runs the export in a scheduled task. If the task fails with a logon error, grant it in Local Security Policy, or run the export once under your own account instead. The runner service itself does not need this right.
 
 Deny the gMSA interactive and Remote Desktop logon with Group Policy.
 
@@ -97,7 +105,7 @@ GitHub (private repositories only: a pull request from a fork must never run on 
   --runasservice --windowslogonaccount 'CORP\gmsa-astral-ad$'
 ```
 
-Gitea: `act_runner` has no Windows service mode. Run it in host mode, labelled `ad:host`, from a scheduled task or a service wrapper that runs as the gMSA.
+Gitea: `act_runner` has no Windows service mode. `.\deploy\bootstrap-ad.ps1 -Step GiteaRunner -GiteaUrl https://<gitea>` registers it with the label `ad:host` and runs it at boot from a scheduled task as the gMSA. Download `act_runner.exe` into `C:\act_runner` first. The task needs the right *Log on as a batch job* for the gMSA; grant it if the task fails with a logon error.
 
 Use a pool or label only for this workload. Limit who can edit pipeline files for it.
 
@@ -111,7 +119,7 @@ The events exist only if you turn on auditing. This changes the domain controlle
 
 1. **Audit policy.** In the Default Domain Controllers Policy, turn on *Audit Directory Service Changes* (Success): Advanced Audit Policy, DS Access.
 2. **Audit entries (SACL).** On the domain root, add an audit entry: principal *Everyone*, type *Success*, applies to *this object and all descendant objects*, permissions *Write all properties*, *Create all child objects*, *Delete all child objects* and *Delete*. To limit log volume, apply it only to the descendant object types that ASTRAL exports: `organizationalUnit`, `groupPolicyContainer`, `group`, `trustedDomain` and `msDS-PasswordSettings`. For sites and subnets, add the same entry on `CN=Sites,CN=Configuration`.
-3. **Read access.** Add the gMSA to the built-in group *Event Log Readers* (`deploy/setup-ad-runner.ps1 -Step GrantEventLogAccess`, domain admin), then restart the runner service. Allow the firewall rule *Remote Event Log Management (RPC)* from the runner to the domain controllers.
+3. **Read access.** Add the gMSA to the built-in group *Event Log Readers* (`deploy/bootstrap-ad.ps1 -Step DomainSetup -GrantEventLogAccess`, domain admin; `-Step Verify -CheckEvents` shows whether it works), then restart the runner service. Allow the firewall rule *Remote Event Log Management (RPC)* from the runner to the domain controllers.
 4. **Retention.** Make the Security log large enough to keep the events between two backups, with a margin.
 
 How it behaves:
