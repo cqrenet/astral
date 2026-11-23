@@ -57,7 +57,7 @@ flowchart LR
     U -->|API key or Entra token| MCP -->|read| M
 ```
 
-The backup, review and restore pipelines have no inbound endpoint. The optional Azure components add two inbound
+The optional on-premises Active Directory backup runs on a domain-joined self-hosted runner that only connects out to the forge (see [Active Directory runner](#active-directory-runner-optional)). The backup, review and restore pipelines have no inbound endpoint. The optional Azure components add two inbound
 HTTPS endpoints (the MCP server and the PR comment webhook), described under [Network exposure](#network-exposure).
 
 ## Data handled
@@ -67,6 +67,7 @@ HTTPS endpoints (the MCP server and the PR comment webhook), described under [Ne
 | Intune configuration | Compliance policies, configuration profiles, Settings Catalog, apps, scripts (including script bodies), filters, scope tags, assignments | `tenant-state/intune/` in the customer repository |
 | Entra configuration | Conditional Access, named locations, authentication strengths, app registrations and enterprise applications (including credential metadata: key IDs, names, dates, never secret values) | `tenant-state/entra/` |
 | Entra identity data | Security groups referenced by Conditional Access with member counts; full member lists for groups listed in `ENTRA_WATCH_GROUPS_CSV` and for role-assignable groups; directory role assignments (permanent and PIM-eligible) with principal names; PIM, authentication methods, cross-tenant, Identity Protection and security-default policies | `tenant-state/entra/` |
+| Active Directory configuration (optional, on-premises) | GPO settings (XML reports), OU tree and GPO links, members of privileged groups (Domain Admins, Enterprise Admins, ...), password and lockout policies, trusts, sites. No user or computer objects, no password hashes. Group Policy Preferences `cpassword` values are redacted before commit. | `tenant-state/ad/` |
 | Reports | Assignment, object, app and per-setting inventories (CSV/Markdown) | `tenant-state/reports/` |
 | Review metadata | PR descriptions, threads, `/accept` and `/reject` comments | The forge (Azure DevOps, GitHub, Gitea) |
 | Probe state | Debouncer timestamps and state | Azure Table Storage |
@@ -107,6 +108,19 @@ the same variable, `SERVICE_CONNECTION_NAME`, so by default they use the same id
 holds write permissions. Give the restore pipeline its own service connection (for example through a separate
 variable group) with approval checks. The GitHub workflows already keep the write identity in a separate
 environment.
+
+### Active Directory runner (optional)
+
+The on-premises workload needs a domain-joined self-hosted runner (see [active-directory-setup.md](../active-directory-setup.md)).
+
+| Identity | Rights | Notes |
+|---|---|---|
+| gMSA (`gmsa-astral-ad`) | None beyond `Authenticated Users`: read of AD objects and GPOs. For author attribution (optional): member of the built-in group *Event Log Readers*, which can read the whole Security log of the domain controllers (logon events included). | The runner service runs as this account. The password is managed by AD. Deny interactive and Remote Desktop logon. |
+| Runner VM | Domain member (not a domain controller); outbound HTTPS to the forge; LDAP, ADWS, SMB and RPC to a domain controller | Dedicated to this workload. The export is read-only and never writes to AD. |
+
+The runner holds a domain identity, so treat it as a tier-1 host: patch it, monitor it, and allow only protected
+branches to run workflows on it (GitHub: environment `astral-backup`, main only; Azure DevOps: a dedicated pool with
+restricted pipeline permissions).
 
 ### Entra app registration created by `deploy/provision.ps1`
 
@@ -261,6 +275,9 @@ that starts the real MCP server. It does not cover:
 | 13 | Releases and commits are not signed | Customers rely on GitHub account and tag protection | Pin updates to release tags and review the diff |
 | 14 | The change probe runs on the Linux Consumption plan (retired by Microsoft on 30 September 2028, Python 3.12 at most) | Platform end of life | Move to Flex Consumption before then |
 | 15 | Bandit reports B310 (`urllib` URL open) in the HTTP helpers | None known: URLs are built from operator configuration, not tenant data | Accepted |
+| 16 | The Active Directory runner is a domain-joined host that executes pipeline code. A user who can change the workflow on a branch the runner accepts can run code as the gMSA (read-only on AD). | Disclosure of the directory configuration; no write access | Dedicated pool or label, branch and environment protection, private repository, restricted pipeline edit rights |
+| 17 | The Active Directory export redacts only Group Policy Preferences `cpassword`. Other secrets in GPO settings, such as passwords in startup scripts, are not found. | Repository readers can see them (see 9) | Private repository, secret scanning (TruffleHog runs in CI), and remove passwords from GPOs |
+| 18 | Active Directory author attribution needs auditing on the domain controllers and *Event Log Readers* membership for the runner account. The group can read the whole Security log. Names come from event 5136/5137/5139/5141 and are best effort: unaudited objects, machine accounts and unreachable controllers fall back to the service identity. | A wrong or missing author does not change what was exported. The runner can read logon events. | Skip attribution (`AD_ATTRIBUTE_AUTHORS=false`) or forward only the directory-change events to a collector and read them there |
 
 ## Issues fixed during the 2026 internal review
 

@@ -89,8 +89,16 @@ def _classify_risk(path: str, operation: str, backup_folder: str, reports_subdir
         "/roles/",
         "/privileged identity management/",
         "/admin units/",
+        # Active Directory
+        "/privileged groups/",
+        "/group policy objects/",
+        "/fine-grained password policies/",
+        "/trusts/",
+        "/domain/defaultpasswordpolicy",
     ]
     medium_markers = [
+        "/organizational units/",
+        "/sites/",
         "/applications/",
         "/app protection/",
         "/app configuration/",
@@ -341,7 +349,7 @@ def _detect_hotspots(changes: list[ChangeItem]) -> list[str]:
             continue
 
         area = parts[0]
-        if len(parts) >= 3 and parts[1].lower() in {"intune", "entra"}:
+        if len(parts) >= 3 and parts[1].lower() in {"intune", "entra", "ad"}:
             # tenant-state/<workload>/<area>/...
             area = parts[2]
         elif len(parts) >= 2:

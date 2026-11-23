@@ -11,6 +11,7 @@ to run the MCP smoke test. Controls that depend on your platform configuration a
 | Component | Runs as | Can read | Can write |
 |---|---|---|---|
 | Backup (Intune, Entra) | Backup identity (workload federated credential or managed identity) | Microsoft Graph read permissions (see README) | Only the drift branches and rolling PRs in the repository |
+| Backup (Active Directory, optional) | gMSA on a domain-joined runner | AD objects and GPOs with the default `Authenticated Users` rights | Only `drift/ad` and its rolling PR in the repository. Never writes to AD. |
 | Reports pipeline | Pipeline identity | The repository | `tenant-state/reports/` on `main` |
 | Review sync | Pipeline token (`System.AccessToken` or forge token) | PRs and threads | PR threads, drift branch resets, restore queueing |
 | Restore | Separate restore identity | Graph | **Graph write permissions** (`...ReadWrite.All`); dry run by default |
@@ -50,6 +51,11 @@ to run the MCP smoke test. Controls that depend on your platform configuration a
 | MCP sign-in is limited to assigned users and groups | `deploy/provision.ps1` (assignment required on the enterprise application) | Review; no automated test for the PowerShell Graph calls |
 | MCP rejects requests with an unexpected Host header | `infra/mcp-server/mcp_server.py` (transport security) | Done by the `mcp` library; checked manually against `mcp` 2.3.0 (unknown Host returns 421). No automated test |
 | PR comment webhook requires the shared secret and fails closed without one | `infra/change-probe/pr_comment_webhook/__init__.py` | `tests/test_change_probe_function.py`: `WebhookAuthTests` |
+| Active Directory export never keeps GPP `cpassword` values or report timestamps | `scripts/backup_ad.py` | `tests/test_backup_ad.py`: `test_secrets_timestamps_and_encoding_are_scrubbed`, `test_normalize_tree_is_idempotent_and_reads_utf16_and_bom` |
+| Active Directory change events are matched to files by object identity; machine accounts and SYSTEM are never named; a failing event read never fails the backup or loses a change | `scripts/backup_ad.py` | `tests/test_backup_ad.py`: `AttributionTests` (`test_events_reach_the_files_they_changed`, `test_several_authors_unmatched_files_and_ignored_subjects`, `test_password_policy_events_only_reach_the_policy_file`, `test_aggregate_files_match_on_object_class_and_moves_on_the_old_name`, `test_collect_events_passes_the_window_and_reports_unreadable_controllers`), `AttributedCommitTests` |
+| Active Directory event export does not include attribute values | `scripts/export_ad_changes.ps1` | Review: the output fields are listed in the script. No test runs it against a domain. |
+| Active Directory is backup only: review never queues a restore for it, even when auto-remediation is on | `scripts/run_review.sh` | `tests/test_backup_ad.py`: `test_ad_review_never_enables_remediation_even_when_the_tenant_asks_for_it` |
+| Active Directory export is read-only and ASCII-safe for Windows PowerShell 5.1 | `scripts/export_ad_baseline.ps1` | `tests/test_backup_ad.py`: `test_scripts_parse_and_are_ascii`. The script uses no cmdlet that changes AD (review of the `Get-*` calls); no test runs it against a domain. |
 | AI summaries are opt-in | `scripts/pr_review.py`, `templates/variables-common.yml` | `tests/test_update_pr_review_summary.py`: `test_ai_summary_is_opt_in_even_when_azure_openai_is_configured` |
 | MCP tool inputs are validated; the server only reads files and the repository | `scripts/astral_mcp_tools.py` | `tests/test_astral_mcp_tools.py`: `test_rejects_traversal_and_unknown_inputs` (the server has no write tools; verify by reviewing the tool list in `infra/mcp-server/mcp_server.py`) |
 | Repository tokens never appear on a command line | change probe, trigger script, MCP clone, provisioning | `tests/test_change_probe_function.py` (probe and queue consumer), `tests/test_astral_mcp_tools.py`: `test_clone_token_is_passed_by_environment_not_argv` |

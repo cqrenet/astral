@@ -29,6 +29,19 @@ variables:
   - name: AGENT_POOL_NAME
     value: Azure Pipelines
 
+  # Optional: Active Directory (on-premises) backup. Opt-in: needs a domain-joined self-hosted Windows agent
+  # with RSAT (docs/active-directory-setup.md). Pipelines: azure-pipelines-ad.yml.
+  - name: ENABLE_WORKLOAD_AD
+    value: false
+  - name: AD_AGENT_POOL_NAME
+    value: astral-ad
+  # Optional: domain controller to query (default: the agent's own domain).
+  - name: AD_SERVER
+    value: ""
+  # Optional: extra groups to export next to the built-in privileged ones (names or SIDs, comma-separated).
+  - name: AD_EXTRA_PRIVILEGED_GROUPS_CSV
+    value: ""
+
   # Optional: Timezone for light/full run decisions. Must be a valid tz database name.
   - name: BACKUP_TIMEZONE
     value: Europe/Prague

@@ -34,3 +34,14 @@ jobs:
       contents: write
       pull-requests: write
       actions: write
+
+  ad:
+    if: github.repository != 'cqrenet/astral' && vars.ENABLE_WORKLOAD_AD == 'true'
+    uses: ./.github/workflows/astral-review.yml
+    with:
+      workload: ad
+    secrets: inherit
+    permissions:
+      contents: write
+      pull-requests: write
+      actions: write

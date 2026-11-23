@@ -25,7 +25,7 @@ Azure-hosted Model Context Protocol (MCP) server for ASTRAL. Exposes tenant stat
 
 | Tool | Description |
 |------|-------------|
-| `list_workloads()` | List workloads: `intune`, `entra` |
+| `list_workloads()` | List workloads: `intune`, `entra`, `ad` (on-premises Active Directory, opt-in) |
 | `list_categories(workload)` | List policy categories for a workload |
 | `list_policies(workload, category)` | List policies in a category (recursively) |
 | `get_policy(workload, category, name)` | Retrieve current JSON configuration of a policy |
@@ -34,6 +34,11 @@ Azure-hosted Model Context Protocol (MCP) server for ASTRAL. Exposes tenant stat
 | `get_recent_drift(workload, hours)` | Recent Git commits (drift) for a workload |
 | `get_assignment_report(workload)` | Latest assignment report Markdown |
 | `get_object_inventory(workload, category)` | Object inventory CSV as JSON rows |
+| `list_group_policy_objects(name)` | Active Directory GPOs (name, GUID), optionally filtered by name |
+| `get_group_policy_object(name_or_id)` | Settings report (XML) of one GPO, cut at 100,000 characters |
+| `get_ad_organizational_units(name)` | OUs with ordered GPO links (GPO names resolved), inheritance blocking |
+| `get_ad_privileged_groups(group_name)` | Domain Admins, Enterprise Admins, ... with direct members |
+| `get_ad_domain()` | Domain facts, FSMO holders, password policies, trusts, sites |
 
 ### Prompts
 
@@ -41,6 +46,7 @@ Azure-hosted Model Context Protocol (MCP) server for ASTRAL. Exposes tenant stat
 |--------|-------------|
 | `audit_briefing(workload)` | Template for generating a 7-day drift audit summary |
 | `policy_deep_dive(workload, category, name)` | Template for deep-diving into a single policy |
+| `ad_security_briefing()` | Template for an Active Directory security briefing |
 
 ## Configuration
 

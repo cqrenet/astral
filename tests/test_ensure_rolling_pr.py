@@ -79,6 +79,15 @@ class EnsureRollingPrTests(unittest.TestCase):
         self.assertEqual(self.module._WorkloadScope("", "tenant-state", "reports").prefix, "")
         self.assertFalse(self.module._WorkloadScope("entra", "", "reports").contains("entra/a.json"))
 
+    def test_active_directory_workload_has_its_own_scope_and_description(self) -> None:
+        scope = self.module._WorkloadScope("ad", "tenant-state", "reports")
+        self.assertTrue(scope.contains("tenant-state/ad/Group Policy Objects/Default__1.xml"))
+        self.assertTrue(scope.contains("tenant-state/ad/Domain/Domain.json"))
+        self.assertFalse(scope.contains("tenant-state/entra/Domain/Domain.json"))
+        description = self.module._build_description("ad", "drift/ad", "main", "7", "70")
+        self.assertIn("Active Directory drift PR", description)
+        self.assertIn("Rolling drift PR", self.module._build_description("intune", "d", "main", "7", "70"))
+
     def test_tree_api_fingerprint_matches_local_fingerprint_rules(self) -> None:
         scope = self.module._WorkloadScope("entra", "tenant-state", "reports")
         entries = [

@@ -4,11 +4,12 @@ This repository tracks Git-based snapshots of Microsoft Intune and Entra ID conf
 
 ## Project Overview
 
-The implementation is centered on four Azure DevOps pipelines and an optional MCP server:
+The implementation is centered on four Azure DevOps pipelines, an opt-in on-premises Active Directory backup (`azure-pipelines-ad.yml`, `ad` workload) and an optional MCP server:
 
 - `azure-pipelines.yml`: daily full backup/export pipeline with rolling PR management (previously hourly; now driven primarily by event-driven change probe).
 - `azure-pipelines-review-sync.yml`: 20-minute reviewer-decision sync and post-merge remediation queue.
 - `azure-pipelines-restore.yml`: manual or auto-queued restore pipeline for approved baseline rollback.
+- `azure-pipelines-ad.yml`: opt-in, backup-only export of on-premises Active Directory (`ENABLE_WORKLOAD_AD=true`) from a domain-joined self-hosted Windows agent. GitHub/Gitea equivalents: `astral-ad-backup.yml`. Setup: `docs/active-directory-setup.md`.
 - `azure-pipelines-reports.yml`: report and documentation generation pipeline. Runs nightly at 04:00 and triggers automatically when `tenant-state/intune/**` or `tenant-state/entra/**` changes. Commits generated reports directly to `main`.
 
 Workflow at a high level:
@@ -42,6 +43,7 @@ Workflow at a high level:
 ├── .github/workflows/               # GitHub Actions equivalents (backup, review, review-sync, restore, probe)
 ├── .gitea/workflows/                # Gitea Actions equivalents (no `uses:` steps; plain-git checkout)
 ├── azure-pipelines-reports.yml      # Report and documentation generation (scheduled + data-driven)
+├── azure-pipelines-ad.yml           # Opt-in on-premises Active Directory backup (self-hosted Windows agent)
 ├── reports/                         # Report definitions (`definitions.yml` builtin, `definitions.local.yml` customer-owned)
 ├── scripts/                         # Python automation helpers
 ├── tests/                           # unittest coverage for scripts
@@ -66,6 +68,7 @@ Workflow at a high level:
 - `export_entra_baseline.py`: Graph API export for Entra objects (Named Locations, Authentication Strengths, Conditional Access, App Registrations, Enterprise Applications).
 - `export_entra_identity.py`: Phase 1 and v2 identity export — security groups (with CA references, member counts, and rename detection), directory role assignments (permanent + PIM-eligible), PIM role governance policies, authentication methods policy, cross-tenant access settings, Identity Protection risk policies, security defaults, and authorization policy. Supports `--reports-only` mode for the standalone reports pipeline.
 - `commit_entra_drift.py`: commits Entra drift with author attribution from audit logs.
+- `backup_ad.py` + `export_ad_baseline.ps1`: Active Directory backup (`ad` workload) for a Windows runner. The PowerShell exporter is read-only (RSAT `ActiveDirectory` + `GroupPolicy`, ASCII-only, Windows PowerShell 5.1); the Python orchestrator canonicalizes JSON, drops GPO report timestamps, redacts GPP `cpassword`, validates and commits under the service identity. It is Python rather than bash because the runner is Windows. Backup only: `run_review.sh` forces remediation off for `ad`. `deploy/setup-ad-runner.ps1` prepares the gMSA and runner. Author attribution: `export_ad_changes.ps1` reads directory-change events (5136/5137/5139/5141, no attribute values) from the domain controllers; `backup_ad.py` matches them to files by GUID/DN/object class (`event_keys`/`file_keys`), ignores machine accounts and SYSTEM, and makes one commit per author set. Attribution is best effort and never fails the backup.
 - `resolve_ca_references.py`: resolves Conditional Access GUID references to human-readable names. When the Groups snapshot is available (written by `export_entra_identity.py`), group names are resolved from disk instead of via Graph API.
 - `filter_entra_enrichment_noise.py`: reverts JSON churn caused by best-effort Graph enrichment (owners, app roles).
 - `filter_intune_partial_settings_noise.py`: reverts partial Settings Catalog exports.
@@ -167,6 +170,7 @@ python3 -m unittest discover -s tests -v
 - `test_change_probe_function.py`: the Function App entry points (Azure SDKs stubbed).
 - `test_export_entra_identity.py`, `test_run_reports.py`: the identity export (groups, role assignments, PIM, security settings) and the report dispatcher driven by `reports/definitions.yml`.
 - `test_restore_prepare_scope.py`: selective-restore path normalization and traversal guard.
+- `test_backup_ad.py`: AD scrub/normalize/validate, event-to-file attribution and per-author commits, commit and no-change paths against real local git repositories, review is backup-only for `ad`, exporters parse and are ASCII.
 - `test_astral_mcp_tools.py`, `test_mcp_server.py`: MCP client for local and remote sources; server auth middleware and Entra claim rules.
 
 ## Build and Runtime Architecture
@@ -186,7 +190,7 @@ An Azure Container Apps-hosted MCP server exposes ASTRAL tenant state to AI assi
 - **Location**: `infra/mcp-server/`
 - **Runtime**: Python FastMCP with stdio or SSE transport.
 - **Data source**: Azure DevOps REST API (reads `tenant-state/` from Git) or local filesystem clone.
-- **Tools**: policy lookup, search, drift history, assignment reports, object inventory, report dispatcher (`list_report_definitions` / `list_generated_reports` / `get_report`), per-setting inventory (`get_settings_report` / `find_policies_for_setting`), CA group analysis (`get_ca_groups`), and privileged role assignment review (`get_privileged_role_assignments`).
+- **Tools**: policy lookup (workloads `intune`, `entra`, `ad`), search, drift history, AD tools (`list_group_policy_objects` / `get_group_policy_object` / `get_ad_organizational_units` / `get_ad_privileged_groups` / `get_ad_domain`), assignment reports, object inventory, report dispatcher (`list_report_definitions` / `list_generated_reports` / `get_report`), per-setting inventory (`get_settings_report` / `find_policies_for_setting`), CA group analysis (`get_ca_groups`), and privileged role assignment review (`get_privileged_role_assignments`).
 - **Prompts**: audit briefing, security posture briefing, and policy deep-dive templates.
 - **Auth**: Microsoft Entra ID via Container Apps built-in authentication (recommended for production).
 - **Deployment**: Integrated into `deploy/provision.ps1` (optional, prompted interactively or controlled via `-DeployMcpServer` / `-SkipMcpServer` / `-DeployMcpOnly` flags). Container image built from `infra/mcp-server/Dockerfile` via Azure Container Registry Tasks.
@@ -338,6 +342,7 @@ python3 ./scripts/validate_backup_outputs.py \
 - `PR_SUMMARY_LANGUAGE` (default: `en`) — controls the language of both the AI-generated PR narrative and the deterministic summary tables. Supported out of the box: `en`, `cz`, `sk`, `de`, `fr`, `it`, `es`, `pl`, `nl`, `pt`. Additional languages can be added by extending the `_TRANSLATIONS` dictionary in `scripts/update_pr_review_summary.py`.
 - Phase 1 identity export toggles (all default `true`): `ENTRA_INCLUDE_GROUPS`, `ENTRA_INCLUDE_ROLE_ASSIGNMENTS`, `ENTRA_INCLUDE_AUTH_METHODS_POLICY`, `ENTRA_INCLUDE_CROSS_TENANT_ACCESS`, `ENTRA_INCLUDE_IDENTITY_PROTECTION`
 - v2 identity export toggles (all default `true`): `ENTRA_INCLUDE_PRIVILEGED_GROUPS`, `ENTRA_INCLUDE_PIM_POLICIES`, `ENTRA_INCLUDE_SECURITY_SETTINGS`
+- Active Directory (opt-in, all toggles default `true` except the workload): `ENABLE_WORKLOAD_AD` (default off), `DRIFT_BRANCH_AD` (default `drift/ad`), `AD_BACKUP_SUBDIR`, `AD_SERVER`, `AD_INCLUDE_GPOS`, `AD_INCLUDE_OUS`, `AD_INCLUDE_PRIVILEGED_GROUPS`, `AD_INCLUDE_PASSWORD_POLICIES`, `AD_INCLUDE_TRUSTS`, `AD_INCLUDE_SITES`, `AD_EXTRA_PRIVILEGED_GROUPS_CSV`, `AD_ATTRIBUTE_AUTHORS` (default `true`), `AD_AUDIT_LOOKBACK_HOURS` (48), `AD_AUDIT_SERVERS`, `AD_AGENT_POOL_NAME` (Azure DevOps)
 - `ENTRA_WATCH_GROUPS_CSV` — comma-separated group GUIDs for full member-list export (all other groups receive count-only tracking)
 
 ### MCP Server Environment Variables

@@ -28,7 +28,7 @@ class AstralMcpToolsTests(unittest.TestCase):
 
     def test_list_workloads(self) -> None:
         client = self.module.AstralMcpClient(local_root="/dev/null")
-        self.assertEqual(client.list_workloads(), ["intune", "entra"])
+        self.assertEqual(client.list_workloads(), ["intune", "entra", "ad"])
 
     def test_list_categories_intune(self) -> None:
         client = self.module.AstralMcpClient(local_root="/dev/null")
@@ -153,6 +153,80 @@ class AstralMcpToolsTests(unittest.TestCase):
         self.assertEqual([p["roleDisplayName"] for p in pim], ["Global Administrator"])
         self.assertEqual([r["displayName"] for r in roles], ["Helpdesk"])
         self.assertEqual(security, {"securityDefaults": {"isEnabled": False}})
+
+    def _ad_tree(self, root: Path) -> None:
+        ad = root / "tenant-state" / "ad"
+        (ad / "Group Policy Objects").mkdir(parents=True)
+        (ad / "Group Policy Objects" / "Workstation Baseline__aaaa-1.xml").write_text("<GPO>w</GPO>", encoding="utf-8")
+        (ad / "Group Policy Objects" / "Dup__bbbb-2.xml").write_text("<GPO/>", encoding="utf-8")
+        (ad / "Group Policy Objects" / "Dup__cccc-3.xml").write_text("<GPO/>", encoding="utf-8")
+        (ad / "Group Policy Objects" / "Big__dddd-4.xml").write_text("x" * 100_050, encoding="utf-8")
+        (ad / "Organizational Units").mkdir()
+        (ad / "Organizational Units" / "Workstations__g1.json").write_text(json.dumps({
+            "DistinguishedName": "OU=Workstations,DC=corp,DC=local",
+            "GpoLinks": [{"Order": 1, "GpoId": "AAAA-1", "Enabled": True, "Enforced": False}, {"Order": 2, "GpoId": "gone", "Enabled": True, "Enforced": False}],
+        }), encoding="utf-8")
+        (ad / "Privileged Groups").mkdir()
+        (ad / "Privileged Groups" / "Domain Admins__S-1-512.json").write_text(json.dumps({"Name": "Domain Admins", "Members": [{"SamAccountName": "alice"}]}), encoding="utf-8")
+        (ad / "Privileged Groups" / "Schema Admins__S-1-518.json").write_text(json.dumps({"Name": "Schema Admins", "Members": []}), encoding="utf-8")
+        (ad / "Domain").mkdir()
+        (ad / "Domain" / "Domain.json").write_text(json.dumps({"DnsRoot": "corp.local"}), encoding="utf-8")
+        (ad / "Domain" / "DefaultPasswordPolicy.json").write_text(json.dumps({"MinPasswordLength": 12}), encoding="utf-8")
+        (ad / "Sites").mkdir()
+        (ad / "Sites" / "Sites.json").write_text(json.dumps([{"Name": "HQ"}]), encoding="utf-8")
+
+    def test_active_directory_gpos_are_listed_and_read_by_exact_name_or_guid(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            self._ad_tree(Path(td))
+            client = self.module.AstralMcpClient(local_root=td)
+            self.assertEqual([g["name"] for g in client.list_group_policy_objects("work")], ["Workstation Baseline"])
+            self.assertEqual(client.get_group_policy_object("workstation baseline"), "<GPO>w</GPO>")
+            self.assertEqual(client.get_group_policy_object("AAAA-1"), "<GPO>w</GPO>")
+            with self.assertRaises(FileNotFoundError):
+                client.get_group_policy_object("Workstation")  # substring is not a match
+            with self.assertRaises(ValueError) as ambiguous:
+                client.get_group_policy_object("Dup")
+            self.assertIn("bbbb-2", str(ambiguous.exception))
+            with self.assertRaises(ValueError):
+                client.get_group_policy_object("")
+            big = client.get_group_policy_object("Big")
+            self.assertTrue(big.endswith("<!-- truncated: 50 more characters -->"))
+
+    def test_active_directory_gpo_lookup_cannot_escape_the_export(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            self._ad_tree(Path(td))
+            Path(td, "secret.xml").write_text("secret", encoding="utf-8")
+            client = self.module.AstralMcpClient(local_root=td)
+            for attempt in ("../../../secret", "..", "/etc/passwd"):
+                with self.assertRaises(FileNotFoundError):
+                    client.get_group_policy_object(attempt)
+
+    def test_active_directory_ous_get_gpo_names_and_groups_filter_by_name(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            self._ad_tree(Path(td))
+            client = self.module.AstralMcpClient(local_root=td)
+            links = client.get_ad_organizational_units("workstations")[0]["GpoLinks"]
+            self.assertEqual([link["GpoName"] for link in links], ["Workstation Baseline", ""])  # unknown GPO: empty name
+            self.assertEqual([g["Name"] for g in client.get_ad_privileged_groups()], ["Domain Admins", "Schema Admins"])
+            self.assertEqual([g["Name"] for g in client.get_ad_privileged_groups("schema")], ["Schema Admins"])
+            self.assertEqual(client.get_ad_organizational_units("nothing"), [])
+
+    def test_active_directory_overview_omits_what_was_not_exported(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            self._ad_tree(Path(td))
+            overview = self.module.AstralMcpClient(local_root=td).get_ad_domain()
+            self.assertEqual(overview["domain"], {"DnsRoot": "corp.local"})
+            self.assertEqual(overview["defaultPasswordPolicy"], {"MinPasswordLength": 12})
+            self.assertEqual(overview["sites"]["Sites"], [{"Name": "HQ"}])
+            self.assertNotIn("trusts", overview)
+            self.assertEqual(self.module.AstralMcpClient(local_root=td + "/nowhere").get_ad_domain(), {})
+
+    def test_active_directory_generic_tools_work_for_json_categories(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            self._ad_tree(Path(td))
+            client = self.module.AstralMcpClient(local_root=td)
+            self.assertIn("Privileged Groups", client.list_categories("ad"))
+            self.assertEqual(sorted(p["name"] for p in client.search_policies("ad", "domain")), ["Domain", "Domain Admins__S-1-512"])
 
     def test_settings_report_filters_and_setting_lookup_groups_by_policy(self) -> None:
         csv_text = (

@@ -1,0 +1,72 @@
+# ASTRAL Active Directory backup: export on-prem AD configuration (GPOs, OUs, privileged groups, ...) from a
+# domain-joined self-hosted Windows runner, commit drift to drift/ad, then create/refresh the rolling PR.
+# Opt-in: set the repository variable ENABLE_WORKLOAD_AD=true after the runner exists (docs/active-directory-setup.md).
+# Backup only: there is no AD restore pipeline, so /reject decisions never change the directory.
+#
+# The AD job runs on the AD runner and nowhere else; PR handling runs on the normal ASTRAL runner.
+name: ASTRAL AD backup
+
+on:
+  schedule:
+    - cron: "30 2 * * *"   # UTC
+  workflow_dispatch:
+
+permissions: {}   # every job opts in to what it needs
+
+concurrency:
+  group: astral-ad-backup
+  cancel-in-progress: false
+
+env:
+  ASTRAL_SCM: github
+  # Empty values fall back to the defaults in scripts/backup_ad.py.
+  BASELINE_BRANCH: ${{ vars.BASELINE_BRANCH }}
+  DRIFT_BRANCH_AD: ${{ vars.DRIFT_BRANCH_AD }}
+  USER_NAME: ${{ vars.USER_NAME }}
+  USER_EMAIL: ${{ vars.USER_EMAIL }}
+  AD_SERVER: ${{ vars.AD_SERVER }}
+  AD_INCLUDE_GPOS: ${{ vars.AD_INCLUDE_GPOS || 'true' }}
+  AD_INCLUDE_OUS: ${{ vars.AD_INCLUDE_OUS || 'true' }}
+  AD_INCLUDE_PRIVILEGED_GROUPS: ${{ vars.AD_INCLUDE_PRIVILEGED_GROUPS || 'true' }}
+  AD_INCLUDE_PASSWORD_POLICIES: ${{ vars.AD_INCLUDE_PASSWORD_POLICIES || 'true' }}
+  AD_INCLUDE_TRUSTS: ${{ vars.AD_INCLUDE_TRUSTS || 'true' }}
+  AD_INCLUDE_SITES: ${{ vars.AD_INCLUDE_SITES || 'true' }}
+  AD_EXTRA_PRIVILEGED_GROUPS_CSV: ${{ vars.AD_EXTRA_PRIVILEGED_GROUPS_CSV }}
+  AD_ATTRIBUTE_AUTHORS: ${{ vars.AD_ATTRIBUTE_AUTHORS || 'true' }}
+  AD_AUDIT_LOOKBACK_HOURS: ${{ vars.AD_AUDIT_LOOKBACK_HOURS }}
+  AD_AUDIT_SERVERS: ${{ vars.AD_AUDIT_SERVERS }}
+
+jobs:
+  ad:
+    name: Backup Active Directory
+    if: github.repository != 'cqrenet/astral' && vars.ENABLE_WORKLOAD_AD == 'true'
+    runs-on: ${{ fromJSON(vars.ASTRAL_AD_RUNS_ON || '["self-hosted","windows","ad"]') }}
+    environment: astral-backup   # main only: a workflow edited on another branch must not run on a domain-joined host
+    permissions:
+      contents: write   # push drift/ad
+    timeout-minutes: 60
+    outputs:
+      changed: ${{ steps.backup.outputs.CHANGE_DETECTED }}
+      sync: ${{ steps.backup.outputs.ROLLING_PR_SYNC_REQUIRED }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1   # v7.0.1
+        with:
+          fetch-depth: 0
+
+      - name: Back up and commit Active Directory drift
+        id: backup
+        run: python scripts/backup_ad.py
+
+  ad-review:
+    name: Active Directory rolling PR
+    needs: ad
+    if: needs.ad.outputs.changed == '1' || needs.ad.outputs.sync == '1'
+    uses: ./.github/workflows/astral-review.yml
+    with:
+      workload: ad
+      ensure-pr: true
+    secrets: inherit
+    permissions:
+      contents: write
+      pull-requests: write
+      actions: write

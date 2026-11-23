@@ -7,7 +7,7 @@ on:
   workflow_call:
     inputs:
       workload:
-        description: intune or entra
+        description: intune, entra or ad
         type: string
         required: true
       ensure-pr:
@@ -38,6 +38,7 @@ jobs:
       BASELINE_BRANCH: ${{ vars.BASELINE_BRANCH }}
       DRIFT_BRANCH_INTUNE: ${{ vars.DRIFT_BRANCH_INTUNE }}
       DRIFT_BRANCH_ENTRA: ${{ vars.DRIFT_BRANCH_ENTRA }}
+      DRIFT_BRANCH_AD: ${{ vars.DRIFT_BRANCH_AD }}
       USER_NAME: ${{ vars.USER_NAME }}
       USER_EMAIL: ${{ vars.USER_EMAIL }}
       PR_DECISION_ALLOWED_REVIEWERS: ${{ vars.PR_DECISION_ALLOWED_REVIEWERS }}

@@ -23,7 +23,7 @@ except ImportError:  # pragma: no cover
     yaml = None
 
 ROOT = Path(__file__).resolve().parents[1]
-ADO_FILES = ["azure-pipelines.yml", "azure-pipelines-review-sync.yml", "azure-pipelines-restore.yml",
+ADO_FILES = ["azure-pipelines.yml", "azure-pipelines-ad.yml", "azure-pipelines-review-sync.yml", "azure-pipelines-restore.yml",
              "deploy/update-from-upstream.yml", "deploy/validate-deployment.yml"]
 ACTIONS_FILES = sorted(glob.glob(str(ROOT / ".github/workflows/*.yml")) + glob.glob(str(ROOT / ".gitea/workflows/*.yml")))
 ALL_YAML = [str(ROOT / f) for f in ADO_FILES] + ACTIONS_FILES + [str(ROOT / "templates" / n) for n in ("variables-common.yml", "variables-tenant.yml")]

@@ -267,8 +267,8 @@ def _current_pr_merge_strategy(pr: dict[str, Any]) -> str:
 
 
 def _build_description(workload: str, drift_branch: str, baseline_branch: str, build_number: str, build_id: str) -> str:
-    is_entra = workload.lower() == "entra"
-    lead = "Rolling Entra drift PR — backup pipeline" if is_entra else "Rolling drift PR — backup pipeline"
+    label = {"entra": "Entra ", "ad": "Active Directory "}.get(workload.lower(), "")
+    lead = f"Rolling {label}drift PR — backup pipeline"
     return (
         f"{lead} run `{build_number}` (build {build_id})\n\n"
         f"Source: `{drift_branch}` → Target: `{baseline_branch}`\n"
@@ -413,7 +413,7 @@ def _remediate_rejected_pr(
 def main() -> int:
     parser = argparse.ArgumentParser(description="Ensure rolling PR exists with optional remediation-on-rejection")
     parser.add_argument("--repo-root", required=True)
-    parser.add_argument("--workload", required=True, choices=["intune", "entra"])
+    parser.add_argument("--workload", required=True, choices=["intune", "entra", "ad"])
     parser.add_argument("--drift-branch", required=True)
     parser.add_argument("--baseline-branch", required=True)
     parser.add_argument("--pr-title", required=True)
@@ -435,7 +435,7 @@ def main() -> int:
     baseline_branch = common.normalize_branch(args.baseline_branch)
     remediation = _load_remediation(baseline_branch)
     scope = _WorkloadScope(
-        workload_dir=_env_text("INTUNE_BACKUP_SUBDIR" if args.workload == "intune" else "ENTRA_BACKUP_SUBDIR", args.workload),
+        workload_dir=_env_text(f"{args.workload.upper()}_BACKUP_SUBDIR", args.workload),
         backup_folder=_env_text("BACKUP_FOLDER", "tenant-state"),
         reports_subdir=_env_text("REPORTS_SUBDIR", "reports"),
     )

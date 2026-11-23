@@ -1,0 +1,104 @@
+# ASTRAL Active Directory backup on Gitea Actions: export on-prem AD configuration from a domain-joined
+# Windows runner (label "ad"), commit drift to drift/ad, then create/refresh the rolling PR on the normal runner.
+# Opt-in: set the repository variable ENABLE_WORKLOAD_AD=true after the runner exists (docs/active-directory-setup.md).
+# Backup only: there is no AD restore pipeline, so /reject decisions never change the directory.
+# No third-party actions: checkout is plain git. The AD runner needs Git for Windows (its bash runs the checkout).
+name: ASTRAL AD backup
+
+on:
+  schedule:
+    - cron: "30 2 * * *"   # UTC
+  workflow_dispatch:
+
+concurrency:
+  group: astral-ad-backup
+  cancel-in-progress: false
+
+env:
+  ASTRAL_SCM: gitea
+  # Empty values fall back to the defaults in the scripts.
+  BASELINE_BRANCH: ${{ vars.BASELINE_BRANCH }}
+  DRIFT_BRANCH_AD: ${{ vars.DRIFT_BRANCH_AD }}
+  USER_NAME: ${{ vars.USER_NAME }}
+  USER_EMAIL: ${{ vars.USER_EMAIL }}
+  AD_SERVER: ${{ vars.AD_SERVER }}
+  AD_INCLUDE_GPOS: ${{ vars.AD_INCLUDE_GPOS }}
+  AD_INCLUDE_OUS: ${{ vars.AD_INCLUDE_OUS }}
+  AD_INCLUDE_PRIVILEGED_GROUPS: ${{ vars.AD_INCLUDE_PRIVILEGED_GROUPS }}
+  AD_INCLUDE_PASSWORD_POLICIES: ${{ vars.AD_INCLUDE_PASSWORD_POLICIES }}
+  AD_INCLUDE_TRUSTS: ${{ vars.AD_INCLUDE_TRUSTS }}
+  AD_INCLUDE_SITES: ${{ vars.AD_INCLUDE_SITES }}
+  AD_EXTRA_PRIVILEGED_GROUPS_CSV: ${{ vars.AD_EXTRA_PRIVILEGED_GROUPS_CSV }}
+  AD_ATTRIBUTE_AUTHORS: ${{ vars.AD_ATTRIBUTE_AUTHORS }}
+  AD_AUDIT_LOOKBACK_HOURS: ${{ vars.AD_AUDIT_LOOKBACK_HOURS }}
+  AD_AUDIT_SERVERS: ${{ vars.AD_AUDIT_SERVERS }}
+  # Review (scripts/run_review.sh)
+  PR_DECISION_ALLOWED_REVIEWERS: ${{ vars.PR_DECISION_ALLOWED_REVIEWERS }}
+  ENABLE_PR_REVIEW_SUMMARY: ${{ vars.ENABLE_PR_REVIEW_SUMMARY }}
+  ENABLE_PR_REVIEWER_DECISIONS: ${{ vars.ENABLE_PR_REVIEWER_DECISIONS }}
+  ENABLE_PR_AI_SUMMARY: ${{ vars.ENABLE_PR_AI_SUMMARY }}
+  AZURE_OPENAI_ENDPOINT: ${{ vars.AZURE_OPENAI_ENDPOINT }}
+  AZURE_OPENAI_DEPLOYMENT: ${{ vars.AZURE_OPENAI_DEPLOYMENT }}
+  REQUIRE_CHANGE_TICKETS: ${{ vars.REQUIRE_CHANGE_TICKETS }}
+  ROLLING_PR_MERGE_STRATEGY: ${{ vars.ROLLING_PR_MERGE_STRATEGY }}
+
+jobs:
+  ad:
+    name: Backup Active Directory
+    if: vars.ENABLE_WORKLOAD_AD == 'true'
+    runs-on: ad
+    permissions:
+      contents: write   # push drift/ad
+    timeout-minutes: 60
+    outputs:
+      changed: ${{ steps.backup.outputs.CHANGE_DETECTED }}
+      sync: ${{ steps.backup.outputs.ROLLING_PR_SYNC_REQUIRED }}
+    steps:
+      - name: Checkout
+        shell: bash
+        env:
+          FORGE_TOKEN: ${{ github.token }}
+        run: |
+          git init -q .
+          git remote remove origin 2>/dev/null || true
+          git remote add origin "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY.git"
+          git config http.extraheader "AUTHORIZATION: basic $(printf 'x-access-token:%s' "$FORGE_TOKEN" | base64 | tr -d '\n')"
+          git fetch --quiet --prune --tags origin '+refs/heads/*:refs/remotes/origin/*'
+          git checkout --quiet --force "$GITHUB_SHA"
+          git clean -ffdxq
+
+      - name: Back up and commit Active Directory drift
+        id: backup
+        shell: bash
+        run: python scripts/backup_ad.py
+
+  ad-review:
+    name: Active Directory rolling PR
+    needs: ad
+    if: needs.ad.outputs.changed == '1' || needs.ad.outputs.sync == '1'
+    runs-on: astral
+    permissions:
+      contents: write
+      pull-requests: write
+      issues: write
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        env:
+          FORGE_TOKEN: ${{ github.token }}
+        run: |
+          git init -q .
+          git remote remove origin 2>/dev/null || true
+          git remote add origin "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY.git"
+          git config http.extraheader "AUTHORIZATION: basic $(printf 'x-access-token:%s' "$FORGE_TOKEN" | base64 | tr -d '\n')"
+          git fetch --quiet --prune --tags origin '+refs/heads/*:refs/remotes/origin/*'
+          git checkout --quiet --force "$GITHUB_SHA"
+          git clean -ffdxq
+
+      - name: Rolling PR review
+        env:
+          WORKLOAD: ad
+          ENSURE_PR: "true"
+          FORGE_TOKEN: ${{ github.token }}
+          AZURE_OPENAI_API_KEY: ${{ secrets.AZURE_OPENAI_API_KEY }}
+        run: bash scripts/run_review.sh

@@ -58,7 +58,18 @@ _WORKLOAD_CATEGORIES: dict[str, list[str]] = {
         "PIM Role Policies",
         "Security",
     ],
+    # On-premises Active Directory (export_ad_baseline.ps1). GPOs are XML and have their own tools.
+    "ad": [
+        "Domain",
+        "Organizational Units",
+        "Privileged Groups",
+        "Fine-Grained Password Policies",
+        "Trusts",
+        "Sites",
+    ],
 }
+_GPO_FOLDER = "tenant-state/ad/Group Policy Objects"
+_GPO_MAX_CHARS = 100_000  # a GPO report can be megabytes; keep tool results usable
 
 
 def _validate(workload: str, category: str | None = None, name: str | None = None) -> None:
@@ -453,11 +464,13 @@ class AstralMcpClient:
 
     # -- identity exports (export_entra_identity.py) ----------------------------------------------
 
-    def _identity_objects(self, folder: str, name_key: str, role_name: str = "") -> list[dict[str, Any]]:
-        """JSON objects under tenant-state/entra/<folder>, sorted by name_key, optionally name-filtered."""
+    def _identity_objects(
+        self, folder: str, name_key: str, role_name: str = "", workload: str = "entra"
+    ) -> list[dict[str, Any]]:
+        """JSON objects under tenant-state/<workload>/<folder>, sorted by name_key, optionally name-filtered."""
         needle = (role_name or "").lower()
         objects: list[dict[str, Any]] = []
-        for item in self._source.list_json_recursive(f"tenant-state/entra/{folder}"):
+        for item in self._source.list_json_recursive(f"tenant-state/{workload}/{folder}"):
             try:
                 data = json.loads(self._source.read_file(item["path"]))
             except Exception:
@@ -493,6 +506,70 @@ class AstralMcpClient:
             except Exception:
                 continue
         return result
+
+    # -- on-premises Active Directory (export_ad_baseline.ps1) ------------------------------------
+
+    def _read_json(self, path: str) -> Any:
+        try:
+            return json.loads(self._source.read_file(path))
+        except Exception:
+            return None
+
+    def list_group_policy_objects(self, name: str = "") -> list[dict[str, Any]]:
+        """GPOs in the AD export as {name, id}, sorted by name, optionally name-filtered (substring)."""
+        needle = (name or "").lower()
+        gpos: list[dict[str, Any]] = []
+        for entry in self._source.list_dir(_GPO_FOLDER):
+            filename = str(entry.get("name") or "")
+            if entry.get("isFolder") or not filename.endswith(".xml"):
+                continue
+            gpo_name, _, gpo_id = filename[:-4].rpartition("__")
+            if needle and needle not in gpo_name.lower():
+                continue
+            gpos.append({"name": gpo_name, "id": gpo_id, "path": f"{_GPO_FOLDER}/{filename}"})
+        return sorted(gpos, key=lambda g: (g["name"].casefold(), g["id"]))
+
+    def get_group_policy_object(self, name_or_id: str) -> str:
+        """The Get-GPOReport XML of one GPO, matched by exact name or GUID (cut at 100k characters)."""
+        wanted = (name_or_id or "").strip().lower()
+        if not wanted:
+            raise ValueError("Give a GPO name or GUID.")
+        matches = [g for g in self.list_group_policy_objects() if wanted in (g["name"].lower(), g["id"].lower())]
+        if not matches:
+            raise FileNotFoundError(f"No GPO named or identified '{name_or_id}'. Use list_group_policy_objects.")
+        if len(matches) > 1:
+            raise ValueError(f"{len(matches)} GPOs are named '{name_or_id}'; use one of the ids: {', '.join(g['id'] for g in matches)}")
+        text = self._source.read_file(matches[0]["path"])
+        if len(text) > _GPO_MAX_CHARS:
+            return f"{text[:_GPO_MAX_CHARS]}\n<!-- truncated: {len(text) - _GPO_MAX_CHARS} more characters -->"
+        return text
+
+    def get_ad_organizational_units(self, name: str = "") -> list[dict[str, Any]]:
+        """OUs with their GPO links; each link also carries the GPO name."""
+        names = {g["id"].lower(): g["name"] for g in self.list_group_policy_objects()}
+        units = self._identity_objects("Organizational Units", "DistinguishedName", name, workload="ad")
+        for unit in units:
+            for link in unit.get("GpoLinks") or []:
+                if isinstance(link, dict):
+                    link["GpoName"] = names.get(str(link.get("GpoId") or "").lower(), "")
+        return units
+
+    def get_ad_privileged_groups(self, group_name: str = "") -> list[dict[str, Any]]:
+        """Privileged AD groups with their direct members, optionally filtered by group name."""
+        return self._identity_objects("Privileged Groups", "Name", group_name, workload="ad")
+
+    def get_ad_domain(self) -> dict[str, Any]:
+        """Domain and forest facts, password policies, trusts and sites."""
+        base = "tenant-state/ad"
+        result: dict[str, Any] = {
+            "domain": self._read_json(f"{base}/Domain/Domain.json"),
+            "defaultPasswordPolicy": self._read_json(f"{base}/Domain/DefaultPasswordPolicy.json"),
+            "fineGrainedPasswordPolicies": self._identity_objects("Fine-Grained Password Policies", "Name", workload="ad"),
+            "trusts": self._read_json(f"{base}/Trusts/Trusts.json"),
+        }
+        sites = {name: self._read_json(f"{base}/Sites/{name}.json") for name in ("Sites", "Subnets", "SiteLinks")}
+        result["sites"] = {name: value for name, value in sites.items() if value is not None}
+        return {key: value for key, value in result.items() if value not in (None, [], {})}
 
 
 _clone_lock = threading.Lock()

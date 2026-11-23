@@ -8,6 +8,8 @@ variables:
     value: drift/intune
   - name: DRIFT_BRANCH_ENTRA
     value: drift/entra
+  - name: DRIFT_BRANCH_AD
+    value: drift/ad
   - name: BACKUP_FOLDER
     value: tenant-state
   - name: REPORTS_SUBDIR

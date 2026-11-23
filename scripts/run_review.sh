@@ -2,7 +2,7 @@
 # Rolling-PR review for one workload on GitHub/Gitea Actions: create/refresh the rolling PR (optional),
 # apply reviewer /reject decisions, refresh the summary, queue post-merge remediation.
 # The PR scripts speak Azure DevOps REST; scripts/forge_compat.py translates it (SYSTEM_*/BUILD_* are placeholders).
-# Env: WORKLOAD (intune|entra), FORGE_TOKEN, ENSURE_PR (true|false), feature toggles (safe defaults below).
+# Env: WORKLOAD (intune|entra|ad), FORGE_TOKEN, ENSURE_PR (true|false), feature toggles (safe defaults below).
 set -euo pipefail
 source "$(dirname "$0")/ci.sh"
 : "${WORKLOAD:?WORKLOAD is required}" "${FORGE_TOKEN:?FORGE_TOKEN is required}" "${GITHUB_SERVER_URL:?}"
@@ -12,10 +12,13 @@ export BUILD_BUILDNUMBER="${GITHUB_RUN_NUMBER:-0}" BUILD_BUILDID="${GITHUB_RUN_I
 unset GRAPH_TOKEN  # review never needs tenant access
 
 export BASELINE_BRANCH="${BASELINE_BRANCH:-main}" BACKUP_FOLDER="${BACKUP_FOLDER:-tenant-state}" REPORTS_SUBDIR="${REPORTS_SUBDIR:-reports}"
-export INTUNE_BACKUP_SUBDIR="${INTUNE_BACKUP_SUBDIR:-intune}" ENTRA_BACKUP_SUBDIR="${ENTRA_BACKUP_SUBDIR:-entra}"
+export INTUNE_BACKUP_SUBDIR="${INTUNE_BACKUP_SUBDIR:-intune}" ENTRA_BACKUP_SUBDIR="${ENTRA_BACKUP_SUBDIR:-entra}" AD_BACKUP_SUBDIR="${AD_BACKUP_SUBDIR:-ad}"
 case "$WORKLOAD" in
   intune) DRIFT_BRANCH="${DRIFT_BRANCH_INTUNE:-drift/intune}"; PR_TITLE="Intune drift review (rolling)" ;;
   entra)  DRIFT_BRANCH="${DRIFT_BRANCH_ENTRA:-drift/entra}";  PR_TITLE="Entra drift review (rolling)" ;;
+  # Active Directory is backup-only: there is no restore pipeline, so /reject never reaches the directory.
+  ad)     DRIFT_BRANCH="${DRIFT_BRANCH_AD:-drift/ad}";        PR_TITLE="Active Directory drift review (rolling)"
+          AUTO_REMEDIATE_ON_PR_REJECTION=false; AUTO_REMEDIATE_AFTER_MERGE=false ;;
   *) ci_log error "Unknown WORKLOAD '$WORKLOAD'"; exit 1 ;;
 esac
 

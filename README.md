@@ -44,6 +44,7 @@ The implementation is centered on four Azure DevOps pipelines and an MCP server:
 - `azure-pipelines.yml`: backup/export pipeline with rolling PR management. Runs daily at 02:00 to generate a full tenant snapshot and is also triggered on-demand by the event-driven change probe.
 - `azure-pipelines-review-sync.yml`: 20-minute reviewer-decision sync and post-merge remediation queue.
 - `azure-pipelines-restore.yml`: manual or auto-queued restore pipeline for approved baseline rollback.
+- `azure-pipelines-ad.yml`: opt-in, backup-only export of on-premises Active Directory (GPOs, OUs, privileged groups, password policies, trusts, sites) from a domain-joined self-hosted Windows runner. See [`docs/active-directory-setup.md`](docs/active-directory-setup.md). GitHub and Gitea have the same workflow (`astral-ad-backup.yml`).
 - `azure-pipelines-reports.yml`: report and documentation generation pipeline. Runs nightly at 04:00 and triggers automatically when `tenant-state/intune/**` or `tenant-state/entra/**` changes. Commits generated reports directly to `main`.
 - `infra/mcp-server/`: Azure Container Apps-hosted MCP server exposing tenant state and drift history to AI assistants via natural-language queries.
 
@@ -120,6 +121,7 @@ Current scope behavior:
 - `tests/`: focused unit coverage for the Python helpers.
 - `tenant-state/intune`: committed Intune JSON export.
 - `tenant-state/entra`: committed Entra JSON export.
+- `tenant-state/ad`: committed on-premises Active Directory export (opt-in).
 - `tenant-state/reports/intune`: Intune CSV/Markdown reports.
 - `tenant-state/reports/entra`: Entra CSV/Markdown reports.
 - `prod-as-built.md`: generated as-built document source.

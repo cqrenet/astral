@@ -237,7 +237,7 @@ def _tool(fn):
 
 @_tool
 def list_workloads() -> str:
-    """List available ASTRAL workloads (intune, entra)."""
+    """List available ASTRAL workloads (intune, entra, ad)."""
     return _jsonify(_get_client().list_workloads())
 
 
@@ -246,7 +246,7 @@ def list_categories(workload: str) -> str:
     """List policy categories for a workload.
 
     Args:
-        workload: Either "intune" or "entra".
+        workload: "intune", "entra" or "ad" (on-premises Active Directory).
     """
     return _jsonify(_get_client().list_categories(workload))
 
@@ -256,7 +256,7 @@ def list_policies(workload: str, category: str) -> str:
     """List policies in a category.
 
     Args:
-        workload: Either "intune" or "entra".
+        workload: "intune", "entra" or "ad".
         category: A category name (e.g. "Compliance Policies", "Conditional Access").
     """
     return _jsonify(_get_client().list_policies(workload, category))
@@ -267,7 +267,7 @@ def get_policy(workload: str, category: str, name: str) -> str:
     """Retrieve the current JSON configuration of a specific policy.
 
     Args:
-        workload: Either "intune" or "entra".
+        workload: "intune", "entra" or "ad".
         category: A category name.
         name: Policy file name without the .json extension.
     """
@@ -279,7 +279,7 @@ def get_policy_history(workload: str, category: str, name: str, limit: int = 10)
     """Get Git commit history for a specific policy.
 
     Args:
-        workload: Either "intune" or "entra".
+        workload: "intune", "entra" or "ad".
         category: A category name.
         name: Policy file name without the .json extension.
         limit: Maximum number of commits to return (default 10).
@@ -292,7 +292,7 @@ def search_policies(workload: str, query: str) -> str:
     """Search policies by name across all categories in a workload.
 
     Args:
-        workload: Either "intune" or "entra".
+        workload: "intune", "entra" or "ad".
         query: Case-insensitive substring to match against policy names.
     """
     return _jsonify(_get_client().search_policies(workload, query))
@@ -303,7 +303,7 @@ def get_recent_drift(workload: str, hours: int = 24) -> str:
     """Get recent Git commits (drift) for a workload.
 
     Args:
-        workload: Either "intune" or "entra".
+        workload: "intune", "entra" or "ad".
         hours: Lookback window in hours (default 24).
     """
     return _jsonify(_get_client().get_recent_drift(workload, hours))
@@ -511,6 +511,86 @@ def get_security_settings() -> str:
     return _jsonify(result)
 
 
+@_tool
+def list_group_policy_objects(name: str = "") -> str:
+    """List on-premises Active Directory Group Policy Objects (GPOs) from the ASTRAL export.
+
+    Args:
+        name: Optional case-insensitive substring of the GPO display name. Omit to list all.
+
+    Returns name and GUID for each GPO. Use get_group_policy_object for the settings.
+    Requires the optional Active Directory workload (docs/active-directory-setup.md).
+    """
+    result = _get_client().list_group_policy_objects(name)
+    if not result:
+        return "No GPOs found. The Active Directory workload may not be enabled or exported yet."
+    return _jsonify(result)
+
+
+@_tool
+def get_group_policy_object(name_or_id: str) -> str:
+    """Get the settings report (XML, as produced by Get-GPOReport) of one GPO.
+
+    Args:
+        name_or_id: Exact GPO display name or GPO GUID (see list_group_policy_objects).
+
+    The report lists the computer and user settings, the links, the security filtering and the WMI filter.
+    Very large reports are cut after 100,000 characters.
+
+    Use this to answer questions like:
+    - "What does the GPO 'Workstation Baseline' configure?"
+    - "Who is the GPO scoped to (security filtering)?"
+    """
+    return _get_client().get_group_policy_object(name_or_id)
+
+
+@_tool
+def get_ad_organizational_units(name: str = "") -> str:
+    """List Active Directory organizational units with their ordered GPO links.
+
+    Args:
+        name: Optional case-insensitive substring of the OU distinguished name.
+
+    Each link shows the GPO name, whether it is enabled and enforced, and its order. Also shows
+    block inheritance and accidental-deletion protection.
+
+    Use this to answer questions like:
+    - "Which GPOs apply to the Workstations OU?"
+    - "Which OUs block inheritance?"
+    - "Where is GPO X linked?"
+    """
+    result = _get_client().get_ad_organizational_units(name)
+    return _jsonify(result) if result else "No organizational units found. The Active Directory workload may not be exported yet."
+
+
+@_tool
+def get_ad_privileged_groups(group_name: str = "") -> str:
+    """List privileged Active Directory groups (Domain Admins, Enterprise Admins, ...) and their direct members.
+
+    Args:
+        group_name: Optional case-insensitive substring of the group name (e.g. "Domain Admins").
+
+    Use this to answer questions like:
+    - "Who is in Domain Admins?"
+    - "Are there service accounts in Schema Admins?"
+    """
+    result = _get_client().get_ad_privileged_groups(group_name)
+    return _jsonify(result) if result else "No privileged groups found. The Active Directory workload may not be exported yet."
+
+
+@_tool
+def get_ad_domain() -> str:
+    """Active Directory domain overview: functional levels, FSMO holders, domain controllers, password policies, trusts, sites.
+
+    Use this to answer questions like:
+    - "What is the minimum password length and lockout threshold?"
+    - "Which trusts exist, and is SID filtering on?"
+    - "Which domain controller holds the PDC emulator role?"
+    """
+    result = _get_client().get_ad_domain()
+    return _jsonify(result) if result else "No Active Directory export found. The workload may not be enabled yet."
+
+
 @mcp.prompt()
 def audit_briefing(workload: str = "intune") -> str:
     """Generate a natural-language audit briefing for recent drift."""
@@ -547,6 +627,24 @@ def security_posture_briefing() -> str:
         "6. RECENT DRIFT: Call get_recent_drift(workload='entra', hours=168) for the last 7 days. "
         "Highlight CA policy changes, role assignment changes, and auth method changes.\n\n"
         "Summarize findings with a risk rating (Low/Medium/High) per section and recommended actions."
+    )
+
+
+@mcp.prompt()
+def ad_security_briefing() -> str:
+    """Generate a security briefing for on-premises Active Directory."""
+    return (
+        "You are an ASTRAL Active Directory security analyst. Brief on:\n\n"
+        "1. PRIVILEGED GROUPS: Call get_ad_privileged_groups(). Flag service or shared accounts in Domain Admins, "
+        "Enterprise Admins or Schema Admins (Schema Admins should normally be empty), and unexpectedly large groups.\n\n"
+        "2. PASSWORD POLICY: Call get_ad_domain(). Flag short minimum length, no lockout threshold, reversible "
+        "encryption, and fine-grained policies with a weaker setting than the default.\n\n"
+        "3. TRUSTS: In get_ad_domain(), flag trusts without SID filtering or selective authentication.\n\n"
+        "4. GPO LINKS: Call get_ad_organizational_units(). Flag blocked inheritance, disabled links and enforced links "
+        "on top-level OUs. Use list_group_policy_objects() to find GPOs that are not linked anywhere.\n\n"
+        "5. RECENT DRIFT: Call get_recent_drift(workload='ad', hours=168). Say who changed what; commits are "
+        "attributed to the administrator from the domain controller audit log when it was available.\n\n"
+        "Summarize with a risk rating (Low/Medium/High) per section and recommended actions."
     )
 
 

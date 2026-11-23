@@ -16,6 +16,7 @@ env:
   BASELINE_BRANCH: ${{ vars.BASELINE_BRANCH }}
   DRIFT_BRANCH_INTUNE: ${{ vars.DRIFT_BRANCH_INTUNE }}
   DRIFT_BRANCH_ENTRA: ${{ vars.DRIFT_BRANCH_ENTRA }}
+  DRIFT_BRANCH_AD: ${{ vars.DRIFT_BRANCH_AD }}
   USER_NAME: ${{ vars.USER_NAME }}
   USER_EMAIL: ${{ vars.USER_EMAIL }}
   PR_DECISION_ALLOWED_REVIEWERS: ${{ vars.PR_DECISION_ALLOWED_REVIEWERS }}
@@ -37,7 +38,7 @@ jobs:
     strategy:
       max-parallel: 1
       matrix:
-        workload: [intune, entra]
+        workload: [intune, entra, ad]
     permissions:
       contents: write
       pull-requests: write
@@ -60,9 +61,15 @@ jobs:
       - name: Rolling PR review
         env:
           WORKLOAD: ${{ matrix.workload }}
-          WORKLOAD_ENABLED: ${{ matrix.workload == 'intune' && vars.ENABLE_WORKLOAD_INTUNE || vars.ENABLE_WORKLOAD_ENTRA }}
+          ENABLE_WORKLOAD_INTUNE: ${{ vars.ENABLE_WORKLOAD_INTUNE }}
+          ENABLE_WORKLOAD_ENTRA: ${{ vars.ENABLE_WORKLOAD_ENTRA }}
+          ENABLE_WORKLOAD_AD: ${{ vars.ENABLE_WORKLOAD_AD }}
           FORGE_TOKEN: ${{ github.token }}
           AZURE_OPENAI_API_KEY: ${{ secrets.AZURE_OPENAI_API_KEY }}
         run: |
-          if [ "$WORKLOAD_ENABLED" = "false" ]; then echo "$WORKLOAD disabled"; exit 0; fi
+          # AD is opt-in (needs its own runner); Intune and Entra are on unless set to false.
+          flag="ENABLE_WORKLOAD_${WORKLOAD^^}"
+          enabled="${!flag:-}"
+          if [ "$WORKLOAD" = ad ] && [ "$enabled" != "true" ]; then echo "ad disabled"; exit 0; fi
+          if [ "$enabled" = "false" ]; then echo "$WORKLOAD disabled"; exit 0; fi
           bash scripts/run_review.sh
